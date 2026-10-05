@@ -21,39 +21,54 @@ Control Plane 是 Controller 节点上的常驻 HTTP 服务，负责：
 
 ### 1.1 Base URL
 
-本地示例：
+对外入口（唯一）：`https://<host>/api/cp`（nginx 443；80 仅 301 升级）。
+
+本地调试（在控制面服务器上直连回环映射）：
 
 ```text
 http://localhost:4839
 ```
 
+> 入口使用 TOFU 自签证书（`control_plane/state/certs/server.crt`，控制面启动时自动生成），
+> curl 需加 `-k`，或 `--cacert control_plane/state/certs/server.crt` 固定信任该证书本体。
+
 如果你通过别的端口或域名暴露，请替换为实际地址。
 
-### 1.2 环境变量文件
+### 1.2 环境变量
 
-容器通过 compose 读取：
+控制面不解析 `.env` 文件，全部通过容器环境变量（`os.getenv(...)`）读取。仓库根的
+`docker-compose.yml` 目前只注入 `TZ`；按需追加的开关（例如开发模式
+`KURRENT_CP_INSECURE=1`，仅限本地、生产严禁）直接加到该服务的 `environment:` 下，
+或用 `docker compose --env-file` 传入。
 
-```yaml
-env_file:
-  - ./control_plane/control_plane.env
-```
+### 1.3 鉴权（认证器链）
 
-Control Plane 代码不会主动解析 `.env` 文件，而是通过 `os.getenv(...)` 读取容器环境变量。
+外部访问统一经 nginx 443 入口（唯一对外入口）；控制面 4839 仅绑本机回环。除
+`GET /healthz` 与 iPXE 引导链端点（`/boot-vars`、`/devices/report`、`/devices/challenge`）
+外，管理面接口要求认证——三种凭据**串行短试**（首个成功即止；凭据无效即 `401`，不降级）：
 
-### 1.3 鉴权
+| 凭据 | 载体 | 说明 |
+|---|---|---|
+| mTLS 客户端证书 | 443 双向 TLS | `kurrent init` 签发的 admin 证书（CN=用户名、O=组）；CLI 自动发现 `control_plane/state/admin.conf` 使用（脱离仓库的二进制由 `kurrent credentials install` 装一份自包含快照到 `~/.kurrent`，发现链垫底）。nginx 校验证书链（内部 CA）后透传 DN，控制面按 CN/O 识别身份 |
+| 管理 token | `Authorization: Bearer <token>` | `kurrent token create --usage admin` 签发（台账只存 sha256 摘要，TTL 内有效）；供脚本调用与 WebUI 登录 |
+| 会话 Cookie | `kurrent_session` | 以证书或管理 token 经 `POST /session` 换取（HttpOnly 签名会话，TTL 7 天滑动续期）；浏览器登录态 |
 
-如果环境变量 `IPXE_CP_TOKEN` 为空，则 Control Plane 不启用鉴权。  
-如果设置了 `IPXE_CP_TOKEN`，则除了 `GET /healthz` 外，其余所有接口都必须带：
+授权（RBAC 最小版）：读请求（GET）只需**已认证**（不做组校验）；写请求
+（POST/PUT/PATCH/DELETE）需 admin 组，否则 `403`。组件通道语义不变：`/enroll/renew` 由
+nginx 强制组件证书，引导链端点走各自校验。
 
-```http
-Authorization: Bearer <IPXE_CP_TOKEN>
-```
+开发模式：`KURRENT_CP_INSECURE=1` 时放行全部请求（身份 insecure/admin），仅限本地
+开发；生产严禁——不存在“未配置凭据即放行”的空放行路径。
 
 示例：
 
 ```bash
-export BASE_URL=http://localhost:4839
-export TOKEN=replace-me
+# 本机（控制面服务器）：CLI 自动发现 admin.conf，经 443 mTLS 认证
+kurrent agents list
+
+# 脚本：管理 token（kurrent token create --usage admin）
+export BASE_URL=https://<host>/api/cp
+export TOKEN=<admin-token>
 ```
 
 带鉴权的 curl 写法：
@@ -65,22 +80,27 @@ curl -s "$BASE_URL/workers" \
 
 ---
 
-## 2. 文件即真相
+## 2. 状态与配置文件
 
-当前 Control Plane 的状态文件分工如下：
+当前 Control Plane 的状态与配置分工如下（容器内路径；宿主对应 `control_plane/state/` 与 `control_plane/config/`）：
 
 | 文件 | 含义 |
 |---|---|
 | `config/agents.yml` | Agent 节点清单与调度角色 |
-| `state/workers.yml` | Worker 存储台账 |
+| `state/devices.yml` | 设备台账（设备池 / 绑定 / 指纹 / 公钥）——**绑定关系唯一权威**（`bound_worker_id`） |
+| `state/workers.yml` | Worker 台账（计算身份 / 系统盘 / 默认启动） |
+| `state/credentials.yml` | NVMe-oF 认证密钥库（DHHC-1，按 Worker 跟盘） |
+| `state/credential-push.yml` | 凭据推送状态台账（逐 Agent 送达结果，对账与投影用，见 7.7） |
 | `state/masters.yml` | 母盘标签登记台账（os / os_version 备注，见 6.4） |
-| `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` 绑定唯一真相 |
-| `state/operations.jsonl` | 控制面操作轨迹 |
+| `state/settings.json` | 运行时设置（注册窗口 / 验签强制开关） |
+| `state/operations.jsonl` | 控制面操作轨迹（含 actor） |
+| `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` 绑定（**派生视图**，权威在设备台账） |
 
 说明：
 
-- `workers.yml` **不记录 MAC**；
-- compose 需要把 `dnsmasq` 目录挂进容器，不要只挂载单个 `dhcp-hosts.conf` 文件；Control Plane 写入时会用临时文件做 atomic replace；
+- `workers.yml` **不记录 MAC**——MAC 与绑定关系统一由设备台账持有，Worker 侧只是投影；
+- compose 把整个 `dnsmasq/` 目录挂进控制面容器（控制面还要往该目录写 `dnsmasq.conf`）；
+- 写 `dhcp-hosts.conf` 采用**截断写**（保持 inode），不用临时文件做 atomic replace：该文件以文件级 bind mount 进 dnsmasq 容器，换掉 inode 后容器读到的仍是旧文件；
 - `dnsmasq/dhcp-hosts.conf` 一行一个绑定，格式固定为：
 
 ```text
@@ -94,6 +114,9 @@ curl -s "$BASE_URL/workers" \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
+| `GET` | `/whoami` | 当前请求身份（认证器链结果，见 1.3） |
+| `POST` | `/session` | 凭据换会话 Cookie（登录，见 1.3） |
+| `DELETE` | `/session` | 登出（清除会话 Cookie，见 1.3） |
 | `GET` | `/boot-vars` | iPXE 启动变量动态注入，不鉴权 |
 | `GET` | `/devices/report` | iPXE 设备信息上报（不鉴权，11 字段，见 16.6） |
 | `GET` | `/devices/challenge` | 一次性 nonce 签发（不鉴权，挑战-响应，见 5.2） |
@@ -103,7 +126,7 @@ curl -s "$BASE_URL/workers" \
 | `POST` | `/devices/import` | 批量导入设备清单（见 16.4） |
 | `DELETE` | `/devices/{mac}` | 注销设备（吊销，见 16.5） |
 | `GET` | `/settings/registration-window` | 查询注册窗口状态（见 5.1） |
-| `POST` | `/settings/registration-window` | 开启注册窗口（TTL 1-60 分钟硬上限，见 5.1） |
+| `POST` | `/settings/registration-window` | 开启注册窗口（TTL 1-60 分钟硬上限；可选放行额度 `max_devices` 1-1000 台，见 5.1） |
 | `DELETE` | `/settings/registration-window` | 提前关闭注册窗口（见 5.1） |
 | `GET` | `/settings/enforcement` | 查询设备身份验签强制开关（见 5.1） |
 | `PUT` | `/settings/enforcement` | 切换设备身份验签强制开关（见 5.1） |
@@ -112,6 +135,8 @@ curl -s "$BASE_URL/workers" \
 | `POST` | `/agents/probe` | 探测 Agent 并自动推导注册参数（预览，不写文件） |
 | `PUT` | `/agents/{agent_id}` | 更新 Agent 配置（id 不可改） |
 | `POST` | `/pki/tokens` | 签发集群级通用 bootstrap token（不绑节点，TTL 内可复用，见 6.5） |
+| `GET` | `/pki/tokens` | 列出未过期 token 台账（无明文/hash，见 6.5） |
+| `DELETE` | `/pki/tokens/{token_id}` | 吊销 token：删条目即失效（见 6.5） |
 | `DELETE` | `/agents/{agent_id}` | 删除 Agent 台账（含母盘标签清理，见 6.6） |
 | `GET` | `/agents/{agent_id}/luns` | 列出指定 Agent 上的 iSCSI target/LUN |
 | `GET` | `/masters` | 聚合列出全部存储节点上的母盘清单（合并登记标签，供克隆选盘） |
@@ -124,7 +149,7 @@ curl -s "$BASE_URL/workers" \
 | `POST` | `/workers` | 注册 Worker 身份（hostname 绑定；`mac` 可选，传了直接绑定设备） |
 | `POST` | `/workers/batch` | 批量创建 Worker（数量 + 命名规则，逐项独立，`macs` 可选直接绑定，见 7.6） |
 | `POST` | `/workers/{worker_id}/luns/disk` | 给指定 Worker 创建系统盘 LUN |
-| `POST` | `/workers/luns/disk/batch` | 批量给多个 Worker 创建系统盘（每项指定存储节点） |
+| `POST` | `/workers/luns/disk/batch` | 批量给多个 Worker 创建系统盘（逐项点名节点，或 `workers` 交给控制面放置；`dry_run` 出计划） |
 | `DELETE` | `/workers/{worker_id}/luns/disk/{os_tag}` | 删除 Worker 单个系统盘（保留/删除 .img 文件） |
 | `PUT` | `/workers/{worker_id}/default-disk` | 设置 Worker 默认启动配置（默认盘 os_tag / 菜单项 / 超时） |
 | `PUT` | `/workers/{worker_id}/mac` | 修改 Worker 的 MAC 绑定（更新 dnsmasq 绑定并 HUP 重载，审计旧/新 MAC，见 7.5） |
@@ -133,7 +158,7 @@ curl -s "$BASE_URL/workers" \
 | `GET` | `/workers/{worker_id}/status` | 查询 Worker 台账与实时状态 |
 | `DELETE` | `/workers/{worker_id}` | 删除 Worker |
 | `POST` | `/workers/delete/batch` | 批量删除 Worker（逐项独立，成功/失败汇总） |
-| `PUT` | `/workers/{worker_id}/credential` | 设置/更新 NVMe-oF 认证密钥（DHHC-1 自检，见 7.7） |
+| `PUT` | `/workers/{worker_id}/credential` | 设置/轮换 NVMe-oF 认证密钥（DHHC-1 自检；nvmet 建盘已自动签发，见 7.7） |
 | `DELETE` | `/workers/{worker_id}/credential` | 删除 NVMe-oF 认证密钥（吊销认证，见 7.7） |
 | `GET` | `/workers/{worker_id}/credential` | 查询凭据元数据（不返回明文，见 7.7） |
 | `GET` | `/operations` | 读取操作日志 |
@@ -187,7 +212,7 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 | `base_nqn` | 默认启动盘（同选盘规则）的盘 NQN 前缀（C3 拼接：盘 NQN 由控制面按统一模板 `base:worker_id.os.<os_tag>` 生成，固件侧 `sanboot nvme://<ip>:4420/${base-nqn}:<worker>.<os>.<os-tag>` 拼装消费 = 盘记录权威值）；盘记录缺 `nqn` 时不返回（不兼容遗留、不派生）；Worker 无系统盘时不返回 |
 | `base_iqn` | `workers.yml` 中该 Worker 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 `iqn` 去掉最后一个 `:` 后的前缀——盘标识权威 = NQN，IQN 由盘 NQN 派生；Worker 无系统盘时**不返回**（iPXE 沿用 `boot.ipxe.cfg` 静态默认值） |
 | `storager_ip` | 默认启动盘（同上选盘规则）的 `agent` -> `agents.yml` 中该 Agent 的 `storager_ip`（数据面地址，NVMe-oF 引导与 iSCSI 安装器共用）；无系统盘时不返回 |
-| `iscsi_sep` | iSCSI root **连接符**（`${storager-ip}` 与 `${base-iqn}` 之间的分隔字段，安装器 iSCSI 拼装消费），root-path 拼装由 iPXE 侧完成。**仅 stgt / LIO 后端返回**：stgt 后端为 `:::1:`（lun 占位 1），LIO 后端为 `::::`（空占位）；后端类型优先读 `agents.yml` 该 Agent 的 `tags`（含 `nvmet` / `lio` / `stgt` 标记），未标记时查询 Agent `/capabilities` 的 `backend` 字段，查询失败默认 stgt 格式；**nvmet 后端不下发**（menu 安装器项 `isset ${iscsi-sep}` 守卫跳过）；无系统盘时不返回 |
+| `iscsi_sep` | iSCSI root **连接符**（`${storager-ip}` 与 `${base-iqn}` 之间的分隔字段，安装器 iSCSI 拼装消费），root-path 拼装由 iPXE 侧完成。**仅 stgt / LIO 后端返回**：stgt 后端为 `:::1:`（lun 占位 1），LIO 后端为 `::::`（空占位）；后端类型**实时查询 Agent `/capabilities` 的 `backend` 字段**（节点自报，能力即真相），未登记 / 查询失败 / 取值非法则默认 stgt 格式；**不由 `agents.yml` 的 `tags` 推导**（tags 只作人工标签，否则标签与实况漂移时会按过期值拼出错连接符）；**nvmet 后端不下发**（menu 安装器项 `isset ${iscsi-sep}` 守卫跳过）；无系统盘时不返回 |
 | `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker 且密钥库有条目时注入**，无密钥 / 未绑定 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（C3 已启用：secret 条件化拼装，无密钥走明文连接） |
 | `hostnqn` | 该 Worker 的发起端 Host NQN（`KURRENT_CP_NQN_BASE` + `:host.<worker_id>`，与 nvmet-host 登记的 host 条目一致）；**已绑定 Worker 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件 0011 补丁支持 `hostnqn` 设置） |
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），固件用本变量拼 `nvme://...:${hostname}.${os}`，支持新系统无需改脚本；与盘 NQN 后缀同源。Worker 无系统盘时不返回（reboot 循环等待建盘） |
@@ -204,8 +229,8 @@ hostname 未命中或未传 -> mac -> devices.yml（设备台账）-> bound_work
 未识别且 mac 已传 ->
   - 设备在池中（pooled）-> reboot 循环（menu-default=reboot + 短超时），等待绑定
   - 设备已吊销（revoked）-> 空脚本（菜单停留）
-  - 未知 MAC + 注册窗口开启且带有效公钥 -> 入设备池（见下「注册窗口期注册」），返回 reboot 循环
-  - 未知 MAC + 窗口关闭 / 无公钥 -> 空脚本（菜单停留；上报只记指纹不入池）
+  - 未知 MAC + 注册窗口开启 + 额度未用尽 + 带有效公钥 -> 入设备池（见下「注册窗口期注册」），返回 reboot 循环
+  - 未知 MAC + 窗口关闭 / 额度用尽 / 无公钥 -> 空脚本（菜单停留；上报只记指纹不入池）
 ```
 
 ### 默认启动项规则
@@ -229,19 +254,20 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 
 ### 注册窗口期注册（Zero-touch Provisioning）
 
-新设备开机时没有身份，iPXE 先 `chain` `/devices/report`（11 字段上报 + 可选 `pubkey`，见 16.6）再请求 `/boot-vars`。**注册只在窗口期**（2026-08-21 裁定）：仅当注册窗口开启且上报携带有效 ECDSA P-256 公钥时，未知 MAC 才被收进设备池；窗口关闭后上报只更新指纹、不入池（无窗口外注册通道，代码层不可配永久）。
+新设备开机时没有身份，iPXE 先 `chain` `/devices/report`（11 字段上报 + 可选 `pubkey`，见 16.6）再请求 `/boot-vars`。**注册只在窗口期**（2026-08-21 裁定）：仅当注册窗口开启、放行额度未用尽且上报携带有效 ECDSA P-256 公钥时，未知 MAC 才被收进设备池；窗口关闭后上报只更新指纹、不入池（无窗口外注册通道，代码层不可配永久）。
 
-1. `GET /devices/report`：未知 MAC + 窗口开启 + 带 `pubkey` → 写入 `state/devices.yml`（`state=pooled`，指纹入库，`key_hash` 填充，`source=ipxe`）
+1. `GET /devices/report`：未知 MAC + 窗口开启 + 额度未用尽 + 带 `pubkey` → 写入 `state/devices.yml`（`state=pooled`，指纹入库，`key_hash` 填充，`source=ipxe`）
 2. `GET /boot-vars`：MAC 在池中未绑定 → 返回 `menu-default=reboot` + 短超时，循环重启等待管理员绑定
 3. 管理员将设备绑定到 Worker（WebUI / API，单绑 16.7、批量预览/执行 16.9/16.10）后，下次启动即按 Worker 配置正常引导
 
-存量设备密钥认领：已入池设备在窗口期内带公钥上报即填充 `key_hash`（认领完成）；密钥不一致拒绝覆盖（吊销/重注册走删登记流程）。认领完成后建议开启验签强制（见 5.1）。
+存量设备密钥认领：已入池设备在窗口期内带公钥上报即填充 `key_hash`（认领完成）；密钥不一致拒绝覆盖（吊销/重注册走删登记流程）。认领只看窗口期、不受放行额度约束。认领完成后建议开启验签强制（见 5.1）。
 
 控制项：
 
 | 项 | 默认 | 说明 |
 |---|---:|---|
 | 注册窗口 | 关闭 | 部署期用 `POST /settings/registration-window` 开启（TTL 1-60 分钟硬上限，到期自动关闭），见 5.1 |
+| 放行额度 | 不限 | 开窗时可选 `max_devices`（1-1000 台），窗口期内自动入池设备数达到上限即停止放行，见 5.1 |
 | 验签强制 | 关闭 | `GET/PUT /settings/enforcement`：开启后 `/boot-vars` 只向验签通过的已绑定设备下发，见 5.1 |
 | `IPXE_CP_AUTO_BOOT_TIMEOUT` | `1` | reboot 循环的菜单超时（毫秒） |
 
@@ -389,40 +415,53 @@ agents:
 
 #### 说明
 
-注册窗口是部署期的受控注册通道（2026-08-21 裁定取代原 `auto-register` 永久开关，旧端点已删除）：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 硬上限 60 分钟（代码层不可配永久），到期自动关闭（懒计算，状态以查询结果为准）。全部端点需 `Authorization: Bearer`。
+注册窗口是部署期的受控注册通道（2026-08-21 裁定取代原 `auto-register` 永久开关，旧端点已删除）：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 硬上限 60 分钟（代码层不可配永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——密钥认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
 
 验签强制开关（过渡期兼容）：关闭时无密钥设备照现状放行（防冒领边界）；开启后 `/boot-vars` 对已绑定设备执行注入四条件第 4 条——无 `key_hash` → `no_key` 拒绝；缺 `nonce`/`sig` → `missing_sig` 拒绝；重放或签名无效 → 拒绝。已认领设备带无效签名在过渡期同样拒绝（伪造签名不放行）。建议全部存量设备完成密钥认领后再开启。
 
 #### GET /settings/registration-window
 
-查询注册窗口状态（无记录/已过期 → `open=false`）。
+查询注册窗口状态（无记录/已过期 → `open=false`）。时间维度与额度维度并列投影：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `open` | bool | 窗口是否开启 |
+| `open` | bool | 窗口是否开启（时间维度；额度用尽不影响该值） |
 | `opened_at` | str | 开启时刻 ISO8601（未开启为 `null`） |
 | `ttl_minutes` | int | 开启时配置的 TTL 分钟数（未开启为 `null`） |
 | `closes_at` | str | 预计关闭时刻 ISO8601（未开启为 `null`） |
 | `remaining_seconds` | int | 剩余秒数（未开启为 `0`） |
+| `max_devices` | int \| null | 放行额度（台）；`null` = 不限 |
+| `admitted` | int | 窗口期内已放行设备数（派生值，见下） |
+| `remaining_devices` | int \| null | 剩余额度；`null` = 不限 |
+| `quota_exhausted` | bool | 额度是否已用尽（用尽后新设备不再入池，窗口记录不主动清除） |
+
+`admitted` 为**派生值**，不存计数器：窗口期内设备台账中 `source == "ipxe"` 且 `first_seen >= opened_at` 的条目数。因此管理员手动登记（`POST /devices`，`source=manual`）与清单导入不占额度，窗口开启前的存量设备（含仅认领密钥者）也不计入。
 
 ```json
-{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799}
+{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false}
 ```
 
 #### POST /settings/registration-window
 
-开启注册窗口（状态码 201）。已开启 → 409（先关闭再开）；过期残留记录可直接重开（覆盖）。写入操作日志（`settings.registration_window`）。
+开启注册窗口（状态码 201）。已开启 → 409（先关闭再开）；过期残留记录可直接重开（覆盖），重开后额度按新的开启时刻重新派生。写入操作日志（`settings.registration_window`）。
 
 **请求体**：
 
 | 字段 | 必填 | 类型 | 说明 |
 |---|---|---|---|
 | `ttl_minutes` | 是 | int | 1-60（超出返回 400） |
+| `max_devices` | 否 | int \| null | 放行额度（台），1-1000（超出返回 400）；省略/`null` = 不限，仍受 TTL 约束 |
 
 ```bash
-curl -X POST http://<host>:4839/settings/registration-window \
-  -H "Authorization: Bearer $CP_TOKEN" -H "Content-Type: application/json" \
+# 只限时
+curl -X POST "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"ttl_minutes": 30}'
+
+# 限时 + 限台数：最多放行 20 台新设备入池
+curl -X POST "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"ttl_minutes": 30, "max_devices": 20}'
 ```
 
 **响应**：同 GET（开启后的窗口状态）。
@@ -432,8 +471,8 @@ curl -X POST http://<host>:4839/settings/registration-window \
 提前关闭注册窗口（从未开启/无记录 → 409）。写入操作日志（`settings.registration_window`）。
 
 ```bash
-curl -X DELETE http://<host>:4839/settings/registration-window \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X DELETE "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **响应**：`{"open": false}`
@@ -449,8 +488,8 @@ curl -X DELETE http://<host>:4839/settings/registration-window \
 | `enabled` | 是 | bool | `true` = 开启强制（无密钥/无签名设备拒绝引导） |
 
 ```bash
-curl -X PUT http://<host>:4839/settings/enforcement \
-  -H "Authorization: Bearer $CP_TOKEN" -H "Content-Type: application/json" \
+curl -X PUT "$BASE_URL/settings/enforcement" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 ```
 
@@ -489,6 +528,10 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 列出 `config/agents.yml` 里配置的 Agent。默认会实时访问 Agent 的 `/healthz` 和 `/capabilities`。
 
+`health` 三态：`ok`（健康）；`degraded`（agent 在线但数据面未就绪——nvmet 后端为宿主服务不可达或 configfs 未就绪，具体原因见 `error` 字段）；`error`（agent 不可达或能力探测失败）。`live=false` 时不探测、无 `health` 字段。
+
+身份分层：`id` 为机器身份（正常流程由 `kurrent join` 自动生成随机短标识——12 位 hex，与盘 os_tag 同构，enroll 自动登记；手工登记见 6.1，示例中的可读 id 仅为示意）；`remark` 为备注（人类识别用，来自节点声明 `metadata.remark`，WebUI 卡片展示、编辑表单或 6.3 可改）。
+
 ### Query 参数
 
 | 参数 | 必填 | 默认值 | 说明 |
@@ -523,10 +566,8 @@ curl -s "$BASE_URL/agents?live=false" \
       "cd": false
     },
     "enabled": true,
-    "tags": [
-      "storage",
-      "lio"
-    ],
+    "tags": ["storage"],
+    "remark": "主存储节点",
     "health": "ok",
     "capabilities": {
       "backend": "lio",
@@ -559,8 +600,9 @@ curl -s "$BASE_URL/agents?live=false" \
 | `base_url` | 是 | Agent 控制面 API 地址，须以 `http://` 或 `https://` 开头，末尾 `/` 自动去除 |
 | `storager_ip` | 否 | 数据面地址（业务网段 IP，协议中立）。缺省时回退为 `base_url` 的主机名 |
 | `role` | 否 | 角色：`disk`=可建系统盘（存储节点），`cd`=可挂载 ISO（光驱节点）；默认 `{disk: false, cd: false}` |
-| `tags` | 否 | 自由标签数组（如 `storage`/`lio`/`stgt`），展示用；`lio`/`stgt` 标记同时参与 `/boot-vars` 连接符推导 |
-| `enabled` | 否 | 是否启用；默认 `true` |
+| `tags` | 否 | 自由标签数组（如 `storage` / `rack-a3`），**纯人工标注 / 展示用**；不参与 `/boot-vars` 连接符推导（后端类型由 `/boot-vars` 实时查 Agent `/capabilities` 判定，见 5.1） |
+| `enabled` | 否 | 是否启用。`false` = **排空**：不再接任何新增盘（自动挑选 / 显式点名 / 直接对该节点建 LUN 一律拒绝），存量盘照常服务、已引导设备不受影响；默认 `true` |
+| `remark` | 否 | 备注（人类识别用，展示性质）；默认空串。正常流程无需手工指定——由节点声明 `metadata.remark` 随 enroll 自动登记（见 6.5.1） |
 
 ### curl
 
@@ -573,8 +615,9 @@ curl -s -X POST "$BASE_URL/agents" \
     "base_url": "http://host.docker.internal:4840",
     "storager_ip": "192.168.1.6",
     "role": {"disk": true, "cd": false},
-    "tags": ["storage", "stgt"],
-    "enabled": true
+    "tags": ["storage"],
+    "enabled": true,
+    "remark": "存储节点 02"
   }'
 ```
 
@@ -587,7 +630,8 @@ curl -s -X POST "$BASE_URL/agents" \
   "storager_ip": "192.168.1.6",
   "role": {"disk": true, "cd": false},
   "enabled": true,
-  "tags": ["storage", "stgt"]
+  "tags": ["storage"],
+  "remark": "存储节点 02"
 }
 ```
 
@@ -604,13 +648,13 @@ curl -s -X POST "$BASE_URL/agents" \
 
 ### 说明
 
-探测 Agent 并自动推导注册参数（**只读预览，不写任何文件**）：经 mTLS（控制面 CA 签发的客户端证书，K8S 同构）调用 Agent `/healthz` + `/capabilities`，按以下规则推导：
+探测 Agent 并自动推导注册参数（**只读预览，不写任何文件**）：经 mTLS（控制面 CA 签发的客户端证书）调用 Agent `/healthz` + `/capabilities`，按以下规则推导：
 
 | 参数 | 推导规则 |
 |---|---|
 | `role.disk` | 恒为 `true`（Agent 即存储节点） |
 | `role.cd` | 取 `capabilities.cd` |
-| `tags` | `["storage", backend]`（`backend` 为 lio / stgt，同时供 `/boot-vars` 连接符推导） |
+| `tags` | `["storage"]`（纯人工标签；后端类型**不写入 tags**，单独以 `backend` 字段返回，`/boot-vars` 实时查 `/capabilities` 判定） |
 | `storager_ip` | 缺省回退 `base_url` 主机名 |
 
 ### 请求体字段
@@ -635,7 +679,7 @@ curl -s -X POST "$BASE_URL/agents/probe" \
 {
   "base_url": "http://host.docker.internal:4840",
   "role": {"disk": true, "cd": false},
-  "tags": ["storage", "stgt"],
+  "tags": ["storage"],
   "storager_ip": "host.docker.internal",
   "enabled": true,
   "backend": "stgt",
@@ -662,17 +706,18 @@ curl -s -X POST "$BASE_URL/agents/probe" \
 
 更新已有 Agent：覆盖 `config/agents.yml` 中对应条目，保存后立即生效（建盘/挂载调度即用新配置）。`id` 不可改（走路径参数）。
 
-适用场景：存储节点配置变动——数据面地址迁移、API 地址变更、停用 / 启用节点。
+适用场景：停用 / 启用节点（排空）、数据面地址迁移、备注与角色调整。**自动登记节点（tags 含 `auto`）的 `base_url` 由节点声明管理**（声明权威，见 6.5.1）：传现值可通过（WebUI 编辑保存的常规形态），传不同值返回 `409`——节点搬家请修改节点 `storager/kurrent.yaml` 的 `spec.agent.advertiseUrl` 后重新 `kurrent join`，renew 自动对齐；手工登记节点仍可在控制面改地址。
 
 ### 请求体字段
 
 | 字段 | 必填 | 说明 |
 |---|---:|---|
-| `base_url` | 是 | Agent 控制面 API 地址，须以 `http://` 或 `https://` 开头，末尾 `/` 自动去除 |
+| `base_url` | 是 | Agent 控制面 API 地址，须以 `http://` 或 `https://` 开头，末尾 `/` 自动去除；自动登记节点**不可改**（见说明） |
 | `storager_ip` | 否 | 数据面地址。缺省时回退为 `base_url` 的主机名 |
 | `role` | 否 | 角色：`disk`=可建系统盘，`cd`=可挂载 ISO；默认 `{disk: false, cd: false}` |
-| `tags` | 否 | 自由标签数组 |
-| `enabled` | 否 | 是否启用；`false` 停用（不再参与建盘/挂载调度与存活探测）；默认 `true` |
+| `tags` | 否 | 自由标签数组（纯人工标注） |
+| `enabled` | 否 | 是否启用。`false` = **排空**：不再接任何新增盘（一律 409），存量盘照常服务、已引导设备不受影响；默认 `true` |
+| `remark` | 否 | 备注（人类识别用，展示性质）；全量覆盖语义，传空串即清除 |
 
 ### curl
 
@@ -684,8 +729,9 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
     "base_url": "http://host.docker.internal:4840",
     "storager_ip": "192.168.1.8",
     "role": {"disk": true, "cd": false},
-    "tags": ["storage", "stgt"],
-    "enabled": true
+    "tags": ["storage"],
+    "enabled": true,
+    "remark": "备存储节点"
   }'
 ```
 
@@ -698,7 +744,8 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
   "storager_ip": "192.168.1.8",
   "role": {"disk": true, "cd": false},
   "enabled": true,
-  "tags": ["storage", "stgt"]
+  "tags": ["storage"],
+  "remark": "备存储节点"
 }
 ```
 
@@ -708,8 +755,9 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
 |---|---|
 | `400` | `base_url` 非 http(s) 开头 |
 | `404` | Agent `id` 不存在 |
+| `409` | 自动登记节点（tags 含 `auto`）修改 `base_url`（地址由节点声明管理，错误信息指明改法） |
 
-> **编辑探测**：编辑场景建议先调 `POST /agents/probe`（6.2）验证新地址可达再保存——探测经控制面 mTLS 客户端证书鉴权（身份绑定组件 CA，K8S 同构），无需 token。
+> **编辑探测**：编辑场景建议先调 `POST /agents/probe`（6.2）验证地址可达再保存——探测经控制面 mTLS 客户端证书鉴权（身份绑定组件 CA），无需 token。自动登记节点的地址只读，探测按现值执行。
 
 ---
 
@@ -769,17 +817,27 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/
 
 ### 说明
 
-K8S 同构（kubeadm token create）：控制面签发**集群级通用 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要、TTL 默认 7 天）。**不绑节点**——节点名由节点自决（join 缺省取宿主机名）+ enroll 自动登记；TTL 内可被**多次 enroll 复用**（不消耗，kubeadm bootstrap token 不限制使用次数）。每次签发都是新 token（明文不可恢复），旧 token 到期自然失效，无 409 幂等限制。
+控制面签发**集群级通用 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要、TTL 默认 7 天）。**不绑节点**——节点身份由节点自决（join 自动生成随机短标识，人工输入归属声明 `metadata.remark` 备注）+ enroll 自动登记；TTL 内可被**多次 enroll 复用**（不消耗，不限制使用次数）。每次签发都是新 token（明文不可恢复、不可再查）；**支持吊销**（`DELETE /pki/tokens/{token_id}`，删除即失效），未吊销的 token 到期自然失效，无 409 幂等限制。
 
 `nvmet-host` 组件凭据**不在此签发**：agent enroll 上报 `backend=nvmet` 时控制面派生（绑 agent_id）随 enroll/renew 响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）。
 
 ### POST /pki/tokens
 
+请求体可选：`{"usage": "bootstrap"}`（默认，节点引导 token）或 `{"usage": "admin"}`
+（管理 token，认证器链 Bearer 用；groups=admin）。
+
 #### curl
 
 ```bash
+# 节点引导 token（默认）
 curl -s -X POST "$BASE_URL/pki/tokens" \
   -H "Authorization: Bearer $TOKEN"
+
+# 管理 token（供脚本调用与 WebUI 登录；等同 admin 证书身份）
+curl -s -X POST "$BASE_URL/pki/tokens" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"usage": "admin"}'
 ```
 
 #### 成功返回（201）
@@ -787,12 +845,15 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
 ```json
 {
   "token": "a1b2c3.0123456789abcdef",
-  "expires_at": "2026-09-09T12:00:00Z",
-  "usage": ["enroll"]
+  "expires_at": "2026-09-22T12:00:00Z",
+  "usage": ["enroll"],
+  "groups": []
 }
 ```
 
-`token` 明文仅本次返回可见（存储只留 sha256 摘要）；`usage` 预留用途标记（当前仅 `enroll`）。
+`token` 明文仅本次返回可见（存储只留 sha256 摘要）；`usage=["enroll"]` 为节点引导
+token（enroll 校验用，不绑节点、TTL 内可复用）；`usage=["admin"]` + `groups=["admin"]`
+为管理 token（认证器链 Bearer 用；`kurrent token create --usage admin` 同款）。
 
 #### 常见错误
 
@@ -800,19 +861,53 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
 |---:|---|
 | `401` | 缺少 Token 或 Token 错误 |
 
+### GET /pki/tokens
+
+列出**未过期** token 台账条目（可视化管理）：bootstrap 引导 token、管理 token、nvmet-host 派生 token 同表。不返回明文（本就不可恢复）与 `token_secret_hash`；`created_at` 对旧条目为空串（该字段自签发时注入，历史条目没有）。读请求只需已认证（RBAC 最小版）。
+
+```bash
+curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[
+  {
+    "token_id": "a1b2c3",
+    "usage": ["admin"],
+    "groups": ["admin"],
+    "component": "",
+    "agent_id": "",
+    "name": "admin",
+    "created_at": "2026-09-27T09:00:00+00:00",
+    "expires_at": "2026-10-04T09:00:00+00:00"
+  }
+]
+```
+
+### DELETE /pki/tokens/{token_id}
+
+吊销 token：删除台账条目，**删除即失效**——Bearer 校验每请求重读台账（无缓存），吊销后立即 401，且无法恢复。「谁在何时吊销了哪个 token」由操作审计（`pki.token.revoke`）留痕。写请求需 admin 组。
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+成功返回 `{"revoked": "a1b2c3"}`；token 不存在返回 `404`。WebUI「凭据」页与 `kurrent token list|revoke` 为同款调用。
+
 ### 6.5.1 enroll 自动登记（POST /enroll，nginx 入口 /api/cp/enroll）
 
-K8S 同构（kubelet 首次上报自动注册 Node）：agent 组件引导（`POST /enroll`，Bearer = 集群级通用 bootstrap token）时若 `agents.yml` 无该 id，**自动创建条目**（role_disk=True、role_cd=False、enabled=True、tags=`("auto",)`），并把请求体 `base_url` 字段（agent 侧 `spec.agent.advertiseUrl`，控制面可达地址）写入台账。规则：
+首次引导自动登记：agent 组件引导（`POST /enroll`，Bearer = 集群级通用 bootstrap token）时若 `agents.yml` 无该 id，**自动创建条目**（role_disk=True、role_cd=False、enabled=True、tags=`("auto", "storage")`；旧 agent 不上报能力时仅 `("auto",)`——**后端类型不进 tags**，它由 `/boot-vars` 实时查 `/capabilities` 判定），并把请求体 `base_url` 字段（agent 侧 `spec.agent.advertiseUrl`，控制面可达地址）与 `remark` 字段（agent 侧 `metadata.remark`，备注/人类识别用）写入台账。规则：
 
 - token 校验：格式 / 登记存在 / 组件匹配 / 未过期；通用 token 无节点绑定，CSR CN 自决身份（防冒名由 CN 校验承担）；派生 token（nvmet-host）须 agent_id 匹配（防串用）
 - `nvmet-host` 组件**不自动登记**（与 agent 共享 agent_id，须 agent 组件先行在册；否则 400，容器重启重试；token 不消耗）
 - `base_url` 非空时必须为 `http://` / `https://` 开头，否则 400（不自动登记）
-- 已登记 agent 的 `base_url` 不因 enroll 更新（登记信息以 `agents.yml` 为权威）
+- 已登记 agent 再次 enroll/renew 时**按节点声明刷新** `base_url` / `remark` / `role.cd`（声明权威：节点文件说了算，节点搬家/改备注后 renew 即对齐，无需重装）；控制面属性 `enabled` / `storager_ip` / `tags` **不碰**，节点未上报的字段保留现有值
 - agent 上报 `backend=nvmet` → 响应附加 `nvmet_token`（派生 nvmet-host 凭据）；stgt/lio 或旧 agent 无此字段
 
 ### 6.5.2 一键加入命令（节点侧）
 
-声明式工作流（kubeadm 同构：配置即声明、CLI 即工具）：控制面签发 token 时输出**带控制面地址的 join 命令**（kubeadm token create --print-join-command 同构），存储节点粘贴执行即获得地址——节点声明 `storager/kurrent.yaml` 缺失时由 join 按模板自动生成（地址同步进 `spec.controlPlane.url`）、已存在则读入合并，随后收敛启动 agent（幂等可重跑；仓库根以外执行加 `--dir` 指定 storager 目录）：
+声明式工作流（配置即声明、CLI 即工具）：控制面签发 token 时输出**带控制面地址的 join 命令**，存储节点粘贴执行即获得地址——节点声明 `storager/kurrent.yaml` 缺失时由 join 按模板自动生成（`metadata.name` 自动生成随机标识、地址同步进 `spec.controlPlane.url`）、已存在则读入合并，随后收敛启动 agent（幂等可重跑；仓库根以外执行加 `--dir` 指定 storager 目录）：
 
 ```bash
 # 控制面（签发集群级通用 bootstrap token；--cp-url = 存储节点可达的控制面 HTTPS 入口，缺省按 --server 推导）：
@@ -826,7 +921,9 @@ kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef
 
 ### 说明
 
-删除 Agent 台账（`config/agents.yml` 条目）并清理该 agent 的母盘标签（`state/masters.yml` 中 masters 下对应条目）。**已签发的证书与运行中的 LUN 不受影响**（容器重启后因不在册引导失败，进入等待重试）。
+删除 Agent 台账（`config/agents.yml` 条目）并清理该 agent 的母盘标签（`state/masters.yml` 中 masters 下对应条目）。**仅清控制面记录，不拦截、不触碰节点上的证书/盘文件**。
+
+语义（声明权威的推论）：删除是**软删除**——节点仍带声明在跑，下次 renew 会按声明自动重新登记（重新加入无需重新签发 token）；真正下线一台节点须在**节点侧**操作（停容器 / 撤声明）。附带效应：登记删除后，仍挂在该节点上的盘在节点重新登记前无法投影引导地址（登记即认知），响应以 `disks_hosted` / `affected_workers` 告知（仅提示，不拦截）。
 
 ### curl
 
@@ -838,7 +935,7 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01" \
 ### 成功返回
 
 ```json
-{ "deleted": "storage-lio-01", "master_tags_removed": false }
+{ "deleted": "storage-lio-01", "master_tags_removed": false, "disks_hosted": 3, "affected_workers": ["worker-01", "worker-02"] }
 ```
 
 ### 常见错误
@@ -959,10 +1056,11 @@ Windows 安装期如果希望默认进入安装菜单，可以这样传：
 
 1. 校验 Worker 存在且尚未挂载该 (os, os_version) 的盘（已存在时返回 `409`）
 2. 生成盘级随机标识 `os_tag`（12 位 hex，数据面唯一键）——决定盘 NQN 后缀与文件名
-3. 选择存储 Agent（`disk_agent` 指定或自动选择）
+3. 选择存储 Agent（`disk_agent` 指定；不传则交给放置策略：候选须启用且数据面就绪，`type=master` 时还要求该节点本地存在这块母盘——无可用候选返回 `503`，`detail.excluded` 逐节点说明原因）
 4. 拼接盘 NQN（`base-nqn:worker-id.os.<os_tag>`）与 backing filename（`worker-id.os.<os_tag>.img`）
 5. 调用 Agent 创建磁盘 target（母盘克隆或空白盘）
 6. 更新 `state/workers.yml` 中该 Worker 的 `disks` 台账（追加到数组），首次建盘时 `state` 由 `registered` 转为 `ready`
+7. **建盘即签发**：盘落在 nvmet 后端节点时，若该 Worker 尚无认证密钥，控制面就地生成 DHHC-1 密钥并推送（审计 `credential.issue`，见 7.7）——已有密钥不轮换（按 Worker 跟盘，多盘共用一把）；非 nvmet 后端不签发（DHHC-1 是 NVMe-oF 专属，iSCSI 走 CHAP）
 
 端点位于 `/luns/` 命名空间下，为将来数据盘（`/luns/data`）预留；多盘场景下，默认启动哪个盘由 `PUT /workers/{worker_id}/default-disk` 的 `disk`（os_tag）决定。
 
@@ -981,7 +1079,7 @@ Windows 安装期如果希望默认进入安装菜单，可以这样传：
 | `size` | 条件必填 | 当 `type=empty` 时必填。表示空白盘大小，如 `40G` |
 | `os` | 是 | 系统备注（人类理解用，决定盘 NQN/文件名中的 os 段）。自由字符串，小写归一，**不做白名单校验**（2026-08-30 OS_ITEMS 退役） |
 | `os_version` | 否 | 版本备注（`''` = 无版本，默认）；同一 (os, os_version) 至多一块，不同版本可并存 |
-| `disk_agent` | 否 | 指定存储 Agent；不传时 Control Plane 自动选择 |
+| `disk_agent` | 否 | 指定存储 Agent；不传时由控制面放置（候选含数据面就绪与母盘本地存在性校验） |
 
 ### 7.1.1 从母盘克隆
 
@@ -1073,9 +1171,21 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
 
 ### 7.1.3 批量创建系统盘（POST /workers/luns/disk/batch）
 
-批量部署场景：同一套盘参数应用到多个 Worker，每个 Worker 使用各自分配的存储节点（`targets[].agent` 必填——由 WebUI 的「接管所选 Worker」或拖拽指定产生，不存在默认公共分配）。
+批量部署场景：同一套盘参数应用到多个 Worker。**定位方式二选一**（同时给 → `400`）：
 
-与单盘一致：`master` 走母盘克隆、`empty` 建空白盘；同一 (os, os_version) 至多一块，已存在则**自动跳过**（不算失败）。**创建成功的 Worker 自动将 `default_disk` 设为本次批量盘的 `os_tag`**——批量部署直接进入默认启动，无需再调 `PUT /workers/{worker_id}/default-disk`（单盘接口不自动设置）。逐项独立执行，单项失败不影响其余，返回 `succeeded` / `skipped` / `failed` 汇总。
+- `targets`：**逐项点名**存储节点（显式覆盖，原有调用方式）；
+- `workers` + `placement`：只声明要给哪些 Worker 建盘，**存储节点由控制面放置**。
+
+放置（`workers` 方式）的语义——放置是系统决策，调用方给意图与约束：
+
+- **候选节点** = 磁盘角色 ∧ 启用（非排空）∧ 有 `base_url` ∧ **数据面就绪**（`healthz.backend_ready` 非 `false`）∧ 在 `placement.candidates` 内（留空 = 不限制）∧（`type=master` 时）**母盘在该节点本地存在**——克隆在节点本地完成，节点没有这块母盘就不可能建成；
+- **分配** = 现有盘数最少优先（均摊），同负载按注册顺序；
+- `placement.pins` 逐 Worker 钉死（显式覆盖）：被钉的节点**不要求在 `candidates` 内**，但须自身可用，否则 `503`；
+- 无任何可用候选 → `503`，`detail.excluded` 逐节点给出被排除的原因（角色不符 / 排空 / 不可达 / 数据面未就绪 / 缺母盘）。
+
+`dry_run=true` 只返回计划（`plan` / `warnings`）不建盘。**预览与执行共用同一份放置实现**，所以 `plan` 里的落点即随后执行的结果（逐行 `action` 为 `create` / `skip` / `error`）。注意 `targets` 方式的计划**不探测节点**（只按台账判断 create/skip/error），`workers` 方式的候选则在放置阶段逐个探过。
+
+与单盘一致：`master` 走母盘克隆、`empty` 建空白盘；同一 (os, os_version) 至多一块，已存在则**自动跳过**（不算失败）。**创建成功的 Worker 自动将 `default_disk` 设为本次批量盘的 `os_tag`**——批量部署直接进入默认启动，无需再调 `PUT /workers/{worker_id}/default-disk`（单盘接口不自动设置）。落在 nvmet 后端节点的 Worker 同样**建盘即签发**认证密钥（各 Worker 密钥互不相同，一次到位，见 7.1 步骤 7 与 7.7）。逐项独立执行，单项失败不影响其余，返回 `succeeded` / `skipped` / `failed` 汇总；目标 Agent 不存在或已停用（排空）的项进入 `failed`（`agent not found` / `agent ... disabled`），其余项照常。
 
 #### 请求体字段
 
@@ -1086,9 +1196,47 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
 | `os_version` | 否 | 版本备注（`''` = 无版本，默认） |
 | `name` | 条件必填 | 当 `type=master` 时必填。表示母盘文件名 |
 | `size` | 条件必填 | 当 `type=empty` 时必填。表示空白盘大小，如 `40G` |
-| `targets` | 是 | 数组，每项 `{worker_id, agent}`：Worker 编号 + 该 Worker 已分配的存储节点 |
+| `targets` | 二选一 | 数组，每项 `{worker_id, agent}`：逐项指名存储节点 |
+| `workers` | 二选一 | Worker 编号数组：存储节点交给放置策略 |
+| `placement` | 否 | 仅对 `workers` 生效。`candidates`（数组，限定自动放置的候选节点，空 = 全部）；`pins`（对象 `{worker_id: agent}`，逐项钉死） |
+| `dry_run` | 否 | `true` 只返回计划不建盘（默认 `false`） |
 
-#### curl
+#### curl（控制面放置）
+
+```bash
+curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "master",
+    "os": "ubuntu",
+    "name": "_tpl_ubuntu_2204.img",
+    "workers": ["worker-01", "worker-02", "worker-03"],
+    "placement": { "candidates": ["storage-lio-01", "storage-lio-02"] },
+    "dry_run": true
+  }'
+```
+
+#### 计划返回（dry_run）
+
+```json
+{
+  "dry_run": true,
+  "plan": [
+    { "worker_id": "worker-01", "agent": "storage-lio-01", "action": "create" },
+    { "worker_id": "worker-02", "agent": "storage-lio-02", "action": "create" },
+    { "worker_id": "worker-03", "agent": "storage-lio-01", "action": "skip",
+      "reason": "already has a ubuntu system disk" }
+  ],
+  "warnings": [
+    { "agent": "storage-stgt-01", "reason": "does not have master _tpl_ubuntu_2204.img" }
+  ]
+}
+```
+
+确认后把同一份请求去掉 `dry_run` 再发一次即可（落点与计划一致）。
+
+#### curl（逐项点名，原有方式）
 
 ```bash
 curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
@@ -1198,8 +1346,8 @@ curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
 |---:|---|
 | `400` | 参数格式错误；`os` 为空或含非法字符；`type=master` 却没传 `name`；`type=empty` 却没传 `size` |
 | `401` | 缺少 Token 或 Token 错误 |
-| `404` | 创建系统盘时 Worker 不存在 |
-| `409` | `worker_id` 已存在；`hostname` 已存在；MAC 已绑定；Worker 已有该 (os, os_version) 系统盘（同版本重复创建）；Agent 上 IQN 已存在；backing 文件已存在 |
+| `404` | 创建系统盘时 Worker 不存在；`disk_agent` 指定的 Agent 不存在 |
+| `409` | `worker_id` 已存在；`hostname` 已存在；MAC 已绑定；Worker 已有该 (os, os_version) 系统盘（同版本重复创建）；Agent 上 IQN 已存在；backing 文件已存在；目标 Agent 已停用（排空：`agent ... disabled: not accepting new disks`） |
 | `500` | dnsmasq reload 失败；写文件失败；其他未预期错误 |
 | `503` | Agent 不可达；docker.sock 不可用 |
 
@@ -1315,7 +1463,7 @@ curl -s -X PUT "$BASE_URL/workers/worker-01/default-disk" \
 | 参数 | 默认 | 说明 |
 |---|---:|---|
 | `delete_file` | `false` | 是否同时删除 backing `.img` 文件。`false` 仅删除 target（.img 保留，可重新挂载） |
-| `ignore_missing_target` | `false` | 目标在 Agent 上已不存在时是否忽略 404，继续完成台账删除 |
+| `ignore_missing_target` | `false` | 目标在 Agent 上已不存在时是否忽略 404，继续完成台账删除；盘所在 Agent 的登记已删除时同义（ignore=false 报 404 `agent not registered`，ignore=true 视为已缺失） |
 
 ### 示例：删除系统盘但保留 .img
 
@@ -1466,18 +1614,41 @@ NVMe-oF 连接认证密钥库（按 Worker 跟盘裁定 2026-08-22）：密钥�
 Worker 的设备共享同一密钥（换绑即换钥）。密钥为 **DHHC-1** 格式（蓝图 2.1 契约）：
 `DHHC-1:<两位数字类型>:<base64(密钥 + CRC32 小端 4 字节)>`，密钥体 32 字节（SHA-256）或 64 字节（SHA-512）。
 
-凭据写入后控制面会**推送期望状态给持有该 Worker 系统盘的 Agent**（审计 `credential.push`，不记密钥本体）：
-Agent 转调存储节点 nvmet 宿主服务登记 hosts（子系统 = 盘（NQN 命名：盘标识权威 = NQN，IQN 由 NQN 派生（`iqn.` + nqn[4:]），如
-`nqn.2026-07.com.controller:worker-01.ubuntu` → `iqn.2026-07.com.controller:worker-01.ubuntu`；
-IQN 不作子系统 NQN 使用，NVMe Base Spec §7.9 要求 `nqn.` 前缀），Host NQN = 绑定设备 UUID 派生
-`nqn.2014-08.org.ipxe:<uuid>`，无 UUID 设备回退共享 NQN `nqn.2014-08.org.ipxe:ipxe`）；
-推送失败仅审计不阻断（Agent 缓存先行，reconcile 周期重放补齐）。
+**签发时机：建盘即签发（2026-10-05）**——在 nvmet 后端节点上创建系统盘时（7.1 步骤 7，单盘与批量同），
+控制面为尚无密钥的 Worker 就地生成 DHHC-1 密钥并推送（审计 `credential.issue`）：子系统与它配套的
+认证密钥同时就位，批量建盘 N 台即 N 份密钥一次到位，无需逐台手工设置。已有密钥的 Worker 建盘**不轮换**
+（按 Worker 跟盘，多盘共用一把）。非 nvmet 后端（stgt / lio）不签发——DHHC-1 是 NVMe-oF 专属。
+因此本节的手工端点用途收窄为**显式轮换 / 吊销**（吊销即明确「不用认证」，其条目被删，不会被后续建盘复活）。
 
-触发推送的操作：设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、建盘/删盘（含批量）、删除 Worker。
+凭据写入后控制面会**推送期望状态给持有该 Worker 系统盘的 Agent**（审计 `credential.push`，不记密钥本体）：
+推送体含明文密钥。
+Agent 转调存储节点 nvmet 宿主服务登记 hosts（子系统 NQN = 盘 NQN——盘标识权威 = NQN，IQN 由 NQN 派生
+（`iqn.` + nqn[4:]），不作子系统 NQN 使用；NVMe Base Spec §7.9 要求 `nqn.` 前缀。**Host NQN =
+worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点侧 `spec.agent.nqnBase`），
+由 `/boot-vars` 注入固件覆盖其内置默认值（固件默认按 SMBIOS UUID 派生，不覆盖必认证失败）。
+
+**推送对账（2026-10-05）**：每次推送的逐 Agent 结果记录在 `state/credential-push.yml`
+（键 = `worker_id/agent_id`；含所推密钥的审计哈希，不含明文）。控制面对账线程周期（默认 60s，
+`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` 秒，0 = 禁用）比对「期望 × 记录」：密钥哈希一致且
+已送达（ok / n-a）跳过，否则幂等重放——覆盖推送失败未重试、进程崩溃缝隙（台账已改未推送）与
+吊销未送达三类静默缺口。无密钥且无推送历史的对**不推送**、不记台账、不记审计（避免 Agent 离线时
+出现「同步失败」的虚假故障）——nvmet 建盘已自动签发，实际只剩非 nvmet 后端的盘（DHHC-1 不适用，
+推送只会得 `n/a`）；一旦有过推送记录，之后的吊销即使未送达也持续重放。Agent 登记被删（登记删除语义）→ 记录剪除，重新登记后自动重推。
+对账重放仅在状态或密钥变化时记审计（去噪）；用户动作触发的推送照常每次记录。
+推送结果：`ok` 已送达（Agent 缓存与宿主服务均已同步）；`failed` 未送达（Agent 不可达 / 宿主
+同步失败，对账持续重试）；`n/a` 目标 Agent 非 nvmet 后端（凭据不适用，非故障）；`pending` 尚无
+记录或记录为旧值（待对账重放）；`none` 无同步目标（无 NVMe-oF 盘、凭据从未设置无推送历史，或盘所在 Agent 未登记）。
+
+触发推送的操作：**建盘即签发**（nvmet 后端，见上）、设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、删盘（含批量）、删除 Worker。
+
+静态存储边界（2026-10-05 裁定）：密钥明文按链路必要范围落盘三处——控制面 `state/credentials.yml`、
+Agent 容器凭据缓存（0600）、存储节点 configfs（内核 hosts 矩阵 `dhchap_key`）——**不引入应用层加密**，
+边界责任归部署方（磁盘/宿主持久化加密、root 访问边界）；密钥经 mTLS 组件通道传输，不进入浏览器
+存储与服务端日志。
 
 ### PUT /workers/{worker_id}/credential
 
-设置或更新密钥（幂等：重复设置同值 `updated_at` 不变）。
+设置或更新密钥（幂等：重复设置同值 `updated_at` 不变，但仍触发一次推送——补推通道）。
 
 ```bash
 curl -X PUT "$BASE_URL/workers/worker-01/credential" \
@@ -1485,7 +1656,7 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
   -d '{"secret": "DHHC-1:01:<base64>"}'
 ```
 
-成功返回：
+成功返回（`push` = 逐 Agent 送达状态投影，见上；未送达由对账自动重试）：
 
 ```json
 {
@@ -1493,7 +1664,14 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
   "exists": true,
   "secret_hash": "sha256:1a2b3c4d5e6f",
   "created_at": "2026-08-22T08:00:00+00:00",
-  "updated_at": "2026-08-22T08:00:00+00:00"
+  "updated_at": "2026-08-22T08:00:00+00:00",
+  "push": {
+    "result": "ok",
+    "updated_at": "2026-10-05T15:30:00+08:00",
+    "agents": [
+      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+    ]
+  }
 }
 ```
 
@@ -1510,11 +1688,12 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
 curl -X DELETE "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKEN"
 ```
 
-成功返回 `{"deleted": "worker-01"}`；Worker 或条目不存在 → `404`。
+成功返回 `{"worker_id": "worker-01", "deleted": true, "push": {...}}`（`push.result=ok` 表示
+吊销已送达；未送达会被对账重放，不会静默滞留）；Worker 或条目不存在 → `404`。
 
 ### GET /workers/{worker_id}/credential
 
-查询凭据元数据（**不返回明文**，`secret_hash` 只给前缀便于轮换比对）：
+查询凭据元数据与推送状态（**不返回明文**，`secret_hash` 只给前缀便于轮换比对）：
 
 ```bash
 curl -s "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKEN"
@@ -1526,11 +1705,19 @@ curl -s "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKE
   "exists": true,
   "secret_hash": "sha256:1a2b3c4d5e6f",
   "created_at": "2026-08-22T08:00:00+00:00",
-  "updated_at": "2026-08-22T08:00:00+00:00"
+  "updated_at": "2026-08-22T08:00:00+00:00",
+  "push": {
+    "result": "ok",
+    "updated_at": "2026-10-05T15:30:00+08:00",
+    "agents": [
+      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+    ]
+  }
 }
 ```
 
-无条目时 `exists=false` 且无 `secret_hash`。
+无条目时 `exists=false` 且无 `secret_hash`，`push` 投影仍返回（吊销送达状态可见）。
+CLI：`kurrent workers credential show|set|revoke <worker_id>`；WebUI：Worker 详情独立「NVMe-oF 凭据」页（该 Worker 有 NVMe-oF 盘时才出现）。
 
 ---
 
@@ -1683,14 +1870,16 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 删除 Worker。Control Plane 会：
 
 1. 从 `workers.yml` 找到该 Worker 的 disk/cd 台账
-2. **联动解绑设备**：所有 `bound_worker_id` 为该 Worker 的设备回池（`state=pooled`、`bound_worker_id=null`，设备**不吊销**）——先解绑落盘，解绑失败则中止删除
-3. 如果存在 cd target，先删 cd
-4. 再删 disk target
-5. 从 `workers.yml` 删除该 Worker
-6. 从 `dnsmasq/dhcp-hosts.conf` 删除 `mac,hostname` 这一行
-7. HUP `ipxe-dnsmasq`
+2. **吊销凭据推送**：向持有其盘的已登记 Agent 推送吊销（Agent 摘除 hosts 登记并清缓存）——删除前唯一一次凭据推送
+3. **联动解绑设备**：所有 `bound_worker_id` 为该 Worker 的设备回池（`state=pooled`、`bound_worker_id=null`，设备**不吊销**）——先解绑落盘，解绑失败则中止删除
+4. 如果存在 cd target，先删 cd
+5. 再删 disk target
+6. 从 `workers.yml` 删除该 Worker
+7. **清空该 Worker 的凭据痕迹**：删掉 `state/credentials.yml` 的密钥条目与该 Worker 的推送台账（审计 `credential.forget`）——Worker 已不存在，若留下孤儿条目它既不可见（`GET /credential` 对不存在的 Worker 返回 404）也不可删，且同 id 的 Worker 重建时会**静默继承旧密钥**并把旧钥推给新机器的盘
+8. 从 `dnsmasq/dhcp-hosts.conf` 删除 `mac,hostname` 这一行
+9. HUP `ipxe-dnsmasq`
 
-`POST /workers/delete/batch`（11.1）同样联动解绑。
+`POST /workers/delete/batch`（11.1）同样联动解绑并清理凭据痕迹。
 
 ### Path 参数
 
@@ -1703,7 +1892,7 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 | 参数 | 必填 | 默认值 | 说明 |
 |---|---:|---|---|
 | `delete_disk` | 否 | `false` | 是否连 backing `.img` 文件一起删除 |
-| `ignore_missing_target` | 否 | `false` | 删除时若 Agent 返回 `404 iqn not found`，是否忽略继续执行 |
+| `ignore_missing_target` | 否 | `false` | 删除时若 Agent 返回 `404 iqn not found`，是否忽略继续执行；盘所在 Agent 的登记已删除时同义（ignore=false 报 404 `agent not registered`，ignore=true 视为已缺失，凭据推送跳过并记审计） |
 
 ### curl
 
@@ -1752,7 +1941,7 @@ curl -s -X DELETE "$BASE_URL/workers/worker-01?delete_disk=true&ignore_missing_t
 |---|---:|---|---|
 | `worker_ids` | 是 | — | 要删除的 Worker 编号数组 |
 | `delete_disk` | 否 | `false` | 是否连 backing `.img` 文件一起删除 |
-| `ignore_missing_target` | 否 | `false` | 删除时若 Agent 返回 `404 iqn not found`，是否忽略继续执行 |
+| `ignore_missing_target` | 否 | `false` | 删除时若 Agent 返回 `404 iqn not found`，是否忽略继续执行；盘所在 Agent 的登记已删除时同义（ignore=false 报 404 `agent not registered`，ignore=true 视为已缺失，凭据推送跳过并记审计） |
 
 ### curl
 
@@ -1952,14 +2141,14 @@ curl -s -X DELETE "$BASE_URL/workers/worker-00?delete_disk=false" \
 
 ### 说明
 
-Control Plane 可以直接管理任意 Agent 上的 iSCSI target/LUN。请求经 Control Plane 转发到 Agent（mTLS，控制面组件客户端证书绑定内部 CA，K8S 同构），因此调用方只需持有 Control Plane Token，无需直接接触 Agent。
+Control Plane 可以直接管理任意 Agent 上的 iSCSI target/LUN。请求经 Control Plane 转发到 Agent（mTLS，控制面组件客户端证书绑定内部 CA），因此调用方只需持有 Control Plane Token，无需直接接触 Agent。
 
 与 Worker 生命周期接口（`POST /workers`、`DELETE /workers/{worker_id}`）的区别：
 
 - Worker 接口面向**台账**：自动拼接 IQN、写 `state/workers.yml`、写 dnsmasq 绑定；
 - LUN 管理接口面向**数据面直管**：不写任何台账，直接操作 Agent 上的 target，适合母盘管理、手工排障、ISO 临时挂载等场景。
 
-所有接口都需要鉴权（`IPXE_CP_TOKEN`）。Agent 不存在时返回 `404 agent not found`；Agent 不可达时返回 `503`；Agent 侧的业务校验错误（如 IQN 前缀不匹配、文件已存在、IQN 已存在）会透传其状态码与 `detail`：
+所有接口都需要鉴权（见 1.3 认证器链）。Agent 不存在时返回 `404 agent not found`；Agent 不可达时返回 `503`；Agent 侧的业务校验错误（如 IQN 前缀不匹配、文件已存在、IQN 已存在）会透传其状态码与 `detail`：
 
 ```json
 {"agent": "storage-lio-01", "error": "iqn base mismatch: ..."}
@@ -1999,7 +2188,7 @@ curl -s "$BASE_URL/agents/storage-lio-01/luns" \
 
 ### 14.2 POST /agents/{agent_id}/luns/disk
 
-在指定 Agent 上创建磁盘 LUN。传 `master` 走母盘克隆（优先 btrfs / ZFS(≥2.2) reflink 秒级），传 `size` 建空白盘（sparse）。Agent 未配置 `role.disk` 时返回 `400 agent ... not configured for disk role`。
+在指定 Agent 上创建磁盘 LUN。传 `master` 走母盘克隆（优先 btrfs / ZFS(≥2.2) reflink 秒级），传 `size` 建空白盘（sparse）。Agent 未配置 `role.disk` 时返回 `400 agent ... not configured for disk role`；已停用（排空）时返回 `409 agent ... disabled: not accepting new LUNs`；nvmet 数据面下母盘为 512 字节扇区布局的 GPT 时返回 `400`（并给出 4K 重建指引，见 15 节 `gpt` 字段）。
 
 #### Path 参数
 
@@ -2050,7 +2239,7 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
 
 ### 14.3 POST /agents/{agent_id}/luns/cd
 
-在指定 Agent 上创建 CD（ISO 虚拟光驱）LUN。仅 `role.cd` 为 true 的 Agent 支持；未配置 cd 角色（如 LIO）时返回 `400 agent ... not configured for cd role`，后端能力限制由 Agent 透传。
+在指定 Agent 上创建 CD（ISO 虚拟光驱）LUN。仅 `role.cd` 为 true 的 Agent 支持；未配置 cd 角色（如 LIO）时返回 `400 agent ... not configured for cd role`，后端能力限制由 Agent 透传；已停用（排空）时返回 `409 agent ... disabled: not accepting new LUNs`。
 
 #### 请求体字段
 
@@ -2144,9 +2333,11 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/scan" \
 
 ### 说明
 
-聚合列出全部**启用磁盘角色**（`enabled=true` 且 `role.disk=true`）Agent 上的母盘清单。母盘由存储节点 Agent 的后台扫描线程周期扫描（默认每 30 秒），识别 `DISK_DIR` 下文件名含 `_tpl_` 标记的镜像文件（如 `_tpl_ubuntu_2204.img`）。
+聚合列出全部**启用磁盘角色**（`enabled=true` 且 `role.disk=true`）Agent 上的母盘清单。母盘由存储节点 Agent 的后台扫描线程周期扫描（默认每 30 秒），识别 `DISK_DIR` 下文件名含 `_tpl_` 标记（大小写不敏感）的镜像文件（如 `_tpl_ubuntu_2204.img`）。
 
 供 WebUI 母盘克隆下拉列表选盘。**与创建 Worker 的 API 无联动**——纯只读查询，不改任何状态，不写台账。
+
+母盘清单项带 `gpt` 字段（GPT 扇区布局探测：`4k` / `512` / `none`）。nvmet 数据面下 **`512` 布局母盘不可克隆**——file backend 按底层 FS 块（典型 4K）导出逻辑块，512 字节扇区 GPT 被发起端按 4K 解释、EDK2 找不到 ESP（实测引导失败）；Agent 建盘时直接拒绝（见 14.2），前端据此标注。
 
 ### 失败容错
 
@@ -2170,8 +2361,8 @@ curl -s "$BASE_URL/masters" \
       "agent": "storage-lio-01",
       "storager_ip": "192.168.80.3",
       "masters": [
-        {"name": "_tpl_ubuntu_2204.img", "size": 10737418240, "mtime": 1785643200},
-        {"name": "_tpl_debian_12.img", "size": 8589934592, "mtime": 1785729600}
+        {"name": "_tpl_ubuntu_2204.img", "size": 10737418240, "mtime": 1785643200, "gpt": "4k"},
+        {"name": "_tpl_debian_12.img", "size": 8589934592, "mtime": 1785729600, "gpt": "4k"}
       ]
     }
   ]
@@ -2183,7 +2374,7 @@ curl -s "$BASE_URL/masters" \
 | `agents` | 数组，每项对应一个启用磁盘角色的 Agent |
 | `agents[].agent` | Agent 编号（`config/agents.yml` 的 key） |
 | `agents[].storager_ip` | 数据面地址（与 `/boot-vars` 相同的回退规则） |
-| `agents[].masters` | 母盘数组，每项 `{name, size, mtime}`：文件名 / 字节大小 / 修改时间戳 |
+| `agents[].masters` | 母盘数组，每项 `{name, size, mtime, gpt}`：文件名 / 字节大小 / 修改时间戳 / GPT 扇区布局（`4k` / `512` / `none`） |
 | `agents[].error` | 该节点查询失败时的错误详情（成功节点无此字段） |
 
 ---
@@ -2239,8 +2430,8 @@ devices:
 **curl**：
 
 ```bash
-curl http://<host>:4839/devices?state=pooled \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl "$BASE_URL/devices?state=pooled" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **成功返回**：数组，每项为一条设备记录（见上「记录结构」）。
@@ -2293,7 +2484,7 @@ curl http://<host>:4839/devices?state=pooled \
 
 ### 16.6 GET /devices/report
 
-iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启且带有效公钥时入池。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
+iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启、放行额度未用尽且带有效公钥时入池。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -2304,15 +2495,15 @@ iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/
 
 行为：
 
-- 已注册设备：更新指纹（非空字段覆盖）+ `last_seen`，`state` 不变；窗口开启且带有效公钥时填充 `key_hash`（密钥认领），密钥不一致 → 拒绝覆盖（仅审计 `device.claim rejected`）
+- 已注册设备：更新指纹（非空字段覆盖）+ `last_seen`，`state` 不变；窗口开启且带有效公钥时填充 `key_hash`（密钥认领，不受放行额度约束），密钥不一致 → 拒绝覆盖（仅审计 `device.claim rejected`）
 - 吊销设备：忽略（不更新、不复活）
-- 未知 MAC + 注册窗口开启 + 带有效公钥：入池（`state=pooled`，`key_hash` 填充，`source=ipxe`）
-- 未知 MAC + 窗口关闭 / 无公钥：只更新指纹不入池（注册只在窗口期，见 5.1）
+- 未知 MAC + 注册窗口开启 + 额度未用尽 + 带有效公钥：入池（`state=pooled`，`key_hash` 填充，`source=ipxe`）
+- 未知 MAC + 窗口关闭 / 额度用尽 / 无公钥：只更新指纹不入池（注册只在窗口期且受放行额度约束，见 5.1）
 
-**curl**（模拟 iPXE 上报）：
+**curl**（模拟 iPXE 上报；引导链走**裸路径**，不经 `/api/cp` 前缀，且无鉴权）：
 
 ```bash
-curl "http://<host>:4839/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
+curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
 ```
 
 ### 16.7 POST /devices/{mac}/bind
@@ -2337,8 +2528,8 @@ curl "http://<host>:4839/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manuf
 **curl**：
 
 ```bash
-curl -X POST "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force=false" \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X POST "$BASE_URL/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force=false" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **成功返回（200）**：设备记录（`state=bound`，`bound_worker_id=worker-01`）。
@@ -2352,8 +2543,8 @@ curl -X POST "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker
 **curl**：
 
 ```bash
-curl -X DELETE "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind" \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X DELETE "$BASE_URL/devices/00:0c:29:b9:8b:2d/bind" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 16.9 POST /devices/bind/batch/preview
@@ -2393,8 +2584,8 @@ curl -X DELETE "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind" \
 **curl**：
 
 ```bash
-curl -X POST "http://<host>:4839/devices/bind/batch" \
-  -H "Authorization: Bearer $CP_TOKEN" \
+curl -X POST "$BASE_URL/devices/bind/batch" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"mode":"manifest","pairs":[{"mac":"00:0c:29:b9:8b:2d","worker_id":"worker-01"}]}'
 ```
 
@@ -2424,7 +2615,7 @@ curl -X POST "http://<host>:4839/devices/bind/batch" \
 - 多系统盘（一个 Worker 可挂载多个系统盘：同一 (os, os_version) 至多一块、不同版本可并存，盘级 `os_tag` 区分，`default_disk` 决定默认启动）
 - 母盘标签登记（os / os_version 备注，`PUT/DELETE /agents/{agent_id}/masters/{master_name}/tag`，6.4 节；`/masters` 聚合合并展示）
 - NVMe-oF 认证凭据库（DHHC-1，按 Worker 跟盘，7.7 节；/boot-vars 注入 `nbft_secret`，5 节）
-- 凭据推送驱动（凭据设置/吊销、绑定/解绑/换绑、建盘/删盘、删 Worker 时推送 Agent，Agent 转调 nvmet 宿主服务同步 hosts 矩阵）
+- 凭据签发与推送驱动（nvmet 节点建盘即自动签发密钥、凭据设置/吊销、绑定/解绑/换绑、删盘、删 Worker 时推送 Agent，Agent 转调 nvmet 宿主服务同步 hosts 矩阵）+ 推送对账（状态台账 + 周期幂等重放未送达项，push 投影可见，7.7 节）
 
 当前版本还没有做：
 
@@ -2435,11 +2626,15 @@ curl -X POST "http://<host>:4839/devices/bind/batch" \
 - 文件存储无真正事务：回滚 = 重写；换绑清除旧绑定失败且恢复也失败时，靠审计定位手动处理（16.7）
 ---
 
-### 各组件使用以下端口: 
-#### Control
-- dnsmasq: `67` , `66`
-- nginx: `4838`
-- Control_Plane: `4839`
-#### iSCSI-sever
-- Agent: `4840`
-- Lio / stgt : `3260`
+### 各组件使用以下端口：
+
+#### 控制面宿主
+- dnsmasq: `53`（DNS 默认监听）、`67`（DHCP）、`69`（TFTP）
+- nginx: `80`（仅 301 升级到 443）、`443`（唯一对外入口：WebUI / 管理面 API / 引导链 / 文件下载）
+- Control_Plane: `4839`（仅绑 `127.0.0.1`，供 `kurrent init` 健康检查与调试，不在请求路径上）
+
+#### 存储节点
+- Agent: `4840`（mTLS，控制面调用）
+- nvmet-host: `4841`（mTLS，Agent 经 `host.docker.internal:4841` 调用）
+- NVMe-oF 数据面: `4420`（nvmet 端口，无 TLS；认证走 DH-HMAC-CHAP）
+- LIO / stgt（iSCSI 数据面）: `3260`

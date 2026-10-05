@@ -15,7 +15,7 @@ K8s 让应用成为云。Kurrent 让算力成为云——*K8s orchestrates conta
 
 ## NVMe-oF：主数据面
 
-Kurrent 的存储面 NVMe-oF 优先：存储节点以 `backend=nvmet`（缺省）加入集群，经**内核态 NVMe-oF target**（NVMe over TCP，4420 端口）导出母盘。单一 NQN 命名域（缺省 `nqn.2026-07.com.kurrent`）、DHHC-1 认证按 Worker 跟盘、nvmet-host 凭据 enroll 自动派生、引导链直连带密钥的 `nvme://` 根路径——iSCSI（stgt/lio）保留为兼容后端。
+Kurrent 的存储面 NVMe-oF 优先：存储节点以 `backend=nvmet`（缺省）加入集群，经**内核态 NVMe-oF target**（NVMe over TCP，4420 端口）导出母盘。单一 NQN 命名域（缺省 `nqn.2026-07.com.kurrent`）、DHHC-1 认证按 Worker 跟盘（**建系统盘时自动签发密钥**；存储节点宿主服务凭据 enroll 时派生）、引导链直连带密钥的 `nvme://` 根路径——iSCSI（stgt/lio）保留为兼容后端。
 
 ## 快速开始
 
@@ -28,7 +28,7 @@ Kurrent 的存储面 NVMe-oF 优先：存储节点以 `backend=nvmet`（缺省�
 
 ## 核心特性: 算力周流，即插即用
 
-一条无状态裸金属交付流：新机器首启自动入设备池，WebUI 点几下即可绑定 Worker、分配系统盘与默认系统。一台 Worker 可挂载多块系统盘（Windows / Ubuntu / Debian / CentOS / ESXi）随时在线切换。
+一条无状态裸金属交付流：新机器首启自动入设备池，WebUI 点几下即可绑定 Worker、分配系统盘与默认系统。一台 Worker 可挂载多块系统盘并随时在线切换。无盘冷启动（NVMe-oF）已在 **Debian 12/13、Ubuntu 24.04/26.04 与 Fedora 44** 上通过整机验收。
 
 ## 固件仓库
 
@@ -39,7 +39,7 @@ Kurrent 的存储面 NVMe-oF 优先：存储节点以 `backend=nvmet`（缺省�
 
 ## 路线图
 
-跨平台、跨架构的云原生元协议：一套无状态语义，在裸机与虚拟化层自相似地嵌套。完整规划见 **[about/zh/ROADMAP.md](./about/zh/ROADMAP.md)**（English: [about/en/ROADMAP.md](./about/en/ROADMAP.md)）。
+跨平台、跨架构的云原生元协议：一套无状态语义，在裸机与虚拟化层自相似地嵌套——这一愿景写在**[宣言](./about/zh/Manifesto.md)**里，具体推进方向见 **[about/zh/ROADMAP.md](./about/zh/ROADMAP.md)**（English: [about/en/ROADMAP.md](./about/en/ROADMAP.md)）。
 
 ## 社区与贡献
 

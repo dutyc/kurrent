@@ -22,7 +22,7 @@ AI is an extraordinarily powerful construction crew, but it has no intentionalit
 
 This is the core principle of AI assistance in this project, and our baseline requirement for community contributors.
 
-We do not require you to master every line of iPXE script syntax, nor to be able to hand-write iSCSI login messages—this "bricklaying" work can be confidently delegated to AI.
+We do not require you to master every line of iPXE script syntax, nor to be able to hand-write data-plane login messages (iSCSI Login / NVMe-oF Connect)—this "bricklaying" work can be confidently delegated to AI.
 
 **But we do require that you deeply understand the project's overall architecture.**
 
@@ -30,9 +30,9 @@ When you submit a Pull Request, you must be able to articulate the following que
 
 - Why must the control plane be separated from the data plane? Does your change violate this boundary?
 - What is the complete timing sequence of the iPXE boot chain from DHCP to kernel handoff? Does your code assume that an operating system is already running?
-- What does the design philosophy of "Files Are the Source of Truth" mean? Does your change introduce unnecessary databases or implicit state?
+- Where do state and configuration live, and which side is authoritative versus derived? Does your change introduce unnecessary databases or implicit state?
 - How does the dynamic variable transmission chain run through the entire boot cycle?
-- What is the position and impact of the iSCSI session keep-alive mechanism in the whole chain?
+- What is the position and impact of data-plane session keep-alive and handoff (iSCSI NOP / NVMe/TCP Keep-Alive Timer) in the whole chain?
 
 **If the design logic behind a PR cannot be clearly articulated by the contributor themselves, we will refuse to merge it—no matter how beautifully the AI wrote the code or how perfectly the tests pass.**
 
@@ -50,7 +50,7 @@ A poorly written function or a flawed interface is a flesh wound. Tear down that
 
 A wrong decision about "where identity should reside," a confusion between the control plane and data plane, a complex dependency introduced for temporary convenience—these do not stay confined to a single file. They propagate along the load-bearing structure, causing every future feature to inherit this distortion.
 
-**As long as the architecture stands, the project stands.** You could rewrite the entire codebase in another language, and as long as those decisions (iBFT identity injection, decoupling disk from machine, cloud-native layers) remain, it is still Kurrent. Conversely, if the architecture is compromised to cater to some "best practice," even if not a single line of code changes, the project is already dead.
+**As long as the architecture stands, the project stands.** You could rewrite the entire codebase in another language, and as long as those decisions (identity injection at boot, decoupling disk from machine, cloud-native layers) remain, it is still Kurrent. Conversely, if the architecture is compromised to cater to some "best practice," even if not a single line of code changes, the project is already dead.
 
 Thus, we adopt pragmatism towards implementation-level flaws, but maintain zero tolerance for architectural compromises.
 
@@ -87,7 +87,7 @@ In those three seconds, what I saw was not the code; I saw the entire constructi
 - `/boot-vars` is consumed by iPXE at boot time, before any operating system is running. The boot firmware has no keystore and nowhere to carry credentials. Adding authentication would silently 401 the boot chain of every Worker—directly killing zero-touch registration and dynamic boot variable injection, the two core features.
 - The boot chain runs over plaintext HTTP. Even if you stuff a token into the iPXE menu script, anyone who can reach that endpoint can intercept it on the wire. Authentication here does not raise the bar; it only adds a credential worth stealing.
 - This is a controlled internal network project. The endpoint returns the iSCSI server address, base IQN, and default menu—precisely the information that must be sent to booting clients, and which is already observable at the network layer (DHCP, ARP, iSCSI login). It does not constitute "sensitive information disclosure."
-- The true abuse vector (malicious bulk registration of Workers via MAC) cannot be prevented by adding a token, because the token itself is observable. The real mitigation lies at the network layer (LAN isolation, switch ACL), and auto-registration can be completely disabled via `KURRENT_CP_AUTO_REGISTER=false`.
+- The true abuse vector (malicious bulk admission into the device pool via MAC) cannot be prevented by adding a token, because the token itself is observable. The real mitigation lies at the network layer (LAN isolation, switch ACL); and this surface already has a switch of its own — the **registration window is closed by default**, so an unknown MAC is admitted only while a window is explicitly open (TTL 1–60 minutes, auto-closing on expiry) and carries a valid public key; the identity-signature enforcement switch works the same way (persisted in `state/settings.json`, toggled from the Devices page). And admission is not authorization — authorization comes from binding.
 
 **This was a construction worker standing in front of a load-bearing wall, saying: "There is no door here; that’s a risk. Let me open one." They knew how to install a door (syntax), but they did not understand the building (architecture).**
 

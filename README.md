@@ -17,7 +17,7 @@ Read our manifesto: **[about/en/Manifesto.md](./about/en/Manifesto.md)** — *Ou
 
 ## NVMe-oF: The Primary Data Plane
 
-Storage is NVMe-oF-first: nodes join with `backend=nvmet` (default) and serve disks through the in-kernel NVMe-oF target (NVMe over TCP, port 4420). One NQN namespace (`nqn.2026-07.com.kurrent`), DHHC-1 authentication per worker, credentials derived automatically at enroll, and a boot chain wired for `nvme://` root paths — iSCSI (`stgt`/`lio`) stays as the compatibility backend.
+Storage is NVMe-oF-first: nodes join with `backend=nvmet` (default) and serve disks through the in-kernel NVMe-oF target (NVMe over TCP, port 4420). One NQN namespace (`nqn.2026-07.com.kurrent`), DHHC-1 authentication per worker — the key is issued automatically when a system disk is created, and the storage node's host-service credential is derived at enroll — and a boot chain wired for `nvme://` root paths; iSCSI (`stgt`/`lio`) stays as the compatibility backend.
 
 ## Getting Started
 
@@ -30,7 +30,7 @@ Deploy a control plane and join storage nodes in minutes — [deployment guide (
 
 ## Key Features: Compute That Flows, Plug-and-Play
 
-A stateless bare-metal delivery flow: machines join the device pool on first boot, then a few clicks in the Web UI bind them to a Worker with a system disk and a default OS. One Worker can carry multiple system disks — Windows, Ubuntu, Debian, CentOS, ESXi — and switch between them online.
+A stateless bare-metal delivery flow: machines join the device pool on first boot, then a few clicks in the Web UI bind them to a Worker with a system disk and a default OS. One Worker can carry multiple system disks and switch between them online. Diskless cold boot over NVMe-oF is verified end to end on **Debian 12/13, Ubuntu 24.04/26.04 and Fedora 44**.
 
 ## Firmware Repo
 
@@ -40,7 +40,7 @@ The firmware at the bottom of the boot chain is built by our companion repo **[K
 
 ## Roadmap
 
-A cross-platform, cross-architecture cloud-native meta-protocol: one stateless semantics, self-similarly nested across bare metal and hypervisors. See **[about/en/ROADMAP.md](./about/en/ROADMAP.md)** (中文: [about/zh/ROADMAP.md](./about/zh/ROADMAP.md)).
+A cross-platform, cross-architecture cloud-native meta-protocol: one stateless semantics, self-similarly nested across bare metal and hypervisors — that vision lives in the **[Manifesto](./about/en/Manifesto.md)**. The concrete directions we are working on: **[about/en/ROADMAP.md](./about/en/ROADMAP.md)** (中文: [about/zh/ROADMAP.md](./about/zh/ROADMAP.md)).
 
 ## Community & Contributing
 

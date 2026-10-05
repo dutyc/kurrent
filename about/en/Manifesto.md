@@ -36,7 +36,7 @@ Now let me explain why my project is not a diskless project.
 
 Diskless is a physical form — no local hard drive. But what I have always wanted is not "no disk." It is **statelessness**: a compute node holds no persistent state of its own. Identity, operating system, data — all are provisioned externally by the network and the control plane. Disposable. Replaceable. Rebuildable in an instant.
 
-At its core, diskless boot is about **identity addressing**: the moment a machine powers on, three questions must be answered — *whose identity, which target, which disk.* The entire industry has spent decades hard-wiring those answers into the machine itself — Linux baked into an initramfs, a human performing surgery every time a new node is added. What I do is pull those answers out of the machine and hand them to the network: iPXE writes the iBFT table at boot, the control plane injects real identity through a dynamic variable chain, and **not a single byte of machine identity is ever written to the disk.**
+At its core, diskless boot is about **identity addressing**: the moment a machine powers on, three questions must be answered — *whose identity, which target, which disk.* The entire industry has spent decades hard-wiring those answers into the machine itself — Linux baked into an initramfs, a human performing surgery every time a new node is added. What I do is pull those answers out of the machine and hand them to the network: the firmware hands the boot tables (NBFT/NBCT) over at boot, the control plane injects real identity through a dynamic variable chain, and **not a single byte of machine identity is ever written to the disk.**
 
 **Let identity flow.** When identity flows, disks decouple from machines. When disks decouple from machines, compute becomes a free particle that can move across any substrate. Diskless is merely the outermost appearance of that process.
 
@@ -44,7 +44,7 @@ At its core, diskless boot is about **identity addressing**: the moment a machin
 
 The virtualization industry has had a wall for twenty years: when a guest OS inside a VM needs to run on bare metal, you perform a P2P conversion — swap drivers, swap the bootloader, swap the HAL. Windows just blue-screens. The wall exists because **the OS is coupled to the hardware it runs on.**
 
-My answer is to make the OS hardware-agnostic: generic driver injection, a unified iPXE/iBFT boot chain, and a disk that is nothing but a pristine iSCSI LUN. **The operating system on that disk never knows — and never needs to know — whether it is running inside a VM or on bare metal.**
+My answer is to make the OS hardware-agnostic: generic driver injection, a unified iPXE/NVMe-oF boot chain, and a disk that is nothing but a pristine block volume. **The operating system on that disk never knows — and never needs to know — whether it is running inside a VM or on bare metal.**
 
 **A system disk running inside a VM can be moved to bare metal with a single click** — and vice versa. No conversion. No reinstall. No migration. Because there was never anything to migrate: the disk has not moved an inch. Only the hands holding it have changed.
 

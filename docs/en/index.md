@@ -22,7 +22,7 @@ Kurrent (周流, zhōuliú — "circling flow") is a cloud-native, stateless bar
 
 - **Stateless compute** — compute nodes hold zero persistent state; plug in and boot.
 - **Plug-and-play** — auto-joins the pool at boot; delivered from the Web UI in one click.
-- **K8s-aligned** — declarative configuration and a CLI matching kubeadm / kubectl.
+- **Zero learning curve** — declarative configuration and a CLI that follow kubeadm / kubectl command semantics.
 - **Dual data plane** — NVMe-oF and iSCSI; storage scales out horizontally.
 
 ## Documentation

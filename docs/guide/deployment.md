@@ -12,9 +12,9 @@
 │  kurrent-dnsmasq    │   LAN   │  storager-agent      │
 │   (DHCP/TFTP 67/69) │◄───────►│   (HTTPS 4840)       │
 │  kurrent-control-   │         │  kurrent-nvmet-host  │
-│   plane (4839)      │         │   (NVMe-oF 4420)     │
+│   plane（本机回环）   │         │   (NVMe-oF 4420)     │
 │  kurrent-webui      │         └──────────┬──────────┘
-│   (4838 / 443)      │                    │ 存储盘 btrfs/xfs
+│   (443 唯一入口)     │                    │ 存储盘 btrfs/xfs
 └─────────┬───────────┘         ┌──────────▼──────────┐
           │ PXE 网段            │  裸机客户端（Devices） │
           └────────────────────►│  无盘引导 → 入池       │
@@ -30,16 +30,16 @@
 | 网关 / DNS | `192.168.80.2` / `223.5.5.5` | DHCP 下发的 option 3 / 6 |
 | 控制面 IP | `192.168.1.10` | 局域网管理地址（WebUI / API / 存储节点回连） |
 | 存储节点 IP | `192.168.1.20` | 控制面经此访问 Agent（4840） |
-| 存储节点主机名 | `storage-01` | 建议先设置，作为 agent-id 默认值 |
+| 存储节点主机名 | `storage-01` | 随意设置（节点身份由 join 自动生成随机标识，与主机名解耦） |
 
 **端口清单**：
 
 | 端口 | 协议 | 服务 | 位置 |
 | --- | --- | --- | --- |
 | 67 / 69 | UDP | DHCP / TFTP（host 网络） | 控制面服务器 |
-| 443 | TCP | HTTPS 入口（nginx：WebUI + `/api/cp` 反代控制面 API） | 控制面服务器 |
-| 4838 | TCP | WebUI（HTTP） | 控制面服务器 |
-| 4839 | TCP | 控制面 API（直连） | 控制面服务器 |
+| 80 | TCP | HTTP → 443 自动 301 升级（不承载内容/凭据） | 控制面服务器 |
+| 443 | TCP | 唯一入口：HTTPS（WebUI + `/api/cp` 反代控制面 + 组件 enroll/renew + 引导链） | 控制面服务器 |
+| 4839 | TCP | 控制面 API（仅本机回环：`kurrent init` 健康检查 / 调试；不对外开放） | 控制面服务器 |
 | 4840 | TCP | 存储 Agent HTTPS（控制面 → Agent） | 存储节点 |
 | 4420 | TCP | NVMe-oF 数据面 | 存储节点 |
 
@@ -106,12 +106,34 @@ curl http://127.0.0.1:4839/healthz          # {"status":"ok"}
 head -5 dnsmasq/dnsmasq.conf                # interface=ens33 ...（已按 yml 生成）
 ```
 
-浏览器访问 `http://<控制面IP>:4838`（WebUI）。生产建议设置管理口令：以 `KURRENT_CP_TOKEN=<口令>` 环境变量执行 `docker compose up -d`（Bearer 鉴权凭据不进声明配置）。
+浏览器访问 `https://<控制面IP>/`（WebUI，唯一入口 443；HTTP 自动 301 升级）。
+
+**CLI 管理凭据**：`kurrent init` 已自举 `control_plane/state/admin.conf`（kurrent
+原生扁平 YAML：入口地址 + admin 客户端证书及其信任锚路径，0600）。CLI 自动发现顺序
+`--credentials` ＞ `KURRENT_CREDENTIALS` ＞ 当前目录 `control_plane/state/admin.conf`
+——仓库目录下开箱即用（admin 证书走 443 mTLS）；异地管理时拷贝该文件并显式指定路径，
+`--server` 可覆盖文件中的入口地址。认证体系（认证器链 / 会话 / RBAC）详见 API 文档
+1.3。
+
+**WebUI 登录方式**（二选一）：
+
+1. **管理 token（登录页）**：`kurrent token create --usage admin` 签发后在登录页粘贴
+   → 换取 HttpOnly 会话 Cookie（TTL 7 天滑动续期，刷新/重开浏览器保持登录；侧边栏
+   底部可登出）。
+2. **管理证书（自动认证）**：将 admin 证书转为 PKCS#12 导入系统证书库，浏览器访问
+   时自动完成 mTLS 认证、无需登录：
+
+   ```bash
+   openssl pkcs12 -export -out kurrent-admin.p12 \
+     -inkey control_plane/state/pki/users/admin/client.key \
+     -in control_plane/state/pki/users/admin/client.crt
+   # 双击 kurrent-admin.p12 导入（Windows/macOS 系统证书库；Firefox 需单独导入）
+   ```
 
 **防火墙**（控制面服务器）：
 
 ```bash
-sudo ufw allow 67,69/udp && sudo ufw allow 443,4838,4839/tcp && sudo ufw reload
+sudo ufw allow 67,69/udp && sudo ufw allow 80,443/tcp && sudo ufw reload
 ```
 
 ### 1.5 签发存储节点引导凭据
@@ -127,6 +149,7 @@ bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，TTL 内可被多次 enr
 
 # 存储节点上执行（kubeadm join 同构；命令已携带控制面地址，节点执行即自动生成/更新声明）：
 kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
+# 加入后验证：kurrent agents list（或 WebUI「Agent 列表」health=ok）
 ```
 
 > token 是**集群级通用引导凭据**（kubeadm token create 同构）：不绑节点、TTL 内可被多次 enroll 复用，任意存储节点可用同一 token 加入；有效期为 7 天（`spec.pki.bootstrapTokenTtlDays`），过期重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
@@ -153,7 +176,7 @@ kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
 ```
 
 `kurrent join` 完成三件事（kubeadm join 同构，幂等可重跑）：
-1. 生成/更新 `storager/kurrent.yaml`（缺失时按模板自动生成：`metadata.name` 取宿主机名、地址同步进 `spec.controlPlane.url`；已存在则读入合并——非 forbid 式，手工编辑保留）
+1. 生成/更新 `storager/kurrent.yaml`（缺失时按模板自动生成：`metadata.name` 自动生成随机短标识、地址同步进 `spec.controlPlane.url`；已存在则读入合并——非 forbid 式，手工编辑保留。人工输入只需写 `metadata.remark` 备注——随首次 enroll 登记进控制面台账，WebUI 卡片展示、编辑表单可改）
 2. 写入通用引导凭据 `storager/bootstrap/agent.token`（`--token` 给则写入；不给则要求文件已就位。`nvmet-host.token` 由 agent enroll 按能力派生自动生成，无需手工提供）
 3. 同步 `.env` 插值键（组件 PKI 宿主路径 `KURRENT_AGENT_PKI_HOST` 等）并拉起/重启 agent 容器（backend 决定编排：nvmet → `storager/nvmeof`，stgt/lio → `storager/iscsi`）
 
@@ -181,11 +204,11 @@ docker ps    # 预期：storager-agent / kurrent-nvmet-host（或 stgt/lio 对�
 ### 2.4 验证
 
 ```bash
-docker logs storager-agent 2>&1 | grep pki     # pki: client cert ok (cn=agent-storage-01)
+docker logs storager-agent 2>&1 | grep pki     # pki: client cert ok (cn=agent-0d26b6f33a89)
 # 回到控制面服务器：
 kurrent agents list
-# ID           HEALTH  BASE_URL                          ROLE  ENABLED  TAGS
-# storage-01   ok      https://192.168.1.20:4840         disk  true     auto,nvmet,storage
+# ID             REMARK       HEALTH  BASE_URL                       ROLE  ENABLED  TAGS
+# 0d26b6f33a89   storage-01   ok      https://192.168.1.20:4840      disk  true     auto,nvmet,storage
 ```
 
 ## 第 3 步：最小端到端验证

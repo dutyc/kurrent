@@ -21,39 +21,60 @@ It does **not** generate iPXE menus, serve static files, or directly operate `tg
 
 ### 1.1 Base URL
 
-Local example:
+External entry point (the only one): `https://<host>/api/cp` (nginx 443; port 80 only redirects with 301).
+
+Local debugging (loopback mapping, on the control-plane host):
 
 ```text
 http://localhost:4839
 ```
 
+> The entry point uses a TOFU self-signed certificate (`control_plane/state/certs/server.crt`,
+> generated automatically at startup), so curl needs `-k`, or
+> `--cacert control_plane/state/certs/server.crt` to pin that exact certificate.
+
 Replace with the actual address if you expose it on a different port or domain.
 
-### 1.2 Environment File
+### 1.2 Environment Variables
 
-The container reads environment variables through the Compose file:
+The control plane does **not** parse a `.env` file; it reads container environment
+variables via `os.getenv(...)`. The root `docker-compose.yml` currently injects
+only `TZ`; add any extra switch you need (for example the development-mode
+`KURRENT_CP_INSECURE=1`, local only, never in production) to that service's
+`environment:` block, or pass it with `docker compose --env-file`.
 
-```yaml
-env_file:
-  - ./control_plane/control_plane.env
-```
+### 1.3 Authentication (authenticator chain)
 
-The Control Plane code does **not** parse a `.env` file directly; it reads container environment variables via `os.getenv(...)`.
+External access goes through the nginx 443 entry point (the only external entry);
+control-plane port 4839 is bound to localhost only. Except `GET /healthz` and the
+iPXE boot-chain endpoints (`/boot-vars`, `/devices/report`, `/devices/challenge`),
+management endpoints require authentication. Three credential types are tried
+in order (serial short-circuit: first success wins; an invalid credential returns `401` without falling through):
 
-### 1.3 Authentication
+| Credential | Carrier | Notes |
+|---|---|---|
+| mTLS client certificate | 443 mutual TLS | admin certificate issued during setup (CN=username, O=group); the CLI auto-discovers `control_plane/state/admin.conf` (a binary outside the repo can install a self-contained snapshot into `~/.kurrent` with `kurrent credentials install`; it is the last link in the discovery chain). nginx validates the chain (internal CA) and passes the DN through; the control plane maps CN/O to identity |
+| Management token | `Authorization: Bearer <token>` | issued by `kurrent token create --usage admin` (only a sha256 digest is stored, TTL enforced); for scripts and WebUI sign-in |
+| Session cookie | `kurrent_session` | obtained via `POST /session` with a certificate or a management token (HttpOnly signed session, 7-day sliding TTL); browser sign-in state |
 
-If the environment variable `IPXE_CP_TOKEN` is empty, the Control Plane does **not** require authentication.  
-If `IPXE_CP_TOKEN` is set, **all** endpoints except `GET /healthz` must include:
+Authorization (minimal RBAC): read requests (GET) only need to be **authenticated**
+(no group check); write requests (POST/PUT/PATCH/DELETE) require the admin group,
+otherwise `403`. Component channels are unchanged: `/enroll/renew` is enforced by
+nginx (component certificates); boot-chain endpoints keep their own validation.
 
-```http
-Authorization: Bearer <IPXE_CP_TOKEN>
-```
+Development mode: `KURRENT_CP_INSECURE=1` allows all requests (identity
+insecure/admin); local development only, never in production — there is no
+"no credential configured means open" path.
 
 Example:
 
 ```bash
-export BASE_URL=http://localhost:4839
-export TOKEN=replace-me
+# On the control-plane host: the CLI auto-discovers admin.conf and uses 443 mTLS
+kurrent agents list
+
+# Scripts: management token (kurrent token create --usage admin)
+export BASE_URL=https://<host>/api/cp
+export TOKEN=<admin-token>
 ```
 
 curl with authentication:
@@ -65,22 +86,27 @@ curl -s "$BASE_URL/workers" \
 
 ---
 
-## 2. Files Are the Source of Truth
+## 2. State and Configuration Files
 
-The current Control Plane state files are divided as follows:
+The current Control Plane state and configuration are divided as follows (container paths; the host counterparts are `control_plane/state/` and `control_plane/config/`):
 
 | File | Meaning |
 |---|---|
 | `config/agents.yml` | Agent node inventory and scheduling roles |
-| `state/workers.yml` | Worker storage inventory |
+| `state/devices.yml` | Device ledger (pool / bindings / fingerprint / public key) — the **single authority for bindings** (`bound_worker_id`) |
+| `state/workers.yml` | Worker ledger (compute identity / system disks / default boot) |
+| `state/credentials.yml` | NVMe-oF key store (DHHC-1, key follows the Worker) |
+| `state/credential-push.yml` | Credential push-state ledger (per-Agent delivery results, for reconciliation and projection, see 7.7) |
 | `state/masters.yml` | Master tag ledger (os / os_version annotations, see 6.4) |
-| `dnsmasq/dhcp-hosts.conf` | Single source of truth for `MAC -> hostname` bindings |
-| `state/operations.jsonl` | Control Plane operation audit trail |
+| `state/settings.json` | Runtime settings (registration window, enforcement switch) |
+| `state/operations.jsonl` | Control Plane operation audit trail (with actor) |
+| `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` bindings (**derived view**; the device ledger is authoritative) |
 
 Notes:
 
-- `workers.yml` does **not** store MAC addresses.
-- In the Compose file, mount the entire `dnsmasq` directory into the container, not just the single `dhcp-hosts.conf` file. The Control Plane performs an atomic replace using a temporary file when writing.
+- `workers.yml` does **not** store MAC addresses — MAC addresses and bindings live in the device ledger, and the Worker side only holds a projection.
+- The Compose file mounts the whole `dnsmasq/` directory into the control-plane container (which also writes `dnsmasq.conf` there).
+- `dhcp-hosts.conf` is written by **truncating in place** (preserving the inode) rather than via an atomic replace: the file is bind-mounted into the dnsmasq container at file level, so replacing the inode would leave the container reading the old file.
 - `dnsmasq/dhcp-hosts.conf` contains one binding per line, with a fixed format:
 
 ```text
@@ -94,6 +120,9 @@ Notes:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/healthz` | Health check |
+| `GET` | `/whoami` | Current request identity (authenticator chain result, see 1.3) |
+| `POST` | `/session` | Exchange credentials for a session cookie (sign-in, see 1.3) |
+| `DELETE` | `/session` | Sign out (clear the session cookie, see 1.3) |
 | `GET` | `/boot-vars` | Dynamic iPXE boot variable injection, no auth required |
 | `GET` | `/devices/report` | iPXE device info reporting (no auth, 11 fields, see 16.6) |
 | `GET` | `/devices/challenge` | One-time nonce issuance (no auth, challenge-response, see 5.2) |
@@ -103,7 +132,7 @@ Notes:
 | `POST` | `/devices/import` | Bulk import device manifest (see 16.4) |
 | `DELETE` | `/devices/{mac}` | Revoke a device (see 16.5) |
 | `GET` | `/settings/registration-window` | Get registration window status (see 5.1) |
-| `POST` | `/settings/registration-window` | Open the registration window (TTL hard cap 1-60 min, see 5.1) |
+| `POST` | `/settings/registration-window` | Open the registration window (TTL hard cap 1-60 min; optional admission quota `max_devices` 1-1000, see 5.1) |
 | `DELETE` | `/settings/registration-window` | Close the registration window early (see 5.1) |
 | `GET` | `/settings/enforcement` | Get the device signature enforcement switch (see 5.1) |
 | `PUT` | `/settings/enforcement` | Toggle the device signature enforcement switch (see 5.1) |
@@ -112,6 +141,8 @@ Notes:
 | `POST` | `/agents/probe` | Probe an Agent and auto-derive registration parameters (preview, no file writes) |
 | `PUT` | `/agents/{agent_id}` | Update an Agent’s configuration (id cannot be changed) |
 | `POST` | `/pki/tokens` | Issue a cluster-wide bootstrap token (not node-bound, reusable within TTL, see 6.5) |
+| `GET` | `/pki/tokens` | List bootstrap token ledger entries (see 6.5) |
+| `DELETE` | `/pki/tokens/{token_id}` | Revoke a token (deletion takes effect immediately, see 6.5) |
 | `DELETE` | `/agents/{agent_id}` | Remove an Agent’s registry entry (incl. master-tag cleanup, see 6.6) |
 | `GET` | `/agents/{agent_id}/luns` | List iSCSI targets/LUNs on a given Agent |
 | `GET` | `/masters` | Aggregate master image inventory from all storage nodes (merged with registered tags, for clone selection) |
@@ -124,7 +155,7 @@ Notes:
 | `POST` | `/workers` | Register a Worker identity (hostname binding; `mac` optional — providing it binds the device directly) |
 | `POST` | `/workers/batch` | Bulk-create Workers (count + naming rule, per-item independent, optional `macs` direct bind, see 7.6) |
 | `POST` | `/workers/{worker_id}/luns/disk` | Create a system disk LUN for a given Worker |
-| `POST` | `/workers/luns/disk/batch` | Batch create system disks for multiple Workers (each specifies a storage node) |
+| `POST` | `/workers/luns/disk/batch` | Batch create system disks for multiple Workers (per-item node naming, or `workers` placed by the Control Plane; `dry_run` returns a plan) |
 | `DELETE` | `/workers/{worker_id}/luns/disk/{os_tag}` | Delete a single system disk of a Worker (with option to keep/delete .img file) |
 | `PUT` | `/workers/{worker_id}/default-disk` | Set the Worker’s default boot configuration (default disk os_tag / menu item / timeout) |
 | `GET` | `/workers` | List Workers |
@@ -132,7 +163,7 @@ Notes:
 | `GET` | `/workers/{worker_id}/status` | Query Worker inventory and real-time status |
 | `DELETE` | `/workers/{worker_id}` | Delete a Worker |
 | `POST` | `/workers/delete/batch` | Batch delete Workers (each item processed independently, with success/failure summary) |
-| `PUT` | `/workers/{worker_id}/credential` | Set/update the NVMe-oF authentication key (DHHC-1 validation, see 7.7) |
+| `PUT` | `/workers/{worker_id}/credential` | Set/rotate the NVMe-oF authentication key (DHHC-1 validation; nvmet disk creation already issues one, see 7.7) |
 | `DELETE` | `/workers/{worker_id}/credential` | Delete the NVMe-oF authentication key (revoke authentication, see 7.7) |
 | `GET` | `/workers/{worker_id}/credential` | Query credential metadata (never returns plaintext, see 7.7) |
 | `GET` | `/operations` | Read operation audit log |
@@ -186,7 +217,7 @@ The response of `/boot-vars` is a projection of the inventory:
 | `base_nqn` | The prefix of the default boot disk NQN (same disk selection rule) — C3 assembly: the disk NQN is generated by the control plane from the uniform template `base:worker_id.os.<os_tag>`, consumed by the firmware as `sanboot nvme://<ip>:4420/${base-nqn}:<worker>.<os>.<os-tag>` (re-assembled by the firmware = the authoritative disk-record value). Not returned when the disk record lacks `nqn` (no derivation — legacy environments are not supported) or when the Worker has no system disk. |
 | `base_iqn` | The IQN of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk) with the last colon-and-following part stripped — the disk NQN is the authoritative identifier, the IQN is derived from it. **Not returned** if the Worker has no system disk (iPXE falls back to the static default in `boot.ipxe.cfg`). |
 | `storager_ip` | The `storager_ip` of the Agent that hosts the default boot disk (same disk selection rule as above) — the data-plane address shared by NVMe-oF boot and the iSCSI installers. Not returned when there is no system disk. |
-| `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`, consumed by the installer iSCSI assembly). The root-path assembly is done on the iPXE side. **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is determined first from the Agent’s `tags` in `agents.yml` (the presence of `nvmet`/`lio`/`stgt`), then by querying the Agent’s `/capabilities` `backend` field, and finally defaulting to stgt format if the query fails. **Not sent for nvmet backends** (the menu installer items are guarded by `isset ${iscsi-sep}` and skipped). Not returned when there is no system disk. |
+| `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`, consumed by the installer iSCSI assembly). The root-path assembly is done on the iPXE side. **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is resolved by **querying the Agent’s `/capabilities` `backend` field in real time** (the node reports its own capability — capability is truth); if the agent is unregistered / the query fails / the value is invalid, stgt format is assumed. It is **not derived from the Agent’s `tags`** in `agents.yml` (tags are human annotations only — otherwise a drifting tag would assemble a wrong separator). **Not sent for nvmet backends** (the menu installer items are guarded by `isset ${iscsi-sep}` and skipped). Not returned when there is no system disk. |
 | `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected when the Worker is bound and has a key entry**; not returned when there is no key / the Worker is unbound / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (C3 enabled: conditional assembly in the menu, plaintext connection when no key) |
 | `hostnqn` | The Worker’s initiator Host NQN (`KURRENT_CP_NQN_BASE` + `:host.<worker_id>`, matching the host entry registered in nvmet-host); **injected when the Worker is bound**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch 0011 supports the `hostnqn` setting) |
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — 2026-08-30 MAIN MENU dynamicization: the menu keeps a single generic OS item (`boot-os`), the firmware assembles `nvme://...:${hostname}.${os}` with this variable, so adding a supported OS requires no script changes. Same origin as the disk NQN suffix. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
@@ -203,8 +234,8 @@ hostname miss or not provided -> mac -> devices.yml (device inventory) -> bound_
 not identified and mac provided ->
   - device in pool (pooled) -> reboot loop (menu-default=reboot + short timeout), waiting for binding
   - device revoked -> empty script (menu stays)
-  - unknown MAC + registration window open with a valid public key -> enter the device pool (see “Registration-Window Enrollment” below), return reboot loop
-  - unknown MAC + window closed / no public key -> empty script (menu stays; report only records the fingerprint, no pool entry)
+  - unknown MAC + registration window open + quota left + a valid public key -> enter the device pool (see “Registration-Window Enrollment” below), return reboot loop
+  - unknown MAC + window closed / quota used up / no public key -> empty script (menu stays; report only records the fingerprint, no pool entry)
 ```
 
 ### Default Boot Item Rules
@@ -225,19 +256,20 @@ default_disk (set separately after disk creation, see 7.3) -> boot.menu_default 
 
 ### Registration-Window Enrollment (Zero-touch Provisioning)
 
-When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11-field report plus optional `pubkey`, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window** (2026-08-21 ruling): only when the window is open and the report carries a valid ECDSA P-256 public key does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level).
+When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11-field report plus optional `pubkey`, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window** (2026-08-21 ruling): only when the window is open, the admission quota is not used up, and the report carries a valid ECDSA P-256 public key does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level).
 
-1. `GET /devices/report`: unknown MAC + window open + `pubkey` present → written to `state/devices.yml` (`state=pooled`, fingerprint stored, `key_hash` filled, `source=ipxe`)
+1. `GET /devices/report`: unknown MAC + window open + quota left + `pubkey` present → written to `state/devices.yml` (`state=pooled`, fingerprint stored, `key_hash` filled, `source=ipxe`)
 2. `GET /boot-vars`: MAC in the pool and unbound → returns `menu-default=reboot` + short timeout, rebooting in a loop until the admin binds it
 3. After the admin binds the device to a Worker (WebUI / API; single bind 16.7, batch bind preview/execution 16.9/16.10), the next boot follows the Worker configuration normally
 
-Key claim for existing devices: an already-pooled device reporting with a public key during the window gets its `key_hash` filled in (claim complete); a key mismatch is rejected (revoke/re-register by deleting the inventory entry). After all devices have claimed their keys, enable signature enforcement (see 5.1).
+Key claim for existing devices: an already-pooled device reporting with a public key during the window gets its `key_hash` filled in (claim complete); a key mismatch is rejected (revoke/re-register by deleting the inventory entry). A claim depends only on the window being open and is not constrained by the admission quota. After all devices have claimed their keys, enable signature enforcement (see 5.1).
 
 Controls:
 
 | Item | Default | Description |
 |---|---:|---|
 | Registration window | Closed | Open it with `POST /settings/registration-window` during deployment (TTL hard cap 1-60 min, auto-closes on expiry), see 5.1 |
+| Admission quota | Unlimited | Optional `max_devices` when opening (1-1000 devices); once that many devices have auto-joined within the window, admission stops, see 5.1 |
 | Signature enforcement | Off | `GET/PUT /settings/enforcement`: when on, `/boot-vars` is only served to bound devices that pass signature verification, see 5.1 |
 | `IPXE_CP_AUTO_BOOT_TIMEOUT` | `1` | Menu timeout in milliseconds during the reboot loop. |
 
@@ -384,40 +416,53 @@ If `storager_ip` is not configured, the Control Plane falls back to the host por
 
 #### Description
 
-The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL has a hard cap of 60 minutes (a permanent window cannot be configured at the code level) and auto-closes on expiry (lazy computation; query for the actual state). All endpoints require `Authorization: Bearer`.
+The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL has a hard cap of 60 minutes (a permanent window cannot be configured at the code level) and auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
 
 The signature enforcement switch (transition-period compatibility): when off, keyless devices are served as before (anti-impersonation boundary only); when on, `/boot-vars` applies the 4th injection condition to bound devices — no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
 
 #### GET /settings/registration-window
 
-Queries the registration window status (no record / already expired → `open=false`).
+Queries the registration window status (no record / already expired → `open=false`). The time dimension and the quota dimension are projected side by side:
 
 | Field | Type | Description |
 |---|---|---|
-| `open` | bool | Whether the window is open |
+| `open` | bool | Whether the window is open (time dimension; an exhausted quota does not change it) |
 | `opened_at` | str | ISO8601 opening time (`null` when closed) |
 | `ttl_minutes` | int | TTL in minutes configured when opened (`null` when closed) |
 | `closes_at` | str | ISO8601 expected closing time (`null` when closed) |
 | `remaining_seconds` | int | Remaining seconds (`0` when closed) |
+| `max_devices` | int \| null | Admission quota (devices); `null` = unlimited |
+| `admitted` | int | Devices admitted within this window (derived, see below) |
+| `remaining_devices` | int \| null | Quota left; `null` = unlimited |
+| `quota_exhausted` | bool | Whether the quota is used up (no further devices join the pool; the window record is not cleared) |
+
+`admitted` is a **derived** value with no stored counter: it counts device-ledger entries with `source == "ipxe"` and `first_seen >= opened_at`. Manual registration (`POST /devices`, `source=manual`) and manifest import therefore do not consume quota, and devices that existed before the window opened (including key-only claims) are not counted.
 
 ```json
-{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799}
+{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false}
 ```
 
 #### POST /settings/registration-window
 
-Opens the registration window (status 201). If already open → 409 (close it first); an expired leftover record can be re-opened directly (overwrite). Recorded as an operation (`settings.registration_window`).
+Opens the registration window (status 201). If already open → 409 (close it first); an expired leftover record can be re-opened directly (overwrite), and a reopened window derives its quota from the new opening time. Recorded as an operation (`settings.registration_window`).
 
 **Request body**:
 
 | Field | Required | Type | Description |
 |---|---|---|---|
 | `ttl_minutes` | Yes | int | 1-60 (returns 400 outside the range) |
+| `max_devices` | No | int \| null | Admission quota (devices), 1-1000 (returns 400 outside the range); omitted/`null` = unlimited, still bounded by the TTL |
 
 ```bash
-curl -X POST http://<host>:4839/settings/registration-window \
-  -H "Authorization: Bearer $CP_TOKEN" -H "Content-Type: application/json" \
+# Time-boxed only
+curl -X POST "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"ttl_minutes": 30}'
+
+# Time-boxed + count-boxed: admit at most 20 new devices into the pool
+curl -X POST "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"ttl_minutes": 30, "max_devices": 20}'
 ```
 
 **Response**: same as GET (window status after opening).
@@ -427,8 +472,8 @@ curl -X POST http://<host>:4839/settings/registration-window \
 Closes the registration window early (409 when never opened / no record). Recorded as an operation (`settings.registration_window`).
 
 ```bash
-curl -X DELETE http://<host>:4839/settings/registration-window \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X DELETE "$BASE_URL/settings/registration-window" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response**: `{"open": false}`
@@ -444,8 +489,8 @@ Gets/toggles the device signature enforcement switch (persisted to `state/settin
 | `enabled` | Yes | bool | `true` = enforce (keyless / signature-less devices are denied boot) |
 
 ```bash
-curl -X PUT http://<host>:4839/settings/enforcement \
-  -H "Authorization: Bearer $CP_TOKEN" -H "Content-Type: application/json" \
+curl -X PUT "$BASE_URL/settings/enforcement" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 ```
 
@@ -484,6 +529,10 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 Lists Agents configured in `config/agents.yml`. By default, it also probes each Agent’s `/healthz` and `/capabilities` in real time.
 
+`health` has three states: `ok` (healthy); `degraded` (the agent is up but the data plane is not ready — for the nvmet backend this means the host service is unreachable or configfs is not ready; the reason is in `error`); `error` (agent unreachable or capability probing failed). With `live=false` no probing is done and `health` is absent.
+
+Identity layering: `id` is the machine identity (normally auto-generated by `kurrent join` as a random short id — 12 hex chars, same form as the disk `os_tag`, auto-registered at enroll; manual registration is 6.1, and the readable ids in examples are illustrative only); `remark` is a human label (from the node declaration `metadata.remark`, shown on the WebUI card and editable in the edit form or via 6.3).
+
 ### Query Parameters
 
 | Parameter | Required | Default | Description |
@@ -518,10 +567,8 @@ curl -s "$BASE_URL/agents?live=false" \
       "cd": false
     },
     "enabled": true,
-    "tags": [
-      "storage",
-      "lio"
-    ],
+    "tags": ["storage"],
+    "remark": "primary storage node",
     "health": "ok",
     "capabilities": {
       "backend": "lio",
@@ -554,8 +601,9 @@ Registers a new Agent: writes to `config/agents.yml` and takes effect immediatel
 | `base_url` | Yes | Agent Control Plane API address. Must start with `http://` or `https://`. Trailing `/` is removed automatically. |
 | `storager_ip` | No | Data-plane address (business network IP, protocol-neutral). Falls back to the hostname of `base_url` if omitted. |
 | `role` | No | Roles: `disk` = can create system disks (storage node), `cd` = can mount ISOs (optical drive node). Default `{disk: false, cd: false}`. |
-| `tags` | No | Free-form tag array (e.g., `storage`/`lio`/`stgt`), for display. The `lio`/`stgt` tags also participate in `/boot-vars` separator derivation. |
-| `enabled` | No | Whether the Agent is enabled. Default `true`. |
+| `tags` | No | Free-form tag array (e.g., `storage` / `rack-a3`), for **human annotation / display only**. It does not participate in `/boot-vars` separator derivation (the backend type is resolved by `/boot-vars` querying the Agent’s `/capabilities` in real time, see 5.1). |
+| `enabled` | No | Whether the Agent is enabled. `false` = **drain**: no new disks accepted (always 409), existing disks keep serving and booted devices are unaffected. Default `true`. |
+| `remark` | No | Human label (display-only), empty string by default. Normally no need to set it by hand — it is auto-registered from the node declaration `metadata.remark` at enroll (see 6.5.1). |
 
 ### curl
 
@@ -568,8 +616,9 @@ curl -s -X POST "$BASE_URL/agents" \
     "base_url": "http://host.docker.internal:4840",
     "storager_ip": "192.168.1.6",
     "role": {"disk": true, "cd": false},
-    "tags": ["storage", "stgt"],
-    "enabled": true
+    "tags": ["storage"],
+    "enabled": true,
+    "remark": "storage node 02"
   }'
 ```
 
@@ -582,7 +631,8 @@ curl -s -X POST "$BASE_URL/agents" \
   "storager_ip": "192.168.1.6",
   "role": {"disk": true, "cd": false},
   "enabled": true,
-  "tags": ["storage", "stgt"]
+  "tags": ["storage"],
+  "remark": "storage node 02"
 }
 ```
 
@@ -599,13 +649,13 @@ curl -s -X POST "$BASE_URL/agents" \
 
 ### Description
 
-Probes an Agent and auto-derives registration parameters (**read-only preview, no files are written**): calls the Agent’s `/healthz` and `/capabilities` over mTLS (the Control Plane’s client certificate, bound to the internal CA — K8S-style), and derives:
+Probes an Agent and auto-derives registration parameters (**read-only preview, no files are written**): calls the Agent’s `/healthz` and `/capabilities` over mTLS (the Control Plane’s client certificate, bound to the internal CA), and derives:
 
 | Parameter | Derivation Rule |
 |---|---|
 | `role.disk` | Always `true` (Agent is a storage node) |
 | `role.cd` | From `capabilities.cd` |
-| `tags` | `["storage", backend]` (where `backend` is `lio` or `stgt`; also used for `/boot-vars` separator derivation) |
+| `tags` | `["storage"]` (human tags only; the backend type is **not written into tags** — it is returned separately as the `backend` field and resolved by `/boot-vars` querying `/capabilities` in real time) |
 | `storager_ip` | Falls back to `base_url` hostname if not provided |
 
 ### Request Body Fields
@@ -630,7 +680,7 @@ curl -s -X POST "$BASE_URL/agents/probe" \
 {
   "base_url": "http://host.docker.internal:4840",
   "role": {"disk": true, "cd": false},
-  "tags": ["storage", "stgt"],
+  "tags": ["storage"],
   "storager_ip": "host.docker.internal",
   "enabled": true,
   "backend": "stgt",
@@ -657,17 +707,18 @@ curl -s -X POST "$BASE_URL/agents/probe" \
 
 Updates an existing Agent: overwrites the corresponding entry in `config/agents.yml` and takes effect immediately (disk creation / mount scheduling uses the new configuration). The `id` cannot be changed (taken from the path parameter).
 
-Use cases: iSCSI server configuration changes — data-plane address migration, API address change, disable/enable a node.
+Use cases: disable/enable a node (drain), data-plane address migration, remark and role adjustments. **For auto-registered nodes (tags containing `auto`), `base_url` is managed by the node declaration** (declaration authority, see 6.5.1): submitting the current value succeeds (the regular shape of a WebUI edit save); submitting a different value returns `409` — after a node move, edit `spec.agent.advertiseUrl` in the node’s `storager/kurrent.yaml` and re-run `kurrent join`; renewal syncs it automatically. Manually registered nodes can still change the address from the control plane.
 
 ### Request Body Fields
 
 | Field | Required | Description |
 |---|---:|---|
-| `base_url` | Yes | Agent Control Plane API address. Must start with `http://` or `https://`. Trailing `/` is removed automatically. |
+| `base_url` | Yes | Agent Control Plane API address. Must start with `http://` or `https://`. Trailing `/` is removed automatically. **Not editable for auto-registered nodes** (managed by the node declaration, see the description). |
 | `storager_ip` | No | Data-plane address. Falls back to the hostname of `base_url` if omitted. |
 | `role` | No | Roles: `disk` = can create system disks, `cd` = can mount ISOs. Default `{disk: false, cd: false}`. |
-| `tags` | No | Free-form tag array. |
-| `enabled` | No | Whether the Agent is enabled. `false` disables it (it will no longer participate in disk creation/mount scheduling or liveness probes). Default `true`. |
+| `tags` | No | Free-form tag array (human annotations only). |
+| `enabled` | No | Whether the Agent is enabled. `false` = **drain**: no new disks accepted (always 409), existing disks keep serving and booted devices are unaffected. Default `true`. |
+| `remark` | No | Human label (display-only). Full-overwrite semantics — an empty string clears it. |
 
 ### curl
 
@@ -679,8 +730,9 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
     "base_url": "http://host.docker.internal:4840",
     "storager_ip": "192.168.1.8",
     "role": {"disk": true, "cd": false},
-    "tags": ["storage", "stgt"],
-    "enabled": true
+    "tags": ["storage"],
+    "enabled": true,
+    "remark": "standby storage node"
   }'
 ```
 
@@ -693,7 +745,8 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
   "storager_ip": "192.168.1.8",
   "role": {"disk": true, "cd": false},
   "enabled": true,
-  "tags": ["storage", "stgt"]
+  "tags": ["storage"],
+  "remark": "standby storage node"
 }
 ```
 
@@ -703,8 +756,9 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
 |---|---|
 | `400` | `base_url` does not start with http(s) |
 | `404` | Agent `id` not found |
+| `409` | Changing `base_url` of an auto-registered node (tags contain `auto`; the address is managed by the node declaration — the error message explains how to change it) |
 
-> **Probing during edit**: In edit scenarios, it is recommended to first call `POST /agents/probe` (6.2) to verify the new address is reachable before saving. The probe authenticates with the Control Plane’s mTLS client certificate (identity bound to the component CA, K8S-style) — no token is required.
+> **Probing during edit**: In edit scenarios, it is recommended to first call `POST /agents/probe` (6.2) to verify the address is reachable before saving. The probe authenticates with the Control Plane’s mTLS client certificate (identity bound to the component CA) — no token is required. For auto-registered nodes the address is read-only and the probe runs against the current value.
 
 ---
 
@@ -764,17 +818,28 @@ Returns `{ "agent": ..., "name": ..., "removed": true|false }` (`removed=false` 
 
 ### Description
 
-K8S-homomorphic (`kubeadm token create`): the control plane issues a **cluster-wide bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to 7 days). **Not bound to any node** — the node name is self-determined (join defaults to the hostname) and auto-registered at enroll; the token can be **reused across multiple enrolls within its TTL** (not consumed; kubeadm bootstrap tokens do not limit usage count). Every issuance is a new token (plaintext unrecoverable); old tokens expire naturally — no 409 idempotency gate.
+The control plane issues a **cluster-wide bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to 7 days). **Not bound to any node** — the node identity is self-determined (join auto-generates a random short id; the hand-written field is the declaration `metadata.remark` label) and auto-registered at enroll; the token can be **reused across multiple enrolls within its TTL** (not consumed; no usage limit). Every issuance is a new token (plaintext unrecoverable); **revocation is supported** (`DELETE /pki/tokens/{token_id}`, deletion takes effect immediately); tokens that are not revoked expire naturally — no 409 idempotency gate.
 
 The `nvmet-host` component credential is **not issued here**: when an agent enrolls with `backend=nvmet`, the control plane derives one (bound to agent_id) and returns it in the enroll/renew response; the agent persists it to `storager/bootstrap/nvmet-host.token` for the nvmet-host container (capability-driven derivation — issuance does not foresee the backend).
 
 ### POST /pki/tokens
 
+The request body is optional: `{"usage": "bootstrap"}` (default, node bootstrap
+token) or `{"usage": "admin"}` (management token for the authenticator chain
+Bearer path; groups=admin).
+
 #### curl
 
 ```bash
+# Node bootstrap token (default)
 curl -s -X POST "$BASE_URL/pki/tokens" \
   -H "Authorization: Bearer $TOKEN"
+
+# Management token (scripts and WebUI sign-in; same identity as the admin cert)
+curl -s -X POST "$BASE_URL/pki/tokens" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"usage": "admin"}'
 ```
 
 #### Successful response (201)
@@ -782,12 +847,17 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
 ```json
 {
   "token": "a1b2c3.0123456789abcdef",
-  "expires_at": "2026-09-09T12:00:00Z",
-  "usage": ["enroll"]
+  "expires_at": "2026-09-22T12:00:00Z",
+  "usage": ["enroll"],
+  "groups": []
 }
 ```
 
-The `token` plaintext is visible only in this response (storage keeps only the sha256 hash); `usage` is a reserved purpose marker (currently only `enroll`).
+The `token` plaintext is visible only in this response (storage keeps only the
+sha256 hash). `usage=["enroll"]` is a node bootstrap token (validated by enroll;
+not bound to a node, reusable within its TTL); `usage=["admin"]` with
+`groups=["admin"]` is a management token (authenticator-chain Bearer; same as
+`kurrent token create --usage admin`).
 
 #### Common errors
 
@@ -795,19 +865,53 @@ The `token` plaintext is visible only in this response (storage keeps only the s
 |---:|---|
 | `401` | Missing or wrong token |
 
+### GET /pki/tokens
+
+List **non-expired** token ledger entries (management visibility): bootstrap tokens, admin tokens, and nvmet-host derived tokens share one table. Never returns plaintext (already unrecoverable) or `token_secret_hash`; `created_at` is an empty string for legacy entries (the field is injected at issuance; historical entries lack it). Read requests only need authentication (minimal RBAC).
+
+```bash
+curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[
+  {
+    "token_id": "a1b2c3",
+    "usage": ["admin"],
+    "groups": ["admin"],
+    "component": "",
+    "agent_id": "",
+    "name": "admin",
+    "created_at": "2026-09-27T09:00:00+00:00",
+    "expires_at": "2026-10-04T09:00:00+00:00"
+  }
+]
+```
+
+### DELETE /pki/tokens/{token_id}
+
+Revoke a token: deletes the ledger entry, **deletion takes effect immediately** — Bearer validation re-reads the ledger on every request (no caching), so the token gets 401 right after revocation and cannot be restored. "Who revoked which token when" is recorded by the operation audit (`pki.token.revoke`). Write requests require the admin group.
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Returns `{"revoked": "a1b2c3"}` on success; `404` when the token does not exist. The WebUI "Credentials" page and `kurrent token list|revoke` are the same calls.
+
 ### 6.5.1 enroll auto-registration (POST /enroll, nginx entry /api/cp/enroll)
 
-K8S-homomorphic (kubelet auto-registers the Node on first report): when an `agent` component enrolls (`POST /enroll`, Bearer = cluster-wide bootstrap token) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto",)`) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) into the registry. Rules:
+First-report auto-registration: when an `agent` component enrolls (`POST /enroll`, Bearer = cluster-wide bootstrap token) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto", "storage")`; `("auto",)` only for legacy agents that report no capabilities — the **backend type is not written into tags**, it is resolved by `/boot-vars` querying `/capabilities` in real time) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) and `remark` field (agent side `metadata.remark`, human label) into the registry. Rules:
 
 - Token validation: format / registry entry / component match / not expired; generic tokens carry no node binding (the CSR CN self-determines identity; anti-spoofing is enforced by CN checks); derived tokens (`nvmet-host`) must match the agent_id (anti-cross-use)
 - `nvmet-host` components are **not auto-registered** (they share the agent_id; the agent component must be registered first — otherwise 400, container restart retries; the token is not consumed)
 - A non-empty `base_url` must start with `http://` / `https://`, otherwise 400 (no auto-registration)
-- An already-registered agent’s `base_url` is not updated by enrollment (`agents.yml` stays authoritative)
+- When an already-registered agent enrolls/renews again, `base_url` / `remark` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move or remark change, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` are **left untouched**, and fields the node does not report keep their current values
 - An agent reporting `backend=nvmet` gets an extra `nvmet_token` field in the response (derived nvmet-host credential); stgt/lio backends and legacy agents have no such field
 
 ### 6.5.2 One-command join (node side)
 
-Declarative workflow (kubeadm-homomorphic: declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL** (kubeadm token create --print-join-command equivalent); pasting it on the storage node yields the address — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (the address synced into `spec.controlPlane.url`) or read in and merged when present, then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the storager directory from outside the repository root):
+Declarative workflow (declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL**; pasting it on the storage node yields the address — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (`metadata.name` auto-generated random id, the address synced into `spec.controlPlane.url`) or read in and merged when present, then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the storager directory from outside the repository root):
 
 ```bash
 # Control plane (issue a cluster-wide bootstrap token; --cp-url = control-plane HTTPS entry reachable from the storage node, derived from --server otherwise):
@@ -821,7 +925,9 @@ kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef
 
 ### Description
 
-Removes the Agent’s registry entry (`config/agents.yml`) and cleans up its master tags (`state/masters.yml` entry under masters). **Already-issued certificates and running LUNs are unaffected** (after a container restart, bootstrap fails because the id is unregistered and retries).
+Removes the Agent’s registry entry (`config/agents.yml`) and cleans up its master tags (`state/masters.yml` entry under masters). **Control-plane records only — nothing is blocked and no certificates/running LUNs on the node are touched**.
+
+Semantics (a corollary of declaration authority): the deletion is **soft** — the node still runs with its declaration and re-registers automatically at the next renewal (re-joining requires no new bootstrap token); to truly decommission a node, act on the **node side** (stop the containers / remove the declaration). Side effect: after the registry entry is removed, disks still hosted on that node cannot have their boot addresses projected until the node re-registers (the registry is the knowledge); the response reports this via `disks_hosted` / `affected_workers` (informational only, not blocking).
 
 ### curl
 
@@ -833,7 +939,7 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01" \
 ### Successful response
 
 ```json
-{ "deleted": "storage-lio-01", "master_tags_removed": false }
+{ "deleted": "storage-lio-01", "master_tags_removed": false, "disks_hosted": 3, "affected_workers": ["worker-01", "worker-02"] }
 ```
 
 ### Common errors
@@ -955,10 +1061,11 @@ Creates a system disk LUN for a given Worker. System disks are categorized by (o
 
 1. Verify the Worker exists and does not already have a disk for that (os, os_version) (returns `409` if it does).
 2. Generate the disk-level random identifier `os_tag` (12 hex chars, the data-plane unique key) — it determines the disk NQN suffix and filename.
-3. Select a storage Agent (specified by `disk_agent` or auto-selected).
+3. Select a storage Agent (`disk_agent` if given; otherwise the placement policy decides: candidates must be enabled with a ready data plane, and for `type=master` must hold that master locally — no usable candidate returns `503` with `detail.excluded` explaining each node).
 4. Assemble the disk NQN (`base-nqn:worker-id.os.<os_tag>`) and backing filename (`worker-id.os.<os_tag>.img`).
 5. Call the Agent to create the disk target (master clone or empty disk).
 6. Update the Worker’s `disks` inventory in `state/workers.yml` (append to array). On the first disk creation, `state` transitions from `registered` to `ready`.
+7. **Issue on disk creation**: when the disk lands on an nvmet-backed node and the Worker has no key yet, the Control Plane generates a DHHC-1 key locally and pushes it (audited as `credential.issue`, see 7.7) — an existing key is not rotated (key follows the Worker; multiple disks share one key). Non-nvmet backends get no key (DHHC-1 is NVMe-oF-specific; iSCSI uses CHAP).
 
 This endpoint resides under the `/luns/` namespace to reserve space for future data disks (`/luns/data`). In a multi-disk scenario, the default boot disk is determined by the `disk` (os_tag) parameter of `PUT /workers/{worker_id}/default-disk`.
 
@@ -977,7 +1084,7 @@ This endpoint resides under the `/luns/` namespace to reserve space for future d
 | `size` | Conditionally required | Required when `type=empty`. The empty disk size, e.g., `40G`. |
 | `os` | Yes | OS annotation (for human understanding; determines the os segment in the disk NQN/filename). Free string, lowercased, **no whitelist validation** (OS_ITEMS retired 2026-08-30). |
 | `os_version` | No | Version annotation (`''` = no version, the default). At most one disk per (os, os_version); different versions can coexist. |
-| `disk_agent` | No | Specify a storage Agent. If omitted, the Control Plane auto-selects one. |
+| `disk_agent` | No | Specify a storage Agent. If omitted, the Control Plane places it (candidates are checked for a ready data plane and local master availability). |
 
 ### 7.1.1 Clone from Master
 
@@ -1069,9 +1176,21 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
 
 ### 7.1.3 Batch Create System Disks (POST /workers/luns/disk/batch)
 
-Batch deployment scenario: apply the same disk parameters to multiple Workers, each using its pre-assigned storage node (`targets[].agent` is required — it is generated by the WebUI’s “take over selected Workers” or drag-and-drop assignment; there is no common automatic allocation).
+Batch deployment scenario: apply the same disk parameters to multiple Workers. **Two mutually exclusive ways to place them** (supplying both returns `400`):
 
-Same as single-disk creation: `master` clones from a master image, `empty` creates a blank disk. At most one disk per (os, os_version) is allowed; if a Worker already has one it is **automatically skipped** (not considered a failure). **Successfully created Workers automatically set `default_disk` to the batch disk’s `os_tag`** — batch deployment goes directly to the default boot without needing an extra `PUT /workers/{worker_id}/default-disk` call (single-disk creation does NOT set this automatically). Each item is processed independently; a failure of one does not affect the others. Returns a summary of `succeeded` / `skipped` / `failed`.
+- `targets`: name the storage node **per item** (explicit override, the original form);
+- `workers` + `placement`: declare only *which* Workers get a disk and let the **Control Plane place them**.
+
+Placement semantics for the `workers` form — placement is a system decision; the caller supplies intent and constraints:
+
+- **Candidate nodes** = disk role ∧ enabled (not draining) ∧ has `base_url` ∧ **data plane ready** (`healthz.backend_ready` is not `false`) ∧ listed in `placement.candidates` (empty = unrestricted) ∧ (for `type=master`) **the master image exists locally** — cloning happens locally on the node, so a node without that master cannot possibly serve the request;
+- **Assignment** = fewest existing disks first (spread), ties broken by registration order;
+- `placement.pins` pins individual Workers (explicit override): a pinned node does **not** have to be inside `candidates`, but it must itself be usable, otherwise `503`;
+- No usable candidate → `503`, with `detail.excluded` giving the reason per node (wrong role / draining / unreachable / data plane not ready / missing master).
+
+`dry_run=true` returns the plan (`plan` / `warnings`) without creating anything. **Preview and execution share the same placement implementation**, so the node in `plan` is exactly what execution will do (each row's `action` is `create` / `skip` / `error`). Note that a plan for the `targets` form does **not** probe the nodes (it judges create/skip/error from inventory alone), whereas every candidate of the `workers` form was probed during placement.
+
+Same as single-disk creation: `master` clones from a master image, `empty` creates a blank disk. At most one disk per (os, os_version) is allowed; if a Worker already has one it is **automatically skipped** (not considered a failure). **Successfully created Workers automatically set `default_disk` to the batch disk’s `os_tag`** — batch deployment goes directly to the default boot without needing an extra `PUT /workers/{worker_id}/default-disk` call (single-disk creation does NOT set this automatically). Workers placed on nvmet-backed nodes also get their authentication key **issued on disk creation** (each Worker gets its own distinct key, in one pass — see 7.1 step 7 and 7.7). Each item is processed independently; a failure of one does not affect the others. Returns a summary of `succeeded` / `skipped` / `failed`. Items whose target Agent does not exist or is disabled (drain) land in `failed` (`agent not found` / `agent ... disabled`); the remaining items proceed as usual.
 
 #### Request Body Fields
 
@@ -1082,9 +1201,47 @@ Same as single-disk creation: `master` clones from a master image, `empty` creat
 | `os_version` | No | Version annotation (`''` = no version, the default). |
 | `name` | Conditionally required | Required when `type=master`. The master image filename. |
 | `size` | Conditionally required | Required when `type=empty`. The empty disk size, e.g., `40G`. |
-| `targets` | Yes | Array of `{worker_id, agent}`: the Worker identifier and its assigned storage node. |
+| `targets` | Either/or | Array of `{worker_id, agent}`: storage node named per item. |
+| `workers` | Either/or | Array of Worker identifiers: storage node resolved by the placement policy. |
+| `placement` | No | Only applies to `workers`. `candidates` (array restricting the auto-placement pool; empty = all), `pins` (object `{worker_id: agent}`, per-Worker override). |
+| `dry_run` | No | `true` returns the plan only, creating nothing (default `false`). |
 
-#### curl
+#### curl (Control-Plane placement)
+
+```bash
+curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "master",
+    "os": "ubuntu",
+    "name": "_tpl_ubuntu_2204.img",
+    "workers": ["worker-01", "worker-02", "worker-03"],
+    "placement": { "candidates": ["storage-lio-01", "storage-lio-02"] },
+    "dry_run": true
+  }'
+```
+
+#### Plan Response (dry_run)
+
+```json
+{
+  "dry_run": true,
+  "plan": [
+    { "worker_id": "worker-01", "agent": "storage-lio-01", "action": "create" },
+    { "worker_id": "worker-02", "agent": "storage-lio-02", "action": "create" },
+    { "worker_id": "worker-03", "agent": "storage-lio-01", "action": "skip",
+      "reason": "already has a ubuntu system disk" }
+  ],
+  "warnings": [
+    { "agent": "storage-stgt-01", "reason": "does not have master _tpl_ubuntu_2204.img" }
+  ]
+}
+```
+
+To execute, resend the identical request with `dry_run` removed — placement matches the plan.
+
+#### curl (per-item naming, the original form)
 
 ```bash
 curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
@@ -1194,8 +1351,8 @@ After installation finishes, the CD target is cleaned up as part of the Worker d
 |---:|---|
 | `400` | Parameter format error; `os` empty or illegal characters; `type=master` but `name` missing; `type=empty` but `size` missing |
 | `401` | Missing or incorrect Token |
-| `404` | Worker not found when creating a system disk |
-| `409` | `worker_id` already exists; `hostname` already exists; MAC already bound; Worker already has a disk for that (os, os_version) (duplicate version); IQN already exists on Agent; backing file already exists |
+| `404` | Worker not found when creating a system disk; the `disk_agent` Agent does not exist |
+| `409` | `worker_id` already exists; `hostname` already exists; MAC already bound; Worker already has a disk for that (os, os_version) (duplicate version); IQN already exists on Agent; backing file already exists; target Agent is disabled (drain: `agent ... disabled: not accepting new disks`) |
 | `500` | dnsmasq reload failed; file write failure; other unexpected errors |
 | `503` | Agent unreachable; docker.sock unavailable |
 
@@ -1311,7 +1468,7 @@ Deletes a single system disk of a given Worker (by the disk-level random identif
 | Parameter | Default | Description |
 |---|---:|---|
 | `delete_file` | `false` | Whether to also delete the backing `.img` file. `false` only deletes the target (the .img is retained and can be re-attached). |
-| `ignore_missing_target` | `false` | If `true`, ignores a `404 iqn not found` from the Agent and continues with the inventory cleanup. |
+| `ignore_missing_target` | `false` | If `true`, ignores a `404 iqn not found` from the Agent and continues with the inventory cleanup. Same applies when the registry entry of the disk’s Agent has been deleted (ignore=false → 404 `agent not registered`; ignore=true → treated as missing). |
 
 ### Example: Delete System Disk, Keep .img
 
@@ -1420,24 +1577,60 @@ keys are indexed by `worker_id`, and all devices bound to that Worker share the 
 `DHHC-1:<two-digit type>:<base64(key + CRC32 little-endian 4 bytes)>`, with a 32-byte
 (SHA-256) or 64-byte (SHA-512) key body.
 
-After a credential write, the Control Plane **pushes the desired state to the Agent(s) hosting
-the Worker’s system disks** (audited as `credential.push`, never logging the key itself). The
-Agent relays to the storage node’s nvmet host service to register hosts (subsystem = disk,
-named by the disk’s NQN — the NQN is the authoritative disk identifier, the IQN is derived
-from it (`iqn.` + nqn[4:], e.g. `nqn.2026-07.com.controller:worker-01.ubuntu` →
-`iqn.2026-07.com.controller:worker-01.ubuntu`);
-IQNs are never used as subsystem NQNs (NVMe Base Spec §7.9 requires the `nqn.` prefix),
-Host NQN derived from the bound device UUID as `nqn.2014-08.org.ipxe:<uuid>`; devices without
-UUID fall back to the shared NQN `nqn.2014-08.org.ipxe:ipxe`). Push failures are audited but
-never block the main flow (the Agent writes its cache first, and a periodic reconcile replays
-the desired state).
+**Issuance timing: issued on disk creation (2026-10-05)** — when a system disk is created on an
+nvmet-backed node (7.1 step 7, single and batch alike), the Control Plane generates a DHHC-1 key
+for any Worker that has none yet and pushes it (audited as `credential.issue`): the subsystem and
+its matching authentication key land together, so a batch of N disks yields N keys in one pass with
+no per-worker manual step. Creating a disk for a Worker that already has a key does **not** rotate
+it (key follows the Worker; multiple disks share one key). Non-nvmet backends (stgt / lio) get no
+key — DHHC-1 is NVMe-oF-specific. The manual endpoints in this section are therefore narrowed to
+**explicit rotation / revocation** (revocation deletes the entry, so a later disk creation won't
+resurrect it).
 
-Operations that trigger a push: setting/deleting credentials, device bind/unbind/rebind
-(`PUT /workers/{worker_id}/mac`), disk create/delete (including batch), and Worker deletion.
+After a credential write, the Control Plane **pushes the desired state to the Agent(s) hosting
+the Worker’s system disks** (audited as `credential.push`, never logging the key itself). The push
+body carries the plaintext key. The
+Agent relays to the storage node’s nvmet host service to register hosts (the subsystem NQN is
+the disk NQN — the NQN is the authoritative disk identifier and the IQN is derived from it
+(`iqn.` + nqn[4:]); IQNs are never used as subsystem NQNs (NVMe Base Spec §7.9 requires the
+`nqn.` prefix). The **Host NQN is worker-derived**: `nqn.<…>:host.<worker_id>` (base = the disk
+NQN prefix, i.e. the node's `spec.agent.nqnBase`) and is injected via `/boot-vars` to override
+the firmware's built-in default (the firmware derives it from the SMBIOS UUID by default; without
+the override authentication always fails).
+
+**Push reconciliation (2026-10-05)**: the per-Agent outcome of every push is recorded in
+`state/credential-push.yml` (key = `worker_id/agent_id`, storing the audit hash of the pushed
+key, never the plaintext). A control-plane reconciliation thread (default interval 60s,
+`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` seconds, 0 disables) compares desired state against
+the records: pairs whose key hash matches and were delivered (ok / n-a) are skipped, everything
+else is replayed idempotently — closing three silent gaps: failed pushes without retry, crash
+windows (ledger changed, nothing pushed) and undelivered revocations. A pair with no key and no
+push history is never pushed — no ledger entry, no audit, no false "sync failed" while its Agent is
+offline; with nvmet disk creation issuing keys automatically, this only covers disks on non-nvmet
+backends (DHHC-1 not applicable, a push would only return `n/a`). Once a push record exists,
+later revocations keep being replayed even when undelivered. Records for unregistered
+Agents are pruned (re-registration triggers a fresh push). Reconcile-driven pushes audit only on
+state/key changes (noise suppression); user-triggered pushes audit every time.
+Push outcomes: `ok` delivered (Agent cache and host service both in sync); `failed` not delivered
+(Agent unreachable / host sync error), reconciliation keeps retrying; `n/a` target Agent is not an
+nvmet backend (not applicable, not a failure); `pending` no record yet or a stale one (awaiting
+replay); `none` no sync target (no NVMe-oF disks, no credential ever set, or the hosting Agent is unregistered).
+
+Operations that trigger a push: **issuance on disk creation** (nvmet backends, see above),
+setting/deleting credentials, device bind/unbind/rebind
+(`PUT /workers/{worker_id}/mac`), disk delete (including batch), and Worker deletion.
+
+Static storage boundary (2026-10-05): the plaintext key lands in exactly three places along the
+chain — control-plane `state/credentials.yml`, the Agent container credential cache (0600), and the
+storage node configfs (kernel hosts matrix `dhchap_key`). **No application-layer
+encryption is introduced**; the boundary is the deployer's responsibility (disk/host persistence
+encryption, root access boundary). The key travels over the mTLS component channel and never enters
+browser storage or server logs.
 
 ### PUT /workers/{worker_id}/credential
 
-Set or update the key (idempotent: setting the same value again leaves `updated_at` unchanged).
+Set or update the key (idempotent: setting the same value again leaves `updated_at` unchanged,
+but still triggers one push as a re-delivery channel).
 
 ```bash
 curl -X PUT "$BASE_URL/workers/worker-01/credential" \
@@ -1445,7 +1638,8 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
   -d '{"secret": "DHHC-1:01:<base64>"}'
 ```
 
-Success response:
+Success response (`push` = per-Agent delivery projection, see above; failures are retried by
+reconciliation):
 
 ```json
 {
@@ -1453,7 +1647,14 @@ Success response:
   "exists": true,
   "secret_hash": "sha256:1a2b3c4d5e6f",
   "created_at": "2026-08-22T08:00:00+00:00",
-  "updated_at": "2026-08-22T08:00:00+00:00"
+  "updated_at": "2026-08-22T08:00:00+00:00",
+  "push": {
+    "result": "ok",
+    "updated_at": "2026-10-05T15:30:00+08:00",
+    "agents": [
+      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+    ]
+  }
 }
 ```
 
@@ -1471,12 +1672,14 @@ falls back to plaintext connections):
 curl -X DELETE "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKEN"
 ```
 
-Success returns `{"deleted": "worker-01"}`; missing Worker or entry → `404`.
+Success returns `{"worker_id": "worker-01", "deleted": true, "push": {...}}` (`push.result=ok`
+means the revocation was delivered; undelivered revocations are replayed by reconciliation, never
+silently stuck); missing Worker or entry → `404`.
 
 ### GET /workers/{worker_id}/credential
 
-Query credential metadata (**never returns plaintext**; `secret_hash` only exposes a prefix
-for rotation comparison):
+Query credential metadata and push state (**never returns plaintext**; `secret_hash` only exposes
+a prefix for rotation comparison):
 
 ```bash
 curl -s "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKEN"
@@ -1488,11 +1691,21 @@ curl -s "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKE
   "exists": true,
   "secret_hash": "sha256:1a2b3c4d5e6f",
   "created_at": "2026-08-22T08:00:00+00:00",
-  "updated_at": "2026-08-22T08:00:00+00:00"
+  "updated_at": "2026-08-22T08:00:00+00:00",
+  "push": {
+    "result": "ok",
+    "updated_at": "2026-10-05T15:30:00+08:00",
+    "agents": [
+      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+    ]
+  }
 }
 ```
 
-When there is no entry, `exists=false` and `secret_hash` is absent.
+When there is no entry, `exists=false` and `secret_hash` is absent; the `push` projection is
+still returned (revocation delivery stays visible).
+CLI: `kurrent workers credential show|set|revoke <worker_id>`; WebUI: the dedicated "NVMe-oF Credential"
+tab on the Worker detail page (shown only when the Worker has an NVMe-oF disk).
 
 ---
 
@@ -1645,14 +1858,16 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 Deletes a Worker. The Control Plane will:
 
 1. Look up the Worker’s disk and CD inventory from `workers.yml`.
-2. **Cascade-unbind devices**: every device whose `bound_worker_id` is this Worker is released back to the pool (`state=pooled`, `bound_worker_id=null`; the devices are **not** revoked) — the unbind is persisted first, and if it fails the deletion is aborted.
-3. If a CD target exists, delete it first.
-4. Then delete the disk target(s).
-5. Remove the Worker from `workers.yml`.
-6. Remove the `mac,hostname` line from `dnsmasq/dhcp-hosts.conf`.
-7. Send HUP to `ipxe-dnsmasq`.
+2. **Push credential revocation**: revoke to the registered Agents holding its disks (the Agent drops the hosts entry and clears its cache) — the only credential push during deletion.
+3. **Cascade-unbind devices**: every device whose `bound_worker_id` is this Worker is released back to the pool (`state=pooled`, `bound_worker_id=null`; the devices are **not** revoked) — the unbind is persisted first, and if it fails the deletion is aborted.
+4. If a CD target exists, delete it first.
+5. Then delete the disk target(s).
+6. Remove the Worker from `workers.yml`.
+7. **Forget the Worker’s credential traces**: drop its key entry from `state/credentials.yml` and its push-state records (audit `credential.forget`) — the Worker no longer exists, and an orphaned entry is neither visible (`GET /credential` returns 404 for a nonexistent Worker) nor removable, while a later Worker re-created with the same id would **silently inherit the old key** and have it pushed to the new machine’s disks.
+8. Remove the `mac,hostname` line from `dnsmasq/dhcp-hosts.conf`.
+9. Send HUP to `ipxe-dnsmasq`.
 
-The same cascade-unbind applies to `POST /workers/delete/batch` (11.1).
+The same cascade-unbind and credential cleanup apply to `POST /workers/delete/batch` (11.1).
 
 ### Path Parameters
 
@@ -1665,7 +1880,7 @@ The same cascade-unbind applies to `POST /workers/delete/batch` (11.1).
 | Parameter | Required | Default | Description |
 |---|---:|---|---|
 | `delete_disk` | No | `false` | Whether to also delete backing `.img` files. |
-| `ignore_missing_target` | No | `false` | If `true`, ignores `404 iqn not found` from the Agent and continues. |
+| `ignore_missing_target` | No | `false` | If `true`, ignores `404 iqn not found` from the Agent and continues. Same applies when the registry entry of the disk’s Agent has been deleted (ignore=false → 404 `agent not registered`; ignore=true → treated as missing, credential push skipped with an audit entry). |
 
 ### curl
 
@@ -1714,7 +1929,7 @@ Batch delete Workers. Each item is processed independently; **a failure of one d
 |---|---:|---|---|
 | `worker_ids` | Yes | — | Array of Worker identifiers to delete. |
 | `delete_disk` | No | `false` | Whether to also delete backing `.img` files. |
-| `ignore_missing_target` | No | `false` | If `true`, ignores `404 iqn not found` from the Agent and continues. |
+| `ignore_missing_target` | No | `false` | If `true`, ignores `404 iqn not found` from the Agent and continues. Same applies when the registry entry of the disk’s Agent has been deleted (ignore=false → 404 `agent not registered`; ignore=true → treated as missing, credential push skipped with an audit entry). |
 
 ### curl
 
@@ -1914,14 +2129,14 @@ This step is ideal for a workflow where you create an empty disk, then manually 
 
 ### Description
 
-The Control Plane can directly manage iSCSI targets/LUNs on any Agent. Requests are forwarded by the Control Plane to the Agent over mTLS (the Control Plane’s component client certificate, bound to the internal CA — K8S-style), so callers only need the Control Plane Token and never need to contact the Agent directly.
+The Control Plane can directly manage iSCSI targets/LUNs on any Agent. Requests are forwarded by the Control Plane to the Agent over mTLS (the Control Plane’s component client certificate, bound to the internal CA), so callers only need the Control Plane Token and never need to contact the Agent directly.
 
 Differences from Worker lifecycle endpoints (`POST /workers`, `DELETE /workers/{worker_id}`):
 
 - Worker endpoints are **inventory-oriented**: they automatically assemble IQNs, write `state/workers.yml`, and write dnsmasq bindings.
 - LUN management endpoints are **data-plane direct management**: they do not write any inventory; they directly operate targets on the Agent. Suitable for master image management, manual troubleshooting, temporary ISO mounting, etc.
 
-All endpoints require authentication (`IPXE_CP_TOKEN`). If the Agent is not found, `404 agent not found` is returned. If the Agent is unreachable, `503` is returned. Business validation errors from the Agent side (e.g., IQN prefix mismatch, file already exists, IQN already exists) are passed through with the Agent’s status code and `detail`:
+All endpoints require authentication (see 1.3, authenticator chain). If the Agent is not found, `404 agent not found` is returned. If the Agent is unreachable, `503` is returned. Business validation errors from the Agent side (e.g., IQN prefix mismatch, file already exists, IQN already exists) are passed through with the Agent’s status code and `detail`:
 
 ```json
 {"agent": "storage-lio-01", "error": "iqn base mismatch: ..."}
@@ -1961,7 +2176,7 @@ curl -s "$BASE_URL/agents/storage-lio-01/luns" \
 
 ### 14.2 POST /agents/{agent_id}/luns/disk
 
-Creates a disk LUN on the specified Agent. Pass `master` to clone from a master image (prefers btrfs / ZFS(≥2.2) reflink for instant cloning), or pass `size` to create an empty sparse disk. If the Agent is not configured with `role.disk`, it returns `400 agent ... not configured for disk role`.
+Creates a disk LUN on the specified Agent. Pass `master` to clone from a master image (prefers btrfs / ZFS(≥2.2) reflink for instant cloning), or pass `size` to create an empty sparse disk. If the Agent is not configured with `role.disk`, it returns `400 agent ... not configured for disk role`; if the Agent is disabled (drain), it returns `409 agent ... disabled: not accepting new LUNs`; on the nvmet data plane, a master in 512-byte-sector GPT layout is rejected with `400` (including 4K rebuild guidance; see the `gpt` field in section 15).
 
 #### Path Parameters
 
@@ -2012,7 +2227,7 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
 
 ### 14.3 POST /agents/{agent_id}/luns/cd
 
-Creates a CD (ISO virtual drive) LUN on the specified Agent. Only Agents with `role.cd` set to true support this. If the Agent is not configured for the CD role (e.g., LIO), it returns `400 agent ... not configured for cd role`. Backend capability limitations are passed through from the Agent.
+Creates a CD (ISO virtual drive) LUN on the specified Agent. Only Agents with `role.cd` set to true support this. If the Agent is not configured for the CD role (e.g., LIO), it returns `400 agent ... not configured for cd role`. Backend capability limitations are passed through from the Agent. A disabled (drained) Agent returns `409 agent ... disabled: not accepting new LUNs`.
 
 #### Request Body Fields
 
@@ -2106,9 +2321,11 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/scan" \
 
 ### Description
 
-Aggregates and lists the master images from all **enabled disk-role** Agents (`enabled=true` and `role.disk=true`). Master images are identified by the storage Agent’s background scanning thread (every 30 seconds by default), which looks for image files in `DISK_DIR` whose names contain the `_tpl_` marker (e.g., `_tpl_ubuntu_2204.img`).
+Aggregates and lists the master images from all **enabled disk-role** Agents (`enabled=true` and `role.disk=true`). Master images are identified by the storage Agent’s background scanning thread (every 30 seconds by default), which looks for image files in `DISK_DIR` whose names contain the `_tpl_` marker (case-insensitive, e.g., `_tpl_ubuntu_2204.img`).
 
 Used by the WebUI for the master clone drop-down list. **It has no linkage to Worker creation APIs** — purely a read-only query, does not change any state or write inventory.
+
+Each master entry carries a `gpt` field (GPT sector layout probe: `4k` / `512` / `none`). On the nvmet data plane, **a `512` master cannot be cloned** — the file backend exports logical blocks in the backing FS block size (typically 4K), a 512-byte-sector GPT is then interpreted as 4K by the initiator, and EDK2 cannot find the ESP (observed as a boot failure). The Agent rejects such clones at creation time (see 14.2); the frontend labels them accordingly.
 
 ### Failure Tolerance
 
@@ -2132,8 +2349,8 @@ curl -s "$BASE_URL/masters" \
       "agent": "storage-lio-01",
       "storager_ip": "192.168.80.3",
       "masters": [
-        {"name": "_tpl_ubuntu_2204.img", "size": 10737418240, "mtime": 1785643200},
-        {"name": "_tpl_debian_12.img", "size": 8589934592, "mtime": 1785729600}
+        {"name": "_tpl_ubuntu_2204.img", "size": 10737418240, "mtime": 1785643200, "gpt": "4k"},
+        {"name": "_tpl_debian_12.img", "size": 8589934592, "mtime": 1785729600, "gpt": "4k"}
       ]
     }
   ]
@@ -2145,7 +2362,7 @@ curl -s "$BASE_URL/masters" \
 | `agents` | Array, one entry per Agent with the disk role enabled. |
 | `agents[].agent` | Agent identifier (key in `config/agents.yml`). |
 | `agents[].storager_ip` | Data-plane address (same fallback rule as `/boot-vars`). |
-| `agents[].masters` | Array of masters, each `{name, size, mtime}`: filename / size in bytes / modification timestamp. |
+| `agents[].masters` | Array of masters, each `{name, size, mtime, gpt}`: filename / size in bytes / modification timestamp / GPT sector layout (`4k` / `512` / `none`). |
 | `agents[].error` | Error details if querying this node failed (absent for successful nodes). |
 
 ---
@@ -2201,8 +2418,8 @@ Device pool list with `state` filtering (`all` / `pooled` / `bound` / `revoked`,
 **curl**:
 
 ```bash
-curl http://<host>:4839/devices?state=pooled \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl "$BASE_URL/devices?state=pooled" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Successful response**: an array; each item is a device record (see “Record Structure” above).
@@ -2255,7 +2472,7 @@ Revoke a device: `pooled` → `revoked`; the record stays in the inventory (audi
 
 ### 16.6 GET /devices/report
 
-iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open and a valid public key is carried. **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
+iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open, the admission quota is not used up, and a valid public key is carried. **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
 
 | Parameter | Required | Description |
 |---|---|---|
@@ -2266,15 +2483,15 @@ iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it befo
 
 Behavior:
 
-- Registered device: updates the fingerprint (non-empty fields overwrite) + `last_seen`; `state` unchanged; while the window is open, a valid public key fills in `key_hash` (key claim); a key mismatch is rejected (only audited as `device.claim rejected`)
+- Registered device: updates the fingerprint (non-empty fields overwrite) + `last_seen`; `state` unchanged; while the window is open, a valid public key fills in `key_hash` (key claim, not constrained by the admission quota); a key mismatch is rejected (only audited as `device.claim rejected`)
 - Revoked device: ignored (not updated, not resurrected)
-- Unknown MAC + window open + valid public key: enters the pool (`state=pooled`, `key_hash` filled, `source=ipxe`)
-- Unknown MAC + window closed / no public key: fingerprint only, no pool entry (enrollment only during the window, see 5.1)
+- Unknown MAC + window open + quota left + valid public key: enters the pool (`state=pooled`, `key_hash` filled, `source=ipxe`)
+- Unknown MAC + window closed / quota used up / no public key: fingerprint only, no pool entry (enrollment only during the window and bounded by the admission quota, see 5.1)
 
-**curl** (simulating an iPXE report):
+**curl** (simulating an iPXE report; the boot chain uses the **bare path** — no `/api/cp` prefix — and requires no authentication):
 
 ```bash
-curl "http://<host>:4839/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
+curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
 ```
 
 ### 16.7 POST /devices/{mac}/bind
@@ -2299,8 +2516,8 @@ The audit trail records `device.bind` with `old_worker_id` / `old_device_mac` (r
 **curl**:
 
 ```bash
-curl -X POST "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force=false" \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X POST "$BASE_URL/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force=false" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Successful response (200)**: the device record (`state=bound`, `bound_worker_id=worker-01`).
@@ -2314,8 +2531,8 @@ Unbinds a device: back to the pool (`state=pooled`, `bound_worker_id=null`), the
 **curl**:
 
 ```bash
-curl -X DELETE "http://<host>:4839/devices/00:0c:29:b9:8b:2d/bind" \
-  -H "Authorization: Bearer $CP_TOKEN"
+curl -X DELETE "$BASE_URL/devices/00:0c:29:b9:8b:2d/bind" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 16.9 POST /devices/bind/batch/preview
@@ -2355,8 +2572,8 @@ Bulk bind **execution** (idempotent, per-entry independent; failures of one entr
 **curl**:
 
 ```bash
-curl -X POST "http://<host>:4839/devices/bind/batch" \
-  -H "Authorization: Bearer $CP_TOKEN" \
+curl -X POST "$BASE_URL/devices/bind/batch" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"mode":"manifest","pairs":[{"mac":"00:0c:29:b9:8b:2d","worker_id":"worker-01"}]}'
 ```
 
@@ -2386,7 +2603,7 @@ The current version supports:
 - Worker and operation audit trail queries
 - Multi-OS system disks (a Worker can have disks for multiple OSes: at most one per (os, os_version), different versions can coexist, distinguished by the disk-level `os_tag`, with `default_disk` determining the default boot)
 - NVMe-oF authentication key store (DHHC-1, key follows Worker, 7.7; `/boot-vars` injects `nbft_secret`, 5)
-- Credential push driver (pushes to Agents on credential set/revoke, device bind/unbind/rebind, disk create/delete, Worker deletion; the Agent relays to the nvmet host service to sync the hosts matrix)
+- Credential issuance & push driver (nvmet nodes issue a key automatically on disk creation; pushes to Agents on credential set/revoke, device bind/unbind/rebind, disk delete, Worker deletion; the Agent relays to the nvmet host service to sync the hosts matrix) + push reconciliation (state ledger + periodic idempotent replay of undelivered items, visible via the push projection, see 7.7)
 
 The current version does **not** yet include:
 
@@ -2400,11 +2617,13 @@ The current version does **not** yet include:
 
 ### Component Ports
 
-#### Control
-- dnsmasq: `67`, `66`
-- nginx: `4838`
-- Control Plane: `4839`
+#### Control-plane host
+- dnsmasq: `53` (default DNS listener), `67` (DHCP), `69` (TFTP)
+- nginx: `80` (301 redirect to 443 only), `443` (the only external entry: WebUI / management API / boot chain / file downloads)
+- Control Plane: `4839` (bound to `127.0.0.1` only; used by `kurrent init` health checks and debugging, not on the request path)
 
-#### iSCSI Server
-- Agent: `4840`
-- LIO / stgt: `3260`
+#### Storage node
+- Agent: `4840` (mTLS, called by the control plane)
+- nvmet-host: `4841` (mTLS, called by the Agent via `host.docker.internal:4841`)
+- NVMe-oF data plane: `4420` (nvmet port, no TLS; authentication via DH-HMAC-CHAP)
+- LIO / stgt (iSCSI data plane): `3260`

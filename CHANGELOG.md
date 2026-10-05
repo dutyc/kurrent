@@ -12,6 +12,312 @@
 
 ---
 
+## 2026-10-05
+
+### 新增
+
+- **CLI 管理凭据用户级快照（`kurrent credentials install|show|remove`，脱离仓库可用）**——CLI 凭据发现此前只服务仓库内：二进制安装到 PATH 或在仓库外调用时静默回退无凭据通道（401 难以归因），而把 admin.conf 写成绝对路径又会在仓库迁移/凭据轮换后静默不同步。凭据按「获取一份快照」处理——复制而非跟随，过期靠重新获取（重跑 install）：
+  - `cli/credentials.go`：发现链尾追用户级快照——`--credentials` ＞ `KURRENT_CREDENTIALS` ＞ 仓库内（cwd 逐级上溯 → 可执行文件旁）＞ `~/.kurrent/admin.conf`（仓库源在场时优先实时源，脱离仓库才吃快照）；`credentialsFile` 增 `installed-from`/`installed-at` 溯源键（仅快照写入）；`authHint` 修法首推 `kurrent credentials install`
+  - `cli/credentials_cmd.go`：`install` 把当前发现的凭据**复制**为自包含快照 `~/.kurrent/`——证书副本放 `pki/<文件名>`、admin.conf 重写为相对键（整目录可拷走）+ 溯源键，目录 0700 / 文件 0600、tmp+rename 防半写；源即快照时报错（须以仓库源刷新）。`show` 汇报生效凭据层级、四键可达性与快照状态；`remove` 只删快照（仓库源与已签发 token 不受影响）
+  - `cli/main.go` 命令组与 usage、`cli/init.go` 完成输出加一行安装提示
+  - 测试：`cli/credentials_test.go` 既有发现用例注入临时 HOME（隔离真实 `~/.kurrent`），新增 6 例——install 内容/权限/自包含整包拷贝、刷新覆盖、拒绝以快照为源、仓库源优先、remove 与重复 remove、show 输出；全量 `go test` 通过
+  - 文档：`cli/README.md`（构建/配置/命令块）、`api/control-plane-api.{zh-CN,en}.md` 1.3 鉴权表补发现链说明
+  - 真实端到端：仓库内 install → 二进制拷至 /tmp（仓库外）→ `ops list` 经 443 mTLS 取回审计数据 → remove 后回退 401+安装提示 → 重装恢复
+- **密钥治理：控制面→Agent 凭据推送对账（B3「推不丢、看得见、边界清」）**——DHHC-1 凭据链路此前「能推、但推丢看不见」：`_push_credentials` 失败仅记审计不重试——轮换失败 → boot-vars 注入新钥而 configfs 仍旧钥（引导认证失败）、吊销失败 → 旧钥滞留仍可连（安全缺口）；且无状态投影，`GET /credential` 只读台账、CLI/WebUI 无入口：
+  - 对账闭环（`control_plane/app/routers/workers.py`）：新增推送状态台账 `state/credential-push.yml`（键 `worker/agent`，含所推密钥审计哈希，不含明文）+ 控制面对账线程（`reconcile_credentials_once`，FastAPI lifespan 启动，默认 60s，`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` 秒可调、0=禁用）——「期望 × 记录」比对，密钥哈希一致且已送达才跳过，否则幂等重放（凭据 opt-in：无凭据且无推送历史的对不推送、不留账）：覆盖推送失败、进程崩溃缝隙（台账已改未推送）与吊销未送达三类静默缺口；Agent 注销剪除记录、重新登记自动重推（节点重置后凭据自动补投；投影同口径——未登记 Agent 不计为同步目标，不显示永不收敛的「待推送」）；对账重放仅在状态/密钥变化时记审计（去噪），用户动作照常每次记录
+  - 状态可见：GET/PUT/DELETE `/workers/{id}/credential` 响应增 `push` 投影（result = ok/failed/pending/n-a/none + 逐 Agent 明细与错误）；CLI 增 `workers credential show|set|revoke`（`--generate` 就地生成 32B 随机密钥，不打印明文；未送达提示对账重试）；WebUI Worker 详情独立「NVMe-oF 凭据」页（条件展示：该 Worker 有 NVMe-oF 盘才出现，对齐「不支持即隐藏」；状态徽章 + secret_hash 前缀 + 推送明细 + 生成设置/吊销二次确认，浏览器就地生成 DHHC-1 且不落浏览器存储）
+  - 语义与边界：非 nvmet 后端目标记 `n/a`（凭据不适用，非故障，不计入失败、不参与重放判定）；凭据 **opt-in**——从未设置且无推送历史的 Worker 不推送、不记台账、不记审计（Agent 离线时不出现「同步失败 / 待同步」虚假故障），有过推送记录后吊销即便未送达也持续重放；静态存储裁定——控制面/Agent 缓存（均 0600）与 configfs 三处明文**不引入应用层加密**，边界责任归部署方（磁盘/宿主持久化加密、root 访问边界），已在文档写明
+  - 测试：`tests/control_plane/test_credential_sync.py` 8 例（状态回写与投影、失败可见→对账恢复且审计去噪计数、吊销补投、崩溃缝隙补推、失效记录剪除与重新登记重推、非 nvmet 判 n/a、凭据 opt-in 不推送不留账、有历史后吊销仍重放；opt-in 与「未登记 Agent 投影 none」两组断言经变异测试证实非空转）；前端 `generateDHHC1`/`crc32` 3 例（标准校验值 + CRC 自检 + 随机性）；全量 pytest 319 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 7.7（对账语义/静态口径/带 push 的响应示例；顺带修正 Host NQN「按绑定设备 UUID 派生」的陈旧描述——实现早已是 worker 派生 + boot-vars 注入）、`cli/README.md` 新增「NVMe-oF 认证凭据」节、`webui/DESIGN.md`
+  - 真实端到端：控制面重建后以真实 HTTP stub agent 走通 set→推送 ok→停 stub→轮换失败可见（failed+原因）→恢复→对账自动收敛；CLI show/set/revoke 实测（详见验证记录）
+- **系统盘放置：位置由控制面决定（`POST /workers/luns/disk/batch` 支持 `workers` + `placement`，含 `dry_run` 计划）**——此前批量建盘把放置推给调用方（`targets[].agent` 必填），单盘不点名时只有 `select_disk_agent()` 取「注册顺序第一个健康节点」：既不看负载，也**不检查母盘是否在该节点本地存在**（克隆在节点本地完成）→ 会选中一台没有这块母盘的机器，直到 agent 侧才失败；策略散在客户端还会让「预览」与「执行」成为两套实现而相互漂移：
+  - `control_plane/app/placement.py`（新）：候选 = 磁盘角色 ∧ 启用（非排空）∧ 有 `base_url` ∧ 数据面就绪（`healthz.backend_ready` 非 `false`）∧ 在 `candidates` 内 ∧（`type=master` 时）**母盘在该节点本地存在**；分配 = 现有盘数最少优先（同负载按注册顺序）；`pins` 逐 Worker 钉死（被钉节点不要求在 `candidates` 内，但须自身可用）；无候选抛 `PlacementError`，`excluded` 逐节点给出原因
+  - `control_plane/app/routers/workers.py`：批量端点 `targets` 与 `workers`+`placement` 二选一（同时给 → 400）；抽出 `_resolve_batch_targets()` 供 `dry_run` 与执行共用——**预览即执行**；`dry_run=true` 返回 `plan`（逐行 `create`/`skip`/`error`）与 `warnings` 且不建盘；放置阶段已校验的 agent 在执行阶段复用（免去按 Worker 数重复 healthz/capabilities）；放置调用移到 `store.locked()` 之外（不再持锁做网络 I/O）
+  - `control_plane/app/models.py`：新增 `DiskPlacementRequest`（`candidates` / `pins`）；`BatchCreateWorkerDiskRequest` 增 `workers` / `placement` / `dry_run`，`targets` 改为可选（原有调用方不受影响）
+  - `control_plane/app/scheduler.py`：删除变为死代码的 `select_disk_agent()`（`_select()` 仍服务 CD 角色）
+  - 测试：`tests/control_plane/test_worker_disk_placement.py` 20 例（均摊按现有盘数、`candidates` 限定且未列入者不探测、母盘缺失排除、空白盘跳过母盘校验、无候选 503 带逐节点原因、非磁盘角色/排空/数据面降级排除、pin 覆盖与 pin 越出 `candidates`、pin 指向不可用节点 503、`dry_run` 计划与执行一致且不落盘、`dry_run` 的 skip/error 行、`targets` 向后兼容且绕过放置、二选一 400、放置探测缓存只探一次、单盘自动放置选中有母盘的节点）；均摊比较、母盘校验、执行改用 `req.targets`、`dry_run` 短路、探测缓存五处各自经变异测试证伪；全量 pytest 341 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 7.1.2 / 7.1.3（放置语义、字段表、`dry_run` 请求与计划示例）与端点一览
+
+### 变更
+
+- **NVMe-oF 凭据改为「建盘即签发」：nvmet 后端建盘自动生成密钥并推送（取代逐台手工设置）**——此前凭据是 opt-in 且只能人工逐台设置（WebUI 详情页「生成并设置密钥」/ CLI `workers credential set --generate`），批量建盘 N 台就要 N 次人工操作，而盘与凭据本是同一个交付单元（用户 2026-10-05 指出「那得多慢呀，你忘了有批量创建的盘的情况了吗」）：
+  - `control_plane/app/routers/workers.py`：新增 `_generate_dhhc1()`（32 字节随机 + CRC32 小端终值，与 CLI `--generate` 同格式，产出必过 `_validate_dhhc1`——生成与自检互为闭环）与 `_issue_credential(worker_id, backend)`——**仅 nvmet 后端签发**（DHHC-1 是 NVMe-oF 专属，stgt/lio 走 CHAP，不签发），**已有条目保留**（按 Worker 跟盘，同一 worker 多盘共用一把，建盘不触发轮换），新签发审计 `credential.issue`（不记密钥本体）；单盘（7.1）与批量（7.1.3）两条建盘路径都在建盘成功后、推送前调用
+  - 可观察差异：nvmet 节点上建盘后 `GET /workers/{id}/credential` 直接 `exists: true` 且 `push: ok`，无需任何人工步骤；批量 N 台一次得到 N 把互不相同的密钥。手工端点（PUT/DELETE `/credential`）语义收窄为**显式轮换 / 吊销**——吊销即声明「不用认证」（条目被删），不会被后续建盘复活
+  - 「无密钥不推送」判定保留（`_no_sync_needed`）：nvmet 建盘已自动签发，该分支实际只剩非 nvmet 后端的盘（推送只会得 `n/a`），避免 Agent 离线时出现虚假「同步失败 / 待同步」
+  - 测试：`tests/control_plane/test_credentials.py` 新增 5 例（生成器契约闭环与随机性、nvmet 建盘签发并推送且明文不入审计/不经 API 回传、已有密钥建盘不轮换、非 nvmet 建盘不签发、批量建盘逐 Worker 各签发一把）；三处变异（摘掉签发调用、拆掉后端闸门、强制轮换）各自使对应用例失败，证实断言非空转；`tests/control_plane/test_credential_sync.py` 的 opt-in 用例改述为「非 nvmet 不签发」；全量 pytest 346 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 7.1 步骤 7 / 7.1.3 / 7.7（签发时机与手工端点收窄）/ 端点一览 / 能力清单；`blueprint/nvmeof-credential-design.md` §4.1 写入时机与 §9 待定决策第 7 条（本裁定）；`webui/DESIGN.md` Workers 段与 NVMe-oF 凭据页签；WebUI i18n `workerDetail.credentialHint` 中英同步
+- **WebUI 操作结果改为通知条（右下角 Toast），不再写进页面流**——此前建盘/删盘/建 Worker 的结果是列表上方一行
+  「成功 2 ×」，混在内容里像一截正文，又不带任何消失时机（用户 2026-10-05 指出「成功的提醒为什么不做成通知样式」）：
+  - 新增 `webui/app/src/components/Toast.jsx/css`（+ `ToastStack`）：固定右下角、可堆叠，不进页面流；
+    **成功/部分成功 6s 自动消失，失败常驻须手动关闭**（错误不能被时间吞掉）；变体只用单色语言
+    （`ok` 细灰边；`error` 深色描边 + 左侧重墨条）；带明细逐条列失败/跳过原因（成功项不复述）；
+    `role=status` / `role=alert`；自动消失计时器用 ref 持有 `onClose`，只依赖 tone/duration，**不随重渲染重置**
+  - `webui/app/src/pages/Workers.jsx`：建盘结果、批量删除结果、批量创建 Worker 结果、以及接口失败（建盘/删除）
+    全部改走通知条；创建弹窗**提交后关闭**（原先把结果留在弹窗里）；失败时**保留表单值**便于改掉个别 MAC 重提
+    （已建成的按幂等跳过），全部成功才清空；单条创建也发通知（1 台与 N 台的反馈一致，此前单条静默无反馈）
+  - 附带的既存 i18n 坏键修复（会把键名当文案显示）：`AgentLuns.jsx` 的 `agentLuns.unknown`（`agentLuns` 块无此键，
+    该位置本就用字面 `—`）、`Devices.jsx` 的 `devices.wizard.emptyManifest`（补 `devices.wizard.manifestEmpty`
+    中英两条，原先借用的是「导入清单」的文案）
+  - 验证：`npm test` 11 passed + `vite build`；浏览器实测——成功（建 1 台 Worker / 批量删除，`toast-ok` 文案「成功 1」，
+    约 6s 后自动消失）、失败（批量创建带 2 个不在池中的 MAC → `toast-error` 常驻「成功 0 · 失败 2」+ 逐条原因，
+    弹窗已关闭且表单值保留，再次提交仍带原值）
+  - 文档：`webui/DESIGN.md` 新增 `Toast（结果通知）` 组件节 + Workers 段结果反馈改写
+- **Workers 页交互去模式化：位置是策略，不是逐行输入（取代同日早前「批量模式」交互契约）**——原设计有三个互斥模式（批量创建 Worker / 批量创建系统盘 / 批量删除）+ 页头四个平级按钮：同一件事（勾选）在不同模式下行为不同，把「系统该做的决定」变成了用户要先学会的模式；批量建盘还要求用户逐行指定存储节点，与「调度系统而非调度应用」相悖：
+  - `webui/app/src/pages/Workers.jsx`（全量重写）：**没有模式**——勾选列常驻，选中即浮出操作条（黑条）。**行点击语义由选中态决定**：无选中 = 进详情，有选中 = 勾选/取消（Shift 标定区间终点，表头全选作用于筛选后可见行）。创建 Worker 收进弹窗（数量 = 1 时名称即完整 Worker ID，> 1 时为前缀；MAC 列表按行逐个绑定；Windows ISO 收进「高级选项」折叠块，且批量不支持该字段时整块隐藏）
+  - 「创建系统盘」= **在操作条上就地展开放置计划**：参数（类型 / 系统 / 母盘或大小）、逐行目标节点、结果摘要、`确认创建`/`取消`；参数档位不齐时摘要位直说缺什么（如「未发现可用母盘」）而非停在「计算中…」。高级面板 = 对系统决策的约束（限定可用节点，按当前母盘本地存在性标注「缺该母盘」）+ 低频参数（系统版本 / 盘备注）+ 已排除节点及原因
+  - 置位交给控制面：只发 `workers` + `placement{candidates,pins}` + `dry_run`，同一份 body 先取计划再执行（**预览即执行**）；逐行下拉是 pin 显式覆盖（标「手动」，`×` 恢复自动，自动态的节点由系统按现有盘数最少选定）；`candidates` = 「限定可用节点」；放置 503 的逐节点排除原因在高级面板展示
+  - `webui/app/src/api/client.js`：请求失败时把原始响应体挂到 `error.payload`，供调用侧取 `detail` 之外的字段（放置失败的 `excluded`）
+  - 移除：存储节点侧栏（拖动指定 / 接管所选 / 均摊分配）、三模式状态机与页头平级按钮、对应的旧 i18n 键与 CSS（批量提示、容量标签、结果块）；`webui/app/src/pages/Workers.css` 按新结构重写
+  - i18n：`workers.*` 重组为 `sel` / `plan` / `bulkDelete` 三组；`WorkerDetail` 的建盘表单改用 `workers.plan.*`（同一标签单一来源），仅保留 `workers.diskAgent` / `workers.masterGpt512`（`masterGpt512` 补齐——原 `workers.empty`/`master`/`diskType`/`masterName`/`noMasters`/`diskSize` 等键在本次重组中被移除，不同步会让详情页显示键名）
+  - 验证：`npm test` 11 passed + `vite build`；浏览器端到端（真实控制面 + 两个 HTTP stub agent，走 mTLS 代理到 nginx）——建 2 台 Worker（弹窗，批量时高级块正确隐藏）→ 勾选 → 计划：母盘模式 2 块全落在本地持有该母盘的唯一节点、空白盘模式均摊 ×1/×1 → 手动改一行（出现「手动」+ `×`，摘要变 ×2）→ `×` 恢复自动 → 取消勾选一个节点（计划收拢，该节点选项禁用）→ 确认创建（stub 日志佐证：dry_run 期间零 POST，执行只向计划节点发 2 次 `POST /lun/disk`，载荷含计划显示的母盘与 `os_tag` 文件名）→ 列表显示 `ubuntu → e2e-stub-01` → 重新计划两行皆「已有系统盘 · 跳过」且确认禁用 → 删除（勾选同时删除 .img，成功 2，`DELETE /lun?delete_file=true` 落在正确节点）→ Esc 退出计划、无选中时点行进详情；另实测降级路径（唯一节点离线）：摘要直说「母盘清单不可用」、放置失败给出「无法计算放置」并在高级列出 `storage-nvmet-01（Connection refused）`。环境已复原（`agents.yml` 字节一致、stub 停止、临时文件清理）
+  - 文档：`webui/DESIGN.md` Workers 段按新契约重写（列表列、行交互、弹窗、放置语义、预览即执行、Esc 分层、独立取数）
+- **单盘建盘不点名节点时的选点语义**：由「注册顺序第一个健康节点」改为放置策略（数据面就绪 ∧ 母盘本地存在 ∧ 现有盘数最少优先）。可观察差异：`type=master` 且无任何节点本地持有该母盘时，现在在控制面即返回 `503`（附逐节点排除原因），不再选中一台没有该母盘的节点、到 agent 侧才失败。
+
+### 修复
+
+- **删除 Worker 未清理凭据条目（孤儿密钥）**——`DELETE /workers/{id}` 与 `POST /workers/delete/batch` 此前只向 Agent 推一次吊销、**不删 `state/credentials.yml` 里的条目**：删完 Worker 后留一条孤儿 DHHC-1 密钥，而 `GET /workers/{id}/credential` 对已不存在的 Worker 直接 404 → 它从 API 与 WebUI 都看不见、也删不掉（只能读文件）；更实际的风险是**同 id 的 Worker 日后被重建时会静默继承这把旧钥**并被推给新机器的盘：
+  - `control_plane/app/routers/workers.py`：新增 `_forget_worker_credentials()`（清密钥条目 + 该 Worker 的推送台账，删到条目时审计 `credential.forget`）；单删在 `workers.delete` 之后调用、批删在逐项成功分支内调用（两条独立代码路径都覆盖）
+  - 顺带清推送台账：台账键 = `<worker_id>/<agent_id>`，留着会让同 id 重建的 Worker 复用陈旧"上次推送"记录（对账 60s 内虽会剪除，但重建快于一个周期时就会读到）
+  - 测试：`tests/control_plane/test_credential_sync.py` 新增 2 例（单删后密钥条目与台账皆空、同 id 重建 `exists=false` 且投影 none、审计含 `credential.forget`；批删同样清空）；两例分别经变异测试证实各自覆盖对应调用点
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 第 11 节删除步骤补齐（新增"删除前吊销推送"与"清空凭据痕迹"两步，编号重排）
+- **WebUI 批量建盘：节点列表被 `/masters` 502 拖垮 + 错误被吞**——批量建盘把节点列表与母盘清单耦合成一个 `Promise.all`，而 `/masters` 是跨节点聚合端点（任一节点不可达即整批 502）：一台存储节点掉线就让**整个批量建盘入口可用性归零**（连不需要母盘的「建空白盘」也拿不到节点、无法分配），且失败被吞（`batchError` 在批量建盘侧栏根本没渲染），空态还显示成「未发现可用存储节点」——把「取数失败」说成「没有节点」：
+  - `webui/app/src/pages/Workers.jsx`：取数改为**独立两段**（与 `WorkerDetail`/`AgentLuns` 同款 `getMasters()` 兜底）——节点列表不再受母盘清单影响；新增 `nodesError`/`mastersError` 两个独立失败面：节点取用失败显式报错，母盘清单失败只在「母盘」类型下提示并改掉误导性占位文案
+  - 验证：`npm test` 11 passed + `vite build`；浏览器实测（真实控制面，`/masters` 正处于 502 的环境）——节点恢复显示并可分配（此前为空）、母盘类型下错误可见（该轮的批量模式交互已在同日「Workers 页交互去模式化」中整体替换）
+  - 文档：`webui/DESIGN.md` Workers 段（后由「去模式化」重写）
+- **文档同步：清掉几处与实现矛盾的陈旧表述（无代码变更）**——逐份对照代码与真实内核核了一遍跟踪内的文档：
+  - `storager/nvmeof/nvmet-host/README.md`：子系统 NQN 由「盘 IQN 派生、格式 `<base>:worker-XX.os`」改为 **NQN 权威** `<base>:<worker_id>.<os>.<os_tag>`（IQN 由 NQN 派生）；`allowed_hosts/` 的说明**说反了**（原写「内核在 allow_any_host=1 时自动维护、严格模式用户侧不操作」，实际严格模式准入就是 symlink 进 `allowed_hosts/`）——按 `NvmetManager.set_host` 改写；configfs 属性名纠正为 `dhchap_key`（原写 `nvme-auth-dhchap-secret` + `nvme-auth-dhchap-control` 置位，是 2026-08-23 那条**已作废**方向的残留：写 key 即启用认证，内核无独立 control 属性）；推送触发点补「nvmet 建盘即签发」
+  - `cli/README.md`：删除「命令语义沿用 kubeadm / kubectl」的血统标注（对齐对外表述纪律）；「NVMe-oF 认证凭据」节改述为建盘即签发 + 手工端点=轮换/吊销
+  - `about/{en,zh}/ARCHITECTURE.md`：`/boot-vars` 步骤补「nvmet 节点上建盘时即自动签发密钥」
+  - `about/{en,zh}/Manifesto.md`、`about/{en,zh}/AI_POLICY.md`：iBFT 时代字眼改为 NBFT/NBCT（`iPXE 写入 iBFT 表` → 固件启动瞬间交出引导表；`iPXE/iBFT 引导链` → `iPXE/NVMe-oF`），论证与文风未动
+  - `README.md` / `README.zh-CN.md`：把「凭据 enroll 时自动派生」拆开——DHHC-1 按 Worker 跟盘、**建盘即签发**；存储节点宿主服务凭据 enroll 时派生；Roadmap 段那句「贯穿所有计算层的元协议」是愿景（在 Manifesto 里），原来却只指向不含它的 ROADMAP.md——改为愿景指向宣言、方向指向 ROADMAP；「可挂 Windows/Ubuntu/Debian/CentOS/ESXi 多盘」的发行版举例与固件仓验收矩阵不符（矩阵实为 Debian 12/13、Ubuntu 24.04/26.04、Fedora 44）——改为按矩阵列举「无盘冷启动已通过整机验收」的发行版（Windows/ESXi 保留在 ROADMAP 的待办方向里）
+  - `webui/DESIGN.md`：路由行 Worker 详情 Tab 列表补「NVMe-oF 凭据（有盘时）」
+  - 未动：`docs/`（冻结待重写）、`about/{en,zh}/Barriers.md`（iSCSI 期战史，用户裁定保留）
+
+---
+
+## 2026-10-01
+
+### 新增
+
+- **Token 台账可视与吊销（管理凭据从「能发不能收」到可收）**——`/pki/tokens` 此前只有签发（POST），token 作废只能进容器手改 `state/pki/bootstrap-tokens.yml`；本次补列表与吊销：
+  - `control_plane/app/pki.py`：新增 `list_bootstrap_tokens()`（仅未过期条目；不返回 `token_secret_hash`——明文本就不可恢复；`created_at` 对历史条目为空串）与 `revoke_bootstrap_token()`（删条目即吊销，无 tombstone）；`issue_bootstrap_token` 签发时注入 `created_at`；新增模块级 `_TOKENS_LOCK`（RLock）包住 issue / revoke / `revoke_agent_tokens` 的 load→改→save 段（同步路由跑线程池，签发与吊销交错会把已吊销条目写回；读路径靠 `os.replace` 原子替换不加锁）
+  - `control_plane/app/routers/tokens.py`：新增 `GET /pki/tokens`（200 裸数组，字段 snake_case）与 `DELETE /pki/tokens/{token_id}`（200 `{"revoked": id}`；不存在 404；审计 `pki.token.revoke`）；签发审计补 `token_id`（签发与吊销两处可对齐追溯）。鉴权零改动：router 已挂认证器链 + RBAC 最小版，DELETE 因 `WRITE_METHODS` 自动要求 admin 组
+  - 吊销语义：删除即失效——Bearer 校验每请求重读台账（无缓存），吊销后立即 401、无法恢复；「谁在何时吊销了哪个 token」由操作审计留痕
+  - CLI：`kurrent token list [-o table|json]`（TOKEN_ID / USAGE / GROUPS / COMPONENT-AGENT / NAME / EXPIRES / CREATED）与 `kurrent token revoke <token_id>`（`cli/token.go` 分发改 switch；列表复用 agents 的 tabwriter 范式；`cli/main.go` usage 补两行）
+  - WebUI：新增「凭据」页（路由 `/credentials`，侧边栏位于 Agents 与 Operations 之间）——token 台账列表（含归属 / 签发 / 到期时间，旧条目签发时间显示 `-`）、ConfirmAction 二次确认吊销、「签发管理 token」一次性明文展示 + 复制；`api/client.js` 增 `getTokens` / `revokeToken` / `issueAdminToken`；`webui/DESIGN.md` 同步
+  - 测试：`tests/control_plane/test_join_flow.py` 新增 `TestTokenManagement` 4 例（列表字段与无 hash、过期条目过滤与旧条目空 `created_at`、吊销删除 + 审计、吊销不存在 404）；`tests/control_plane/test_auth.py` 新增端到端 1 例（Bearer 200 → 证书通道吊销 → 同一 token 立即 401）；全量 `pytest tests` 295 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md`（端点表 + 6.5 说明与新增 GET/DELETE 两小节）、`cli/README.md`、`webui/DESIGN.md` 同步
+  - 边界：会话全踢（session 轮换）与证书台账 / 吊销（需 CRL）另立项，本次不做
+- **节点健康反映数据面拓扑（`health` 三态 `ok` / `degraded` / `error`）**——`GET /agents` 的 `health` 此前只有 ok / error：宿主服务停机可经 capabilities 探测落为 error，但**宿主服务存活而 configfs 未就绪**（宿主前置缺失）时能力接口照常 200，节点显示健康、数据面实际不可用：
+  - Agent `GET /healthz`：nvmet 后端追加 `backend_ready` / `backend_detail`（宿主服务可达且 configfs 就绪才为 true），进程存活（`status:ok`）与数据面就绪分开表达；探针 2s 超时 + 5s 结果缓存，控制面高频轮询不放大宿主服务压力
+  - 控制面 `GET /agents`：`health` 增 `degraded`——`backend_ready=false` 时标 degraded，具体原因（`backend_detail`；capabilities 也失败时保留前者不覆盖）写入 `error` 字段；仅 agent 整体不可达才 error
+  - WebUI：`degraded` 显示黄色徽章（`badge-warn`），徽章外包 `title` tooltip 展示原因
+  - 测试：agent 3 例（就绪 / 宿主服务不可达 / configfs 未就绪）与控制面 3 例（ok / degraded 且 capabilities 失败不覆盖原因 / error）
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 的 `GET /agents` 补 health 三态语义
+- **母盘 4K 原生校验（建盘前拒绝 512 扇区 GPT）**——nvmet file backend 按底层 FS 块（典型 4096 B）导出逻辑块，512 字节扇区布局的 GPT 母盘在 4K 导出下被发起端按 4K 解释、EDK2 找不到 ESP（生产实测 sanboot `EFI_NOT_FOUND`）；主仓建盘此前无任何校验，克隆出不可引导的盘只在引导时暴露：
+  - `storager/agent/app/nvmet.py`：新增 `disk_gpt_layout()`（GPT 头 LBA1 探测：offset 4096 → `4k` / offset 512 → `512` / 无签名或读取失败 → `none`）与 `NvmetBackend.validate_disk_file()`（`512` → 400 拒绝并给出「`losetup --sector-size 4096` 后重建 GPT」指引；无 GPT 签名告警放行）
+  - `storager/agent/app/main.py`：`Backend.validate_disk_file` 基类默认 no-op（stgt / LIO 不受影响）；`POST /lun/disk` 克隆前校验（拒绝时不落 backing、不建子系统）；`MasterScanner` 清单项增 `gpt` 字段（控制面 `/masters` 聚合透传，供前端标注）
+  - WebUI：消费 `gpt` 字段——建盘克隆下拉中 512 布局母盘禁用并标注原因（`Select` 组件支持选项级 `disabled`）、Agent 母盘页对 512 母盘加警示 Badge；i18n 双语；`webui/DESIGN.md` 同步
+  - 测试：新增 `tests/agent/test_agent_disks.py` 5 例（探测三态 + 校验拒绝 / 放行 + 端点 400 不落盘不建子系统 + 4K 正常克隆 + 母盘扫描字段）
+  - 文档：`storager/nvmeof/nvmet-host/README.md` 新增「盘文件要求（4K 原生 GPT）」段（含制盘要点）；`api/control-plane-api.{zh-CN,en}.md` 第 15 节 `gpt` 字段与 14.2 的 400 情形同步
+
+### 变更
+
+- **存储节点宿主前置工具化（nvmet 数据面部署收口）**——节点侧此前唯一手工步骤（`modprobe nvmet nvmet-tcp` + `mount configfs`，重启持久化要自行写 `/etc/modules-load.d` 与 `/etc/fstab`）是部署踩坑面；本次把「未就绪」从静默变显式、把「就位」收敛为一条幂等命令：
+  - 新增 `storager/nvmeof/host-prepare.sh`（宿主机运行，就位需 root）：加载 nvmet / nvmet-tcp 模块、挂载 configfs、写重启持久化（模块 → `/etc/modules-load.d/kurrent-nvmet.conf`，configfs → `/etc/fstab`）；幂等可重跑，`--check` 只读诊断（部署前排查，无需 root）
+  - `cli/join.go`：nvmet 后端增加宿主前置预检——`/sys/module`（模块已加载）+ `/proc/mounts`（configfs 已挂载），未就绪 fail fast，报错列出缺失项并指路 `sudo bash <storager>/nvmeof/host-prepare.sh`（stgt/lio 后端不要求，照常收敛）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底（compose bind 挂载源，缺省时可归 root 所有故提前建）
+  - `storager/nvmeof/docker-compose.yml`：nvmet-host 增 mTLS 健康检查（`/healthz` 带本组件 client cert，configfs 就绪才报健康）——宿主前置缺失时如实标记 unhealthy，不再是「容器在跑但数据面不可用」；`nvmet-host/app/main.py` 启动配置端口失败时明确报「宿主前置未满足」并指路
+  - 测试：`cli/join_test.go` 沙盒注入假宿主环境（`stubHostReady`），新增 3 例（宿主未就绪 → fail fast 且不启动 compose；stgt 后端跳过预检；盘目录自动创建）；全量 `go test` 通过
+  - 文档：`storager/nvmeof/nvmet-host/README.md` 部署步骤 1 改为 `sudo bash ../host-prepare.sh`、`cli/README.md` 一键加入流程与要点同步、compose 头注释同步
+
+### 修复
+
+- **同 worker 多盘吊销残留（configfs EBUSY 中断 host 清理，旧密钥留存）**——`delete_host` 原实现摘除自身 `allowed_hosts` 链接后直接 rmdir 全局 host 目录；同 worker 挂多盘时另一子系统仍引用该目录，rmdir 返回 EBUSY → 宿主服务 500 → Agent 侧同步中断：第二块盘的链接与旧密钥留存，而凭据缓存条目已移除（reconcile 不再重放）——吊销后该盘仍可凭旧密钥连接：
+  - `storager/nvmeof/nvmet-host/app/main.py`：回收改为**引用扫描式** `_gc_host`——仅当不再被任何 `subsystems/*/allowed_hosts/<hostnqn>` 引用才 rmdir；`delete_host` 与 `delete_subsystem` 均先摘链后 GC；真实 configfs 实测语义写入模块 docstring
+  - 测试：`tests/nvmet_host/test_nvmet_host_service.py` 新增 2 例（共享条目保留至最后引用摘除、删子系统触发 GC）；另以真实 configfs（容器直挂 + 真实组件代码）双场景验证通过
+  - 文档：nvmet-host README 认证模型补多盘共享 hostnqn 的回收语义
+- **母盘标记 `_tpl_` 判定大小写敏感（大写母盘被注册为 NQN，且不出现在母盘清单）**——目录扫描跳过母盘与 MasterScanner 母盘清单两处判定区分大小写：`_TPL_win11.img` / `_Tpl_x.img` 这类命名（Windows 习惯大写）会被 scan 当普通盘**注册为子系统**（进 `/lun`，可被引导误用），同时又不在 `/masters` 清单里（无法克隆）——双重失败：
+  - `storager/agent/app/main.py`（stgt/lio scan + MasterScanner）与 `storager/agent/app/nvmet.py`（scan）：判定统一为 `n.lower()`；母盘语义自此严格一致（是母盘 ⇔ 不进 scan ⇔ 进清单）
+  - 测试：`tests/agent/test_agent_disks.py` 新增 2 例（scan 不注册大小写变体母盘且不报 skipped、清单认大小写变体）
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 第 15 节补「大小写不敏感」
+  - 存量注意：已被注册的大写母盘子系统不会自动清理（scan 只创建不删除）——标识生成时已转小写，形如 `nqn.<base>:_tpl_win11`；清理用 `DELETE /lun?iqn=<nqn>`（不带 `delete_file`，只删 target 不动文件）
+- **WebUI 错误提示显示 `[object Object]`（未适配 dict detail 契约）**——控制面「Agent 代理错误透传」族（probe / LUN 管理 / 建删盘 / 删 worker / `/masters` 全失败，共 15 处）按契约返回结构化 detail `{"agent": <id>, "error": <原因>}`（API 文档「LUN 管理」节写明；CLI `detailOf` 已适配），唯独 WebUI `api/client.js` 只处理了字符串与 422 数组，dict 落入 `new Error(dict)` → `message` 即 `[object Object]`，经各页面错误横幅原样展示（任何 Agent 代理操作失败即触发）：
+  - `webui/app/src/api/client.js`：新增导出纯函数 `extractDetail()`（与 CLI `detailOf` 同语义：字符串直用 / `{agent, error}` 提取 error / 422 数组映射「字段: 消息」/ 其余对象 JSON 化），错误构造改用它；对畸形 422 元素（loc 非数组、元素非对象）加防御不再抛错
+  - 前端回归：新增 `webui/app/src/api/client.test.mjs`（Node 内置 test runner，零依赖；`npm test` 8 例覆盖字符串/422 数组/dict 契约/JSON 兜底/畸形输入），`package.json` 增 `test` script
+  - 后端契约断言：`tests/control_plane/test_agents.py` 新增 1 例把 `{agent, error}` dict detail 钉死（capabilities 失败 → 502 + 结构断言）
+  - 边界：后端 15 处契约与 CLI 均不改（文档/CLI/后端三者一致，WebUI 是唯一漏配的消费者）
+
+---
+
+## 2026-09-27
+
+### 新增
+
+- **注册窗口放行额度（`max_devices`，按设备数量放行）**——窗口期在时长之外可再限台数，防止一次放窗被批量刷入过量设备：
+  - `control_plane/app/trust.py`：新增 `window_limit` / `admitted_count` / `window_quota_left` / `admission_allowed`；已放行数**派生自设备台账**（窗口期内 `source=ipxe` 且 `first_seen >= opened_at` 的条目），不另存计数器；`window_status()` 增投影 `max_devices` / `admitted` / `remaining_devices` / `quota_exhausted`（`open` 保持时间维度，额度用尽不清窗口记录）
+  - `control_plane/app/routers/settings.py` + `models.py`：`POST /settings/registration-window` 接受可选 `max_devices`（1-1000，超出返回 400；省略 / `null` = 不限），操作日志带上该值
+  - `control_plane/app/routers/boot.py`：`/devices/report` 入池判定改为「窗口开启 + 额度未用尽 + 有效公钥」；额度在 `devices.locked()` 内以本次加载的台账复核，避免并发上报各自读到余量 1 而超额放行。密钥认领（存量补 `key_hash`）只看窗口期，不受额度约束
+  - `control_plane/app/config.py`：新增 `REGISTRATION_WINDOW_MAX_DEVICES_UPPER = 1000`（额度上限，防误填大数等于关掉额度）
+  - 口径：额度只约束未知设备自动入池；管理员手动登记 / 清单导入（`source=manual`）是显式动作，不占额度；窗口关闭后重开，额度按新的开启时刻重新派生（已放行数归零重算）
+  - WebUI：`pages/Devices.jsx` 开窗处增放行台数输入（留空 = 不限，前端同步 1-1000 校验，带「台」单位提示），开启中显示「已放行 n/N」并每 10s 重拉窗口状态（已放行数派生自台账，不轮询看不到额度消耗；同一 tick 顺带刷新设备列表，多选/绑定向导进行中除外，否则计数在涨而表格仍是旧行），额度用尽 Badge 转「额度已满」并提示密钥认领与手动登记不受影响；`api/client.js` 传 `max_devices`、`i18n/{zh-CN,en-US}.js` 补键、`Devices.css` 加 `.reg-window-quota` / `.reg-window-unit`、`webui/DESIGN.md` 同步
+  - 浏览器实测（真实控制面 + `Devices` 页）：开窗 `max_devices=2` → 面板显示「已放行 0/2」；两次 `/devices/report` 携有效公钥后 10s 内翻为「已放行 2/2」且 Badge 转「额度已满」，第三次上报被拒（`admitted` 不增）；`GET /settings/registration-window` 返回 `remaining_devices=0` / `quota_exhausted=true`。注意容器内代码为构建期 `COPY`，改动须 `docker compose build kurrent-control-plane` 后才生效（`config/`、`state/` 才是 bind mount）
+  - 测试：`tests/control_plane/test_device_registry.py` 新增 `TestRegistrationWindowQuota` 7 例（额度用尽拒入池且不写审计、状态投影随入池递增、省略 `max_devices` 即不限、手动登记不占额度、认领不受额度约束、重开窗口重置额度、上下界 0/-1/1001 返回 400）
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 的 5.1（GET 字段表 / POST 请求体 / 说明段）、16.6 上报行为、引导链概览与「注册窗口期注册」控制项表同步
+
+### 变更
+
+- **存储节点管理语义落地（A 类三批次）**——同一台节点的字段按"唯一主人"分层：节点声明 `storager/kurrent.yaml` 拥有 base_url / remark / role.cd；控制面 `agents.yml` 拥有 enabled / storager_ip / 人工 tags；后端类型不存副本、实时问节点（见同日"修复"）：
+  - **批次 1 `enabled` 收窄为排空语义**：`false` = 只拦新增——自动挑选（原有）之外，显式点名建盘（单盘 `disk_agent` 与批量 `target.agent`）与直接对该节点建 LUN（disk/cd 端点）一律 409；**存量盘照常服务**、已引导设备的 boot-vars 投影不受影响（`storager_ip_for` 无 enabled 守卫是裁定的一部分，边界回归锁定）。顺手修批量分支死代码（`agents.get` 抛 KeyError 而非返回 None，原 `if not disk_agent` 使缺失项落成 500 `"'xx'"` → 清晰 404）与 `create_worker_disk` 的 `except Exception` 吞 HTTPException（补显式放行，校验类 4xx 不再变 500）
+  - **批次 2 声明权威补完**：`AgentRegistry.refresh_from_declaration()`——已在册 agent 再次 enroll/renew 时按节点声明刷新 base_url / remark / role.cd（控制面属性不碰；节点未上报的字段保留现值），节点搬家改声明后 renew 即对齐、无需重装；`PUT /agents/{id}` 对自动登记节点（tags 含 `auto`）拒绝改 base_url（409 并指路改节点声明——否则改动会在下次 renew 被声明值冲掉；手工登记节点仍可改）；WebUI 编辑弹窗对自动登记节点禁用地址输入并附灰字提示（i18n 双语）
+  - **批次 3 删除语义与登记缺失韧性**：`DELETE /agents/{id}` 语义定为**仅清控制面记录**（软删除：节点下次 renew 自动重新登记，真正下线在节点侧做），响应新增 `disks_hosted` / `affected_workers` 告知（派生自 workers.yml，仅提示不拦截）；修两处"登记缺失即崩"的路径——`_push_credentials` 找不到节点改为跳过并记审计（原 KeyError 使 delete_worker 半路 500 且设备未解绑）、`_delete_target` 找不到节点在 ignore_missing 时视为已缺失、否则清晰 404（原来 500 `"'ag-01'"`）
+  - 测试：新增 11 例（排空四处入口 + boot-vars 存量边界回归 + 批量停用/缺失 agent + enroll 声明刷新 3 例 + PUT base_url 拒改/放行 2 例 + 删除告知 + 登记缺失删 Worker），全量 `pytest tests` 290 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 6.1/6.3（enabled 排空、base_url 归属与 409）、6.5.1（enroll 刷新规则改写，原"已登记不更新、agents.yml 为权威"与裁定相反）、6.6（软删除语义与新响应字段）、7.1/7.1.3/14.2/14.3（排空 409 与批量 failed 文案）、7.4/11（登记缺失时的 ignore 语义）；`webui/DESIGN.md` Agents 段
+  - 边界：Agent 侧 `/config` 对账端点（两次 renew 之间的漂移可见性）明确不做，待真实需求再议
+
+### 修复
+
+- **CLI 管理凭据发现改为逐级上溯（修"仓库内子目录调用必 401"）**——原实现只认 `<cwd>/control_plane/state/admin.conf` 单一路径，而从 `cli/`（二进制所在目录，最自然的调用位置）执行时发现不到凭据，静默退回无凭据明文通道，表现为难以定位的 `POST /pki/tokens -> HTTP 401: unauthorized`（同一命令在仓库根可正常签发）：
+  - `cli/credentials.go`：`discoverCredentials()` 改为两步自动发现——① 从 cwd **逐级上溯** `control_plane/state/admin.conf`（git 式，命中最近祖先）；② 退回**可执行文件旁** `<exe 目录>/../control_plane/state/admin.conf`（仓库布局 `cli/kurrent` → 仓库根，覆盖从仓库外调用该二进制的情形）。命中返回绝对路径（错误提示据此指明实际使用的凭据）；`exeDir` 变量化以便测试注入
+  - `cli/api.go` + `authHint()`：401 且**两条凭据通道都空**时追加排查提示（点明"未发现管理凭据"并给出三种修法），不再只丢一个 `unauthorized`；已发现凭据或已给 `--token` 时不追加（此时 401 属凭据本身问题）
+  - 测试：`cli/credentials_test.go` 新增 4 例——子目录上溯发现、多级祖先取最近不越级、cwd 无凭据时按可执行文件旁发现、`authHint` 触发条件；原 `TestCredentialsDiscovery` 断言同步为绝对路径
+  - `cli/README.md`：发现顺序与回退语义按实际行为重写（原写"repo 根目录下直接可用"）
+  - 实测：`cli/` 下 `kurrent agents list` 由 401 转为正常返回；仓库二进制从 `/tmp` 调用经 exe 旁发现亦可；无同级仓库的孤立二进制仍 401 但附带发现提示
+- **节点侧文档与注释去陈旧环境变量（业务配置早已收敛到 `storager/kurrent.yaml`，文档仍停在 env 时代）**：
+  - `storager/.env.example`：join 签名由 `<cp-url> <bootstrap-token> <agent-id> [--nvmet-token T]` 改为现行 `kurrent join <cp-url> --token <bootstrap-token>`（节点身份自动生成、后端等业务配置写入节点声明）
+  - `storager/nvmeof/nvmet-host/README.md`：部署步骤改为 `kurrent join` 主路径（另留"仅重启本编排"的手动路径；验证 curl 改用真实证书路径 `control_plane/state/pki/components/nvmet-<agent_id>/client.{crt,key}`）；**「环境变量」表重写**——本组件实际只读 `KURRENT_CONFIG_FILE` / `NVMET_CONFIGFS` / `NVMET_PORT_ID`，监听地址端口为模块常量（`0.0.0.0:4841`，compose 不注入）；原表列的 `KURRENT_AGENT_ID`/`KURRENT_COMPONENT`/`KURRENT_PKI_DIR`/`KURRENT_CP_ENROLL_URL`/`KURRENT_CP_CA`/`KURRENT_BOOTSTRAP_TOKEN(_NVMET)` 全部改为"已收敛 + 新来源"（声明 `metadata.name` / `spec.controlPlane.url`、compose 挂载、`storager/bootstrap/nvmet-host.token`），并注明 `KURRENT_DISK_DIR` 与 `KURRENT_NVMET_PKI_HOST` 仍是 `.env` 插值键（compose 挂载源，不经组件代码读取）
+  - `storager/nvmeof/docker-compose.yml`：nvmet-host 段两处注释——启用条件由 `KURRENT_BACKEND=nvmet` 改为声明 `spec.agent.backend=nvmet`；修正"见 `../kurrent.yaml` 的 `spec.agent.nvmetHostUrl`"（该键**不存在**，且在节点声明 `extra="forbid"` 下写了会启动即失败；地址实为部署事实常量 `storager/agent/app/config.py:DEFAULT_NVMET_HOST_URL`）
+  - 同类陈旧注释（退役环境变量名 → 声明键名）：`storager/agent/app/nvmet.py`（实例化分支条件）、`storager/agent/app/pki_client.py`（`base_url` 与能力摘要的来源）、`control_plane/app/routers/enroll.py`（自动登记 `base_url` 来源）
+  - 边界：CHANGELOG 历史条目与 gitignored 的 `docs_copy/` 不动；`cli/join.go` 的 `migratedEnvKeys` 与 `tests/agent/test_config.py`、`tests/agent/test_pki_client.py` 里对这些键的断言是"已退役"的权威声明，保留原样（刻意提及旧键名）
+- **后端类型判定改为实时查询节点（修"过期标签覆盖实况 → 拼出错误 iSCSI 连接符"）**——`tags` 原是混合来源（enroll 按节点上报能力写入 `nvmet`/`stgt`/`lio`，运维又在控制面手填人工标签），而 `_backend_for` **标签优先**于 `/capabilities`，标签与实况漂移时按过期值拼连接符。此为存储节点管理语义（A 类）落地的第一项：承重的后端类型不再寄居 tags：
+  - `control_plane/app/routers/boot.py`：`_backend_for` 去掉 tags 优先分支，一律实时查 Agent `/capabilities` 的 `backend`（节点自报，能力即真相）；未登记 / 查询失败 / 取值非法 → 默认 stgt（保持既有格式兼容）
+  - `control_plane/app/routers/enroll.py`：自动登记初始标签由 `("auto","storage",backend)` 改为 `("auto","storage")`（旧 agent 不上报能力仍为 `("auto",)`）——tags 此后纯归人工
+  - `control_plane/app/routers/agents.py`：`/agents/probe` 预览 `tags` 由 `["storage",backend]` 改为 `["storage"]`（`backend` 仍以独立字段返回）
+  - 测试：`test_trust_chain.py` 新增 `test_backend_from_capabilities_not_stale_tags`（注册时 tags 带陈旧 `nvmet`、Agent 实报 `stgt` → 仍按 stgt 发 `iscsi-sep`；旧实现下必失败）；`test_agents.py` 的 probe tags 断言与 `test_join_flow.py` 两处自动登记 tags 断言同步。全量 `pytest tests` 279 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md` 的 5.1 `iscsi_sep` 行、6.1/6.3 `tags` 字段与全部示例（不再以 `stgt`/`lio` 作 tag 示例）、6.2 推导表、6.5.1 自动登记四处同步
+  - 存量影响：本次改动前已登记的 agent，其 `agents.yml` 里仍留有 `nvmet`/`stgt`/`lio` 标签，现已不参与任何判定（纯展示）；需要清理时经 `PUT /agents/{id}` 重写 tags
+  - 边界：A 类其余各项（`enabled` 排空语义收窄、声明↔台账权威与 renew 刷新、`agents delete` 前置守卫）本次不动
+
+---
+
+## 2026-09-23
+
+### 修复
+
+- **文档同步（以代码为准，逐条校正陈旧表述）**——接口文档、WebUI 设计文档与代码内注释同实现对齐：
+  - `api/control-plane-api.zh-CN.md` / `api/control-plane-api.en.md`：API 示例入口由
+    `http://<host>:4839/...` 改为唯一对外入口 `https://<host>/api/cp/...`（引导链
+    `/devices/report` 保持裸路径、无鉴权）；1.1 补 TOFU 自签证书的 curl 用法
+    （`-k` 或 `--cacert control_plane/state/certs/server.crt`）；1.3 认证链措辞由
+    “并列尝试”改为“串行短试（首个成功即止）”；示例凭据变量统一为 1.3 定义的 `$TOKEN`；
+    移除已退役的 `IPXE_CP_TOKEN` 表述；端口清单重写（nginx `80`/`443`、dnsmasq `53`/`67`/`69`、
+    Control Plane `4839` 仅回环、Agent `4840`、nvmet-host `4841`、NVMe-oF `4420`、iSCSI `3260`）
+  - `api/control-plane-api.{zh-CN,en}.md` 第 2 节：标题由「文件即真相 / Files Are the Source of Truth」
+    改为「状态与配置文件」；表格补齐当前状态面（`devices.yml` 标注为绑定关系唯一权威，补
+    `credentials.yml` / `settings.json`）；修正两处与实现不符的说明——`dhcp-hosts.conf` 由「唯一真相」
+    改为「派生视图」，写入方式由「临时文件 atomic replace」改为「截断写保持 inode」
+    （该文件以文件级 bind mount 进 dnsmasq 容器，换 inode 即读不到新绑定）
+  - `about/{zh,en}/AI_POLICY.md`：贡献者问题清单中「文件即真相」一问改为「状态与配置分别落在哪里、
+    谁是权威、谁是派生物」；第五节 PR #3 案例里已退役的 `KURRENT_CP_AUTO_REGISTER=false` 改为当前
+    机制（注册窗口默认关闭、TTL 1–60 分钟、身份验签强制开关，见 `state/settings.json`），
+    同句的「注册 Worker」一并改为「入池」以对齐注册≠授权；第二章问题清单里仅剩的两处旧数据面措辞
+    一并更新——修辞举例「手写 iSCSI 登录报文」改为「数据面的登录报文（iSCSI Login / NVMe-oF Connect）」，
+    末条问题「iSCSI 会话保活机制…」改为「数据面会话的保活与移交（iSCSI 的 NOP 保活 /
+    NVMe/TCP 的 Keep-Alive Timer）」，覆盖并存的两个数据面
+  - `webui/DESIGN.md`：路由 5→7（补 Devices 页与 Agent 详情页）；布局由顶部导航改为可折叠侧边栏；
+    新增 `Modal` 组件与登录页/认证门；鉴权由构建期 token 改为会话 Cookie（前端不落任何凭据）；
+    部署由独立 compose 改为仓库根 `docker-compose.yml` 的 `kurrent-nginx`；目录结构与产物体积同步
+  - 代码内注释：`routers/enroll.py`、`pki.py` 的吊销/renew 语义（“移除即拒绝 renew”仅对
+    nvmet-host 成立，agent 组件在 renew 上会自动登记）；`auth.py` 认证器链串行短试；
+    `storager/nvmeof/nvmet-host/app/main.py` 运行形态（容器 + host 网络 + `4841`，且必须
+    挂载盘目录以解析 configfs `device_path`）；`tftp/boot.ipxe.cfg` 固件补丁编号
+    （`0006`/`0007`/`0008`，原写 `0008`/`0009`/`0010`）
+  - `cli/README.md`：依赖表述由“零第三方依赖”改为“仅 `gopkg.in/yaml.v3`”
+  - `about/zh/ARCHITECTURE.md` / `about/en/ARCHITECTURE.md`（中英同步）：重写为当前架构——三角色现状
+    （控制面仅回环 + nginx 443 单入口、Storager 的 Agent/nvmet-host 双组件与 4420 数据面）、
+    盘标识 NQN 权威与 `os_tag`、引导链补入设备身份信任根（NVRAM 密钥 / 挑战响应 / TOFU）
+    与 NBCT·NBFT 分工、状态与配置收敛为一句（撤销"文件即真相"独立章节）、
+    安全边界拆成"管理面认证"与"设备身份信任根"两层、协议演进改为 NVMe-oF 为主路径
+  - `assets/architecture.svg`：按当前架构重绘（原图为 iSCSI 时期形态：LSC 容器、WebUI `:4838`、
+    iSCSI 数据面、无任何 NVMe 字样）。新图为英文标注的单一图源（沿用原决策），
+    等宽字体 / 零圆角 / 黑白线稿，含控制面·存储节点·设备三区、四条跨区通路
+    （HTTPS 引导链、mTLS 管理、NVMe/TCP 数据面、DHCP·TFTP）与关键点标注
+  - `webui/app/.env.example`：作废 `VITE_CP_TOKEN`（前端已不读取任何构建期凭据）
+
+---
+
+## 2026-09-15
+
+### 新增
+
+- **对外 API 认证升级：认证器链 + Identity（kubeadm/k8s 同构）**——管理面从“单一共享
+  Bearer token（空=放行）”升级为三种凭据**串行短试（首个成功即止；凭据无效即 401，不降级）**、统一产出 `Identity{name, groups,
+  method}`：① mTLS 客户端证书（443，nginx 校验链后透传 DN，CN=用户名、O=组）
+  ② 管理 token（Bearer，pki 台账 usage=admin，只存 sha256 摘要、TTL/吊销）③ 会话
+  Cookie（`kurrent_session`，HMAC-SHA256 签名、HttpOnly/Secure、TTL 7 天滑动续期）。
+  授权分层：读请求只需已认证（不做组校验）、写请求需 admin 组（RBAC 最小版）；审计自动附加 actor
+  （state.current_actor → operations.jsonl）；开发模式仅 `KURRENT_CP_INSECURE=1` 显式
+  放行——空放行路径移除（`KURRENT_CP_TOKEN` env 通道退役）
+- **管理凭据自举并入组件 PKI（admin.conf，kubeadm 同构）**——控制面启动时以内部 CA
+  签发 admin 客户端证书（CN=admin、O=admin，TTL 365 天 → `state/pki/users/admin/`）
+  并渲染管理凭据文件 `state/admin.conf`（kurrent 原生扁平 YAML：`server` +
+  `certificate-authority`/`client-certificate`/`client-key`，0600；证书路径相对引用，
+  宿主/容器视角一致；服务端信任锚 = TOFU `server.crt`；历史 kubeconfig 结构启动时
+  自动无损迁移为扁平格式）；会话签名密钥 `state/session.key` 自举；
+  凭据文件属主对齐 `state/` 目录属主（容器 root 写卷时宿主用户直接可读，免 sudo
+  chown——kubeadm 需 `sudo cp admin.conf` 的体验简化）
+- **会话与身份端点**——`POST /session`（凭据换会话 Cookie）、`DELETE /session`（登出）、
+  `GET /whoami`（返回当前 Identity；WebUI 自动认证探测用）
+- **CLI 管理凭据自动发现（kubectl 同构）**——新增全局 `--credentials`（env
+  `KURRENT_CREDENTIALS`；默认发现 `control_plane/state/admin.conf`），存在即以 admin
+  证书走 443 mTLS（`--server` 可覆盖凭据文件中的 server 地址，便于远程管理）；无
+  管理凭据时回退 `--server` + `--token`；`kurrent token create --usage admin` 签发
+  管理 token；`kurrent init` 完成输出同步 admin.conf 提示
+- **token 台账 usage/groups 扩展**——`POST /pki/tokens` 支持 `{"usage": "admin"}`
+  （不绑组件、groups=[admin]）；bootstrap token（usage=enroll）不可作管理凭据（401）
+- **WebUI 登录与会话（kubeadm / K8s Dashboard 同构）**——登录页粘贴管理 token →
+  `POST /session` 换 HttpOnly 会话 Cookie（7 天滑动续期，刷新/重开浏览器保持登录）；
+  启动 `GET /whoami` 探测——已导入管理证书的浏览器 mTLS 自动认证（无登录页）；
+  任何请求 401 自动回登录页（会话失活钩子）；侧边栏底部登出（`DELETE /session`）；
+  localStorage 明文 token 退役（前端不落任何凭据）；登录页/启动屏 mono 极简样式与
+  中英文案（auth.*）；部署指南（中英）补“WebUI 登录方式”小节（管理 token / PKCS#12
+  证书自动认证，含 openssl 命令）
+- **测试**——新增 `tests/control_plane/test_auth.py`（三通道认证/401/会话签发·篡改·
+  过期·登出/RBAC viewer·admin/凭据自举·旧格式迁移/DN 解析）；新增 `cli/credentials_test.go`
+  （mTLS 请求/相对路径/发现顺序/--server 覆盖）；conftest 测试统一走
+  `KURRENT_CP_INSECURE=1`
+
+### 变更
+
+- **唯一入口 443（端口收拢）**——控制面宿主映射改 `127.0.0.1:4839`（仅本机回环：
+  init 健康检查/调试；X-Client-Cert-DN 头只信 nginx 注入，4839 不得对外）；WebUI 删除
+  `4838:80` 映射、新增宿主 `80:80`；nginx 80 端口块改为 301 重定向到 443（输入
+  `http://<host>` 自动升级）；WebUI SPA 与 `/browse/`、`/api/browse/` 迁移至 443 块；
+  `/api/cp/` 增加 X-Client-Cert-DN 透传（仅 `$ssl_client_verify = SUCCESS` 时经 map
+  非空，防无效证书伪造身份头）；nginx upstream 改容器网络服务名
+  `kurrent-control-plane:8080`（4839 绑回环后 host.docker.internal 不可达）
+- **API 文档 1.3（中英）鉴权章节重写**——认证器链/凭据表/RBAC/会话/开发模式；修正
+  旧名 `IPXE_CP_TOKEN` 与“空则放行”描述；接口概览补 `/whoami`、`/session`；6.5 补
+  token usage=admin 与管理 token 返回（groups）
+- **部署指南（中英）**——端口表（4838 移除、4839 标注仅本机回环）、WebUI 访问改
+  `https://<host>/`、防火墙仅放行 443、架构图同步；cli/README 配置段重写（管理凭据
+  自动发现优先）
+- **节点身份随机化：`metadata.name` 机器自动生成、人工输入降级为备注 `metadata.remark`**
+  （示例值 `storage-nvmet-01` 退役）——身份分层与盘 os_tag 模型对齐：数据面唯一标识 =
+  随机短标识，人类可读信息 = 备注。`kurrent join` 留空时自动生成 12 位 hex 随机标识
+  （与盘 os_tag 同构、docker 容器 ID 短形式；已生成则持久化于声明、重跑身份不变；显式
+  声明仍校验字符集）写入 `storager/kurrent.yaml` 的 `metadata.name`（机器身份，勿手工
+  输入）；节点声明新增 `metadata.remark`（备注，手工输入的唯一字段）。备注全链路：
+  agent 引导 enroll 上报 `remark`（读声明）→ 控制面自动登记写入 `agents.yml`（首次登记
+  带入，之后以台账为权威——WebUI 编辑表单 / `PUT /agents/{id}` 可改，与 `base_url`
+  生命周期一致）→ WebUI Agents 卡片 id 旁展示备注、`kurrent agents list` 新增 REMARK 列；
+  `AgentConfig`/`public_dict`/`CreateAgentRequest`/`UpdateAgentRequest`/`MetadataSpec` 全量
+  携带 remark。模板/示例（`kurrent config print node-defaults` 与 `kurrent.yaml.example`
+  同源）、api 参考（中英 6/6.1/6.3/6.5-6.5.2）、部署指南（中英）、cli/README 同步；测试补：
+  join 随机身份生成 + 重跑稳定（cli/join_test.go）、remark 声明加载（tests/agent）、
+  enroll remark 上报/自动登记/旧 agent 兼容（tests/control_plane）
+
+---
+
 ## 2026-09-04
 
 ### 修复

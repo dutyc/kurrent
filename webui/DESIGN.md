@@ -90,70 +90,156 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 - 用于危险操作（删除 Worker 等）
 - 支持额外 checkbox 选项（如"同时删除 .img"）
 
+### Modal
+- 全局弹窗容器（遮罩 + 居中卡片）
+- 承载次级表单：创建 Worker、Worker 详情的 MAC 换绑、Agent 编辑、Agent 母盘操作
+- 与页面内联展开的交互分工：主流程就地展开（如 Workers 的建盘计划），次级/危险操作走弹窗
+
+### Toast（结果通知）
+- **操作结果不进页面流**：成功/失败用固定右下角的通知条（`position: fixed`，不进列表流、不挤布局），
+  页面里那行"成功 2"会被当成内容的一部分读（用户 2026-10-05 指出）
+- 成功/部分成功**自动消失**（6s，无人需要处理）；**失败常驻**，须手动关闭——错误不能被时间吞掉
+- 变体只用单色语言：`ok` 细灰边；`error` 深色描边 + 左侧重墨条（沿用 `badge-error` 的反色强调）
+- 带明细时逐条列（失败原因 / 跳过原因），超过若干条内部滚动；成功项不复述（列表本身就是明细）
+- 同一页可堆叠多条（建盘 / 删除 / 创建各一条）；`role=status`（非错误）/ `role=alert`（错误）
+- 自动消失的计时器不得随重渲染重置（`onClose` 用 ref 持有，effect 只依赖 tone/duration）
+
 ---
 
 ## 页面结构
 
 ### 路由（HashRouter）
 
+认证门（`App.jsx` 的 `Gate` + `auth.jsx`）：启动探测 `GET /whoami` → `probing` 显示等待页、
+`unauthed` 显示登录页、`authed` 才渲染下列路由。
+
 ```
 /                     Dashboard
-/workers              Worker 列表 + 创建表单（内联展开）
-/workers/:id          Worker 详情（台账 + 实时状态 + 启动变量 + 删除）
+/workers              Worker 列表 + 勾选浮出操作条（创建 Worker 走弹窗）
+/workers/:id          Worker 详情（Tab：Identity / Disks / Boot / CD / NVMe-oF 凭据（有盘时）/ Status）
+/devices              设备池（注册 / 导入 / 绑定向导 / 解绑 / 注册窗口）
 /agents               Agent 监控（自适应网格卡片）
+/agents/:id           Agent 详情（Tab：Targets / Masters）
+/credentials          凭据管理（token 台账列表 / 吊销 / 签发管理 token）
 /operations           操作审计日志（增量加载）
 ```
 
 ### 布局（Layout）
 
+可折叠侧边栏 + 主内容区：
+
 ```
-┌──────────────────────────────────────┐
-│  IPXE CONTROL PLANE  [nav links]  中/EN │  ← 导航栏 52px，sticky
-├──────────────────────────────────────┤
-│                                      │
-│  <Outlet />                         │  ← 页面内容 max-width 1100px
-│                                      │
-└──────────────────────────────────────┘
+┌────────────┬──────────────────────────┐
+│ 品牌    ‹  │                          │
+│ ──────     │                          │
+│ 概览       │                          │
+│ Workers    │        <Outlet />        │
+│ Devices    │                          │
+│ Agents     │                          │
+│ 凭据       │                          │
+│ Operations │                          │
+│ ──────     │                          │
+│ 登出 / 中EN│                          │
+└────────────┴──────────────────────────┘
 ```
 
-导航栏包含：品牌标识 + 4 个导航链接（Dashboard / Workers / Agents / Operations）+ 语言切换（中/EN）。
+侧边栏（`<aside class="sidebar">`，可折叠）：品牌标识 + 折叠按钮（`‹` / `›`）+ 6 个导航项
+（Dashboard / Workers / Devices / Agents / Credentials / Operations，各带内联 SVG 图标）+ 底部登出按钮
+与 中/EN 语言切换。
 
 ### Dashboard
 
-- 统计卡片区：Worker 数量 / Agent 健康比例
+- 统计卡片区：Workers 数量 / Devices 数量 / Agents 健康比例（`健康/总数`）
 - 最近操作：最新 10 条操作日志摘要；点击"查看全部"跳转 /operations
 - 数据并行加载：`Promise.all([getWorkers, getAgents, getOperations])`
 
 ### Workers
 
-- 列表页：表格行（ID / Hostname / OS / State），支持文本筛选
-- 内联创建表单：
-  - Worker ID、MAC、操作系统、存储节点（Agent 选择器）、磁盘类型
-  - 条件字段：母盘名称（type=master）或磁盘大小（type=empty）、Windows ISO（os=windows 时）
-  - 表单打开时自动拉取 Agent 列表，过滤出具备 disk 角色的节点
-- 点击行进入详情页
+交互无「模式」：勾选列常驻，选中即浮出操作条（黑条），操作条上就地展开计划与参数。
+
+- 列表列：Worker / 主机 / 绑定设备 / 系统盘 / 就绪度，支持文本筛选（worker_id、主机名、
+  绑定 MAC、系统盘系统名）；已挂盘显示 `系统[ 版本] → 存储节点`
+- 行交互：**没有选中时点整行 = 进详情；一旦有选中，点整行 = 勾选/取消**（不用瞄准方块）。
+  左侧方块单独勾选、Shift+点击标定区间终点（中间自动勾选）；表头全选/清空的作用域 =
+  当前筛选后的可见行（所见即所选），半选态用 `indeterminate`
+- 创建…（弹窗）：数量 + 名称——数量 = 1 时该名称即完整 Worker ID，> 1 时是名称前缀
+  （`worker-01…`）；MAC 列表可选（每行一个，行数须等于数量；填了逐项校验设备池并直接绑定）。
+  Windows ISO 收进「高级选项」（折叠）；批量不支持该字段，故数量 > 1 时整块隐藏
+- 操作条（`已选 N 台`）：`创建系统盘` / `删除` / `清空`
+  - **创建系统盘 = 就地展开放置计划**：同一行变成参数（磁盘类型 / 操作系统 / 母盘或大小 / 高级），
+    右侧是结果摘要 + `确认创建` + `取消`。不弹窗、不在别处重列这些行（页面已是唯一视图）
+  - 参数缺档时摘要位直说缺什么（如「未发现可用母盘」），不假装「计算中」
+  - 「高级」面板 = 对系统决策的约束 + 低频盘参数：限定可用节点（按当前母盘本地存在性标注
+    「缺该母盘」）、系统版本、盘备注、已排除节点及原因
+- **位置由控制面算（放置是策略，不是逐行输入）**：候选 = 磁盘角色 ∧ 启用（非排空）∧
+  有 API 地址 ∧ 数据面就绪 ∧ 在限定节点范围内 ∧（克隆时）母盘在该节点本地存在；
+  逐个 Worker 取「现有盘数最少」的候选均摊，同负载按登记顺序。逐行下拉是**显式覆盖**
+  （pin，标「手动」，可 `×` 恢复自动），不要求落在限定范围内但必须自身可用
+- **预览即执行**：同一次请求先以 `dry_run` 拿计划（只读探测，不建盘），确认后原样执行；
+  已有同 (系统, 版本) 系统盘的 Worker 显示「已有系统盘 · 跳过」且不占确认名额
+- **建盘即签发**：盘落在 nvmet 后端节点时，控制面自动为尚无密钥的 Worker 生成并推送 DHHC-1
+  （单盘/批量同一语义，见后端 7.1 步骤 7）；前端无需凭据输入项，批量也不多一步
+- 结果：**成功/失败走通知条**（右下角，不进页面流）——成功自动消失、失败常驻并逐条列失败原因；
+  创建 Worker 也一样（单条也发通知，1 台与 N 台反馈一致）
+- 失败后**保留弹窗里的表单值**（改掉个别 MAC 直接重提，已建成的按幂等跳过），全部成功才清空
+- 删除：ConfirmAction 二次确认（不可逆 → 二次确认），弹窗可附带「同时删除 .img」
+  「忽略已不存在的 Target」
+- Esc 分层退出：页面介绍贴层 → 创建弹窗 → 退出计划（清空选中）
+- **节点列表与母盘清单独立取数**：`/masters` 是跨节点聚合端点，任一节点不可达即整批 502
+  （body 带逐节点 error）——若与节点列表耦合成 `Promise.all`，连「建空白盘」（本不需要母盘）
+  也会拿不到节点。母盘清单失败只降级下拉，并在母盘类型下显式提示原因（不把「取不到」
+  伪装成「没有母盘」）；放置失败的 503 同样携带逐节点排除原因，在「高级」里展示
+- 列表下方单行行为提示（灰字）随状态切换：无选中 = 点行进详情 / 有选中 = 点行即勾选 /
+  计划中 = 位置由系统定、可改手动
 
 ### Worker Detail
 
-- 基本信息卡片（Identity）：Worker ID、Hostname、MAC、OS、Arch、State
-- 磁盘信息卡片（Disk）：Agent、IQN、Filename、Backing、Source
-- 光驱信息卡片（CD-ROM，条件展示）：Agent、IQN、ISO、Backing
-- 实时状态探测（Live Status）：dnsmasq 绑定、Disk Target 存在性、CD Target 存在性
-- 启动变量预览（Boot Variables）：/boot-vars 返回内容的代码块展示
+Tab 切换：Identity / Disks / Boot / CD（条件展示）/ NVMe-oF Credential（条件展示）/ Status。
+
+- Identity：Worker ID、Hostname、MAC（支持就地换绑编辑）、OS、Arch、State
+- Disks：Agent、盘标识、Filename、Backing、Source
+- Boot：默认启动系统与菜单默认项设置、`/boot-vars` 投影预览
+- CD（条件展示）：Agent、盘标识、ISO、Backing
+- NVMe-oF Credential（条件展示：该 Worker 有 NVMe-oF 盘时出现，即盘记录带 NQN——与后端推送目标同口径，
+  否则整个页签隐藏）：状态徽章 + secret_hash 前缀 + 逐 Agent 推送状态。**密钥通常在 nvmet 建盘时已由
+  控制面自动签发**（故这里多数情况下是「已设置」）；按钮语义 = 轮换：「生成并设置密钥」在浏览器就地生成
+  DHHC-1（明文不落浏览器存储，只随请求发出）、「吊销密钥」二次确认；推送失败/待同步由控制面对账自动收敛
+- Status：实时探测（dnsmasq 绑定、Disk Target 存在性、CD Target 存在性）
 - 删除操作：内联二次确认（ConfirmAction），可选同时删除 .img 文件和忽略已不存在的 Target
+
+### Devices（设备池）
+
+- 设备台账列表：MAC、状态（`pooled` / `bound` / `revoked`）过滤、绑定 Worker、指纹摘要
+- 工具栏：`+ 注册设备`（手工登记 MAC 与指纹字段）、`导入清单`（批量）、`绑定向导`、`解绑模式`
+- 绑定向导：图形化配对或粘贴清单两种模式，先预览（分配）再执行；支持导出
+- 注册窗口：开关 + TTL 选择 + 放行台数（留空 = 不限；决定未知 MAC 能否在上报时入池）；开启中显示剩余时间与「已放行 n/N」，额度用尽后 Badge 转为「额度已满」（密钥认领与手动登记不占额度）
 
 ### Agents
 
 - 自适应网格布局（`grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))`）
 - 每张卡片展示：
-  - Agent ID + 健康状态 Badge
-  - 后端类型（stgt / lio）
-  - API 地址（base_url）
-  - 数据面地址（storager_ip）——从 agents.yml 读取
-  - 光驱支持 / 磁盘角色（是/否）
+  - Agent ID + 健康状态 Badge（ok / degraded / error 三态；degraded = 节点在线但数据面不可用——
+    宿主服务不可达或 configfs 未就绪，徽章 hover 显示原因）
+  - 后端类型（stgt / lio / nvmet）
+  - 文件系统、API 地址（base_url）
+  - BASE NQN（盘标识命名空间）
+  - 磁盘角色 / 光驱支持（是/否）
   - 克隆方式 / 新建磁盘方式（中文翻译映射）
-  - 标签（tags）
-- Live 探测开关：开启时实时访问 Agent /healthz，关闭时仅展示静态配置
+  - 标签（tags）、备注（remark）
+- 工具栏：`+ 加入节点`（节点接入入口）、`在线探测` 开关（开启时实时访问 Agent /healthz）、`页面介绍`
+- 卡片上的 `编辑` 弹窗可改备注 / 角色 / 启用（排空：停用后不再接新增盘）等台账字段；
+  自动登记节点（tags 含 `auto`）的 API 地址由节点声明管理，编辑弹窗中只读并附灰字提示
+- 点击卡片进入 `/agents/:id`（Agent 详情：Targets / Masters 两个 Tab）
+
+### Credentials（凭据）
+
+- token 台账列表（`GET /pki/tokens`，仅未过期条目）：Token ID、用途（enroll / admin）、
+  组、归属（component / agent_id）、备注、签发时间、到期时间；旧条目签发时间显示 `-`（历史条目无该字段）
+- 工具栏：`刷新`、`签发管理 token`（POST `/pki/tokens` `{"usage":"admin"}`；
+  一次性明文展示 + 复制按钮 + 红字提示「仅本次可见，妥善保存」）
+- 吊销：每行 ConfirmAction 二次确认（危险按钮），DELETE `/pki/tokens/{token_id}`；
+  删除即失效、无法恢复（审计 `pki.token.revoke` 留痕）
+- 与 CLI `kurrent token list|revoke` 同款调用；证书与会话轮换不在本页范围（另立项）
 
 ### Operations
 
@@ -202,33 +288,36 @@ t('agents.capLabels')['reflink (FICLONE) -> shutil.copy fallback']  // → "秒�
 // api/client.js
 const BASE = '/api/cp'
 
-function getToken() {
-  return import.meta.env.VITE_CP_TOKEN || localStorage.getItem('cp_token') || ''
-}
-
 async function request(path, options) {
-  // 自动拼接 BASE + path
-  // 自动附加 Authorization: Bearer <token>
-  // 非 2xx 响应解析 error detail 抛出
+  // 自动拼接 BASE + path；credentials: 'same-origin' 携带会话 Cookie
+  // 非 2xx 响应解析 error detail 抛出；401 触发全局回登录页（raw 选项可跳过）
 }
 ```
 
-### 鉴权
+### 鉴权（会话 Cookie）
 
-Token 优先级：
-1. **构建时注入**：`webui/app/.env` 中 `VITE_CP_TOKEN=xxx`（生产环境推荐）
-2. **运行时**：`localStorage.cp_token`（开发调试用，已废弃 UI 输入方式）
+前端**不落任何凭据**在 localStorage：
+
+1. 启动探测 `GET /whoami`（`raw: true`，不触发 401 跳转）→ 已认证（浏览器导入了管理证书时走 mTLS 自动通过）直接进入
+2. 未认证 → 登录页粘贴**管理 token**（`kurrent token create --usage admin`）→ `POST /session` 换取 HttpOnly 签名 Cookie（TTL 7 天滑动续期）
+3. 任意请求 401 → `setUnauthorizedHandler` 把状态置回 `unauthed`（回登录页）
+4. 登出 = `DELETE /session`（无状态签名会话，服务端无吊销态）
 
 ### 代理（Vite 开发 vs Nginx 生产）
 
 | 环境 | `/api/cp/*` 代理 | 配置位置 |
 |---|---|---|
-| `npm run dev` | Vite proxy → Control Plane | `vite.config.js` |
-| 生产部署 | nginx `proxy_pass` → Control Plane | `deploy/nginx/nginx.conf` |
+| `npm run dev` | Vite proxy → `http://localhost:4839`（剥离 `/api/cp` 前缀） | `vite.config.js` |
+| 生产部署 | nginx `proxy_pass` → `kurrent-control-plane:8080`（剥离 `/api/cp/`） | `deploy/nginx/nginx.conf` |
 
 ---
 
 ## 部署架构
+
+### 编排位置
+
+WebUI 不再独立编排：`deploy/` 只提供 nginx 镜像，服务定义在**仓库根 `docker-compose.yml`** 的
+`kurrent-nginx` 服务中（与 dnsmasq / control-plane 同一 compose 网络与入口）。
 
 ### 文件浏览器集成
 
@@ -242,26 +331,30 @@ Token 优先级：
 | `/api/browse/*` | njs 目录列表 JSON API |
 | `/file/*` | iPXE 文件下载（ISO、kernel、initrd） |
 
-### Docker Compose（仅 WebUI）
+### Docker Compose（仓库根 `docker-compose.yml` 的 `kurrent-nginx`）
 
 ```yaml
 services:
-  nginx:
-    build: { dockerfile: Dockerfile }
-    ports: ["4838:80"]
+  kurrent-nginx:
+    build: { context: ./webui/deploy, dockerfile: Dockerfile }
+    ports:
+      - "80:80"                                  # 仅 301 升级到 443
+      - "${KURRENT_HTTPS_PORT:-443}:443"          # 唯一对外入口（WebUI + API + 引导链 + 文件）
     volumes:
-      - ../app/dist:/usr/share/nginx/html:ro      # WebUI 静态文件
-      - ./www/browse:/usr/share/nginx/browse:ro    # 文件浏览器页面
-      - ${PUBLIC_PATH:-./public}:/data:ro           # iPXE 公开文件
+      - ./webui/app/dist:/usr/share/nginx/html:ro                 # WebUI 静态文件
+      - ./webui/deploy/www/browse:/usr/share/nginx/browse:ro       # 文件浏览器页面
+      - ./webui/deploy/public:/data:ro                            # iPXE 公开文件（ISO/kernel/initrd）
+      - ./control_plane/state/certs:/etc/nginx/certs:ro            # TOFU 自签证书
+      - ./control_plane/state/pki:/etc/nginx/pki:ro                # 内部 CA（仅 ca.crt 被引用）
+      - ./tftp:/tftp:ro                                          # iPXE 菜单/覆盖脚本（HTTPS 同源）
 ```
 
 ### 构建命令
 
 ```bash
 cd webui/app
-cp .env.example .env       # 编辑 VITE_CP_TOKEN
 npm install
-npm run build              # 输出到 dist/
+npm run build              # 输出到 dist/（由仓库根 compose 只读挂载进 nginx）
 ```
 
 ---
@@ -271,18 +364,19 @@ npm run build              # 输出到 dist/
 ```
 webui/
 ├── app/
-│   ├── .env                     # 环境变量（VITE_CP_TOKEN），不提交
-│   ├── .env.example             # 环境变量模板
 │   ├── package.json
 │   ├── vite.config.js           # Vite 构建配置 + 开发代理
 │   ├── index.html
 │   └── src/
 │       ├── main.jsx             # 入口：I18nProvider + HashRouter
-│       ├── App.jsx              # 路由定义
+│       ├── App.jsx              # 路由定义 + 认证门（Gate）
+│       ├── auth.jsx             # 认证上下文（whoami 探测 / 登录 / 登出 / 401 回登录页）
 │       ├── api/
-│       │   └── client.js        # API 请求封装（fetch + token）
+│       │   └── client.js        # API 请求封装（fetch + 会话 Cookie + 401 钩子）
 │       ├── components/          # 通用组件
-│       │   ├── Layout.jsx/css   # 导航栏 + 语言切换
+│       │   ├── Layout.jsx/css   # 可折叠侧边栏（导航 + 登出 + 语言切换）
+│       │   ├── Login.jsx/css    # 登录页（管理 token 换会话）
+│       │   ├── Modal.jsx/css    # 全局弹窗
 │       │   ├── Card.jsx/css     # 卡片容器
 │       │   ├── Button.jsx/css   # 按钮
 │       │   ├── Input.jsx/css    # 输入框
@@ -296,7 +390,9 @@ webui/
 │       │   ├── Dashboard.jsx/css
 │       │   ├── Workers.jsx/css
 │       │   ├── WorkerDetail.jsx/css
+│       │   ├── Devices.jsx/css
 │       │   ├── Agents.jsx/css
+│       │   ├── AgentLuns.jsx/css
 │       │   └── Operations.jsx/css
 │       ├── i18n/                # 国际化
 │       │   ├── index.jsx        # I18nProvider + useI18n
@@ -307,9 +403,8 @@ webui/
 │
 └── deploy/
     ├── Dockerfile               # nginx:1.27-alpine + njs
-    ├── docker-compose.yml
     ├── nginx/
-    │   ├── nginx.conf           # 5 个 location 块 + upstream
+    │   ├── nginx.conf           # location 块 + upstream（编排在仓库根 docker-compose.yml）
     │   └── njs/
     │       └── file-list.js     # JSON 目录列表（njs）
     ├── public/                  # iPXE 公开文件目录
@@ -332,4 +427,4 @@ webui/
 | i18n | 自研 React Context（零依赖） |
 | API | 原生 fetch（零 HTTP 库） |
 | 部署 | nginx:1.27-alpine + njs 模块 |
-| 构建产物 | 纯静态文件（HTML + JS + CSS），~193KB gzipped ~62KB |
+| 构建产物 | 纯静态文件（HTML + JS + CSS）：JS 302.8 KB（gzip 93.6 KB）／CSS 37.9 KB（gzip 6.5 KB） |
