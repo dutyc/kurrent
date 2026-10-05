@@ -1,4 +1,5 @@
-// 控制面 HTTP 客户端：Bearer 鉴权 + JSON，非 2xx 打印 detail 后退出。
+// 控制面 HTTP 客户端：管理凭据（admin 证书 mTLS）/ Bearer token 双通道 + JSON，
+// 非 2xx 打印 detail 后退出。
 package main
 
 import (
@@ -12,10 +13,7 @@ import (
 
 // api 向控制面发请求并返回响应体；非 2xx 时打印错误并退出进程。
 func api(method, path string, body any) []byte {
-	server := strings.TrimRight(flagServer, "/")
-	if server == "" {
-		server = "http://127.0.0.1:4839"
-	}
+	client, server := apiEndpoint()
 	var rd io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -32,16 +30,33 @@ func api(method, path string, body any) []byte {
 	if flagToken != "" {
 		req.Header.Set("Authorization", "Bearer "+flagToken)
 	}
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		fatal("connect %s: %v", server, err)
+		fatal("connect %s: %v%s", server, err, credentialsHint())
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		fatal("%s %s -> HTTP %d: %s", method, path, resp.StatusCode, detailOf(data))
+		hint := ""
+		if resp.StatusCode == http.StatusUnauthorized {
+			hint = authHint() // 两条凭据通道都空时点明"未发现凭据"，而非只报 unauthorized
+		}
+		fatal("%s %s -> HTTP %d: %s%s", method, path, resp.StatusCode, detailOf(data), hint)
 	}
 	return data
+}
+
+// apiEndpoint 选择请求端点：管理凭据（admin 证书 mTLS，443 唯一入口）优先；
+// 无管理凭据时回退 --server/本机回环 + Bearer token。
+func apiEndpoint() (*http.Client, string) {
+	if cc := loadCredentials(); cc != nil {
+		return cc.client(), cc.serverURL()
+	}
+	server := strings.TrimRight(flagServer, "/")
+	if server == "" {
+		server = "http://127.0.0.1:4839"
+	}
+	return &http.Client{Timeout: 15 * time.Second}, server
 }
 
 // detailOf 从 FastAPI 错误响应中提取人类可读的 detail。

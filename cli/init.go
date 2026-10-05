@@ -1,4 +1,4 @@
-// init 子命令：控制面初始化（kubeadm init 同构，配置即声明、CLI 即工具）。
+// init 子命令：控制面初始化（配置即声明、CLI 即工具）。
 // 声明文件 control_plane/kurrent.yaml 即用户维护的权威配置（模板：
 // kurrent config print init-defaults > control_plane/kurrent.yaml 后编辑）。
 // init 读入声明 → 校验（networking 五键必填 + 格式，其余块由控制面 pydantic
@@ -37,8 +37,8 @@ func cmdInit(args []string) {
 }
 
 type initOpts struct {
-	dir        string // control_plane 目录
-	configFile string // 控制面声明文件（缺省 <dir>/kurrent.yaml；其他路径 = 应用为控制面配置）
+	dir        string        // control_plane 目录
+	configFile string        // 控制面声明文件（缺省 <dir>/kurrent.yaml；其他路径 = 应用为控制面配置）
 	healthWait time.Duration // 收敛时等待控制面 /healthz 的超时（0 = 默认 30s；测试注入缩短）
 }
 
@@ -109,7 +109,9 @@ func initRun(o initOpts) error {
 		return err
 	}
 	fmt.Println("==> kurrent init: done. 控制面已按声明运行：")
-	fmt.Println("    API: http://127.0.0.1:4839（GET /healthz）；WebUI: http://<host>:4838")
+	fmt.Println("    WebUI: https://<host>/（唯一入口 443）；本机健康检查 http://127.0.0.1:4839/healthz")
+	fmt.Println("    管理凭据：control_plane/state/admin.conf（kurrent 自动发现，admin 证书走 443 mTLS）")
+	fmt.Println("    任意目录使用：kurrent credentials install（凭据快照到 ~/.kurrent，供 PATH 安装的二进制）")
 	fmt.Println("    下一步：kurrent token create 签发节点加入凭据")
 	return nil
 }

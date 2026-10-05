@@ -1,4 +1,4 @@
-// workers / ops 只读子命令。
+// workers / ops 子命令（workers 凭据动词见 workers_credential.go）。
 package main
 
 import (
@@ -21,7 +21,11 @@ func cmdWorkers(args []string) {
 		workersGet(args[1])
 		return
 	}
-	fatal("用法: kurrent workers list | kurrent workers get <id>")
+	if args[0] == "credential" {
+		workersCredential(args[1:])
+		return
+	}
+	fatal("用法: kurrent workers list | workers get <id> | workers credential show|set|revoke <id>")
 }
 
 func workersList() {

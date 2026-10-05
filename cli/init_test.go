@@ -67,7 +67,7 @@ func TestInitBasic(t *testing.T) {
 }
 
 func TestInitIdempotentRerun(t *testing.T) {
-	// 声明收敛语义（kubeadm 配置即声明）：kurrent.yaml 已存在 = 正常重跑（改声明后重跑生效），不拒绝
+	// 声明收敛语义（配置即声明）：kurrent.yaml 已存在 = 正常重跑（改声明后重跑生效），不拒绝
 	_, cp, _, _ := newFakeRepo(t)
 	writeControlPlaneConfig(t, cp, cpYAML)
 	for i := 0; i < 2; i++ {

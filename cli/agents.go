@@ -23,6 +23,7 @@ type agentBody struct {
 	Role       agentRole `json:"role"`
 	Tags       []string  `json:"tags"`
 	Enabled    bool      `json:"enabled"`
+	Remark     string    `json:"remark"` // 备注（人类识别用；edit 为全量覆盖，不带 --remark 即清空）
 }
 
 func cmdAgents(args []string) {
@@ -68,7 +69,7 @@ func agentsList(args []string) {
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tHEALTH\tBASE_URL\tROLE\tENABLED\tTAGS")
+	fmt.Fprintln(w, "ID\tREMARK\tHEALTH\tBASE_URL\tROLE\tENABLED\tTAGS")
 	for _, a := range items {
 		role := "disk"
 		if v, _ := a["role"].(map[string]any); v != nil && boolOf(v["cd"]) {
@@ -79,9 +80,10 @@ func agentsList(args []string) {
 			health = h
 		}
 		id, _ := a["id"].(string)
+		remark, _ := a["remark"].(string)
 		baseURL, _ := a["base_url"].(string)
 		tags := joinStrings(a["tags"])
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\t%s\n", id, health, baseURL, role, boolOf(a["enabled"]), tags)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%v\t%s\n", id, remark, health, baseURL, role, boolOf(a["enabled"]), tags)
 	}
 	w.Flush()
 }
@@ -107,10 +109,11 @@ func agentsAdd(args []string) {
 	agentID := firstPos(p)
 	baseURL := p.opt("base-url", "")
 	if agentID == "" || baseURL == "" {
-		fatal("用法: kurrent agents add <id> --base-url URL [--role disk,cd] [--tags a,b]")
+		fatal("用法: kurrent agents add <id> --base-url URL [--role disk,cd] [--tags a,b] [--remark TEXT]")
 	}
 	body := agentBody{ID: agentID, BaseURL: baseURL, StoragerIP: p.opt("storager-ip", ""),
-		Role: parseRole(p.opt("role", "disk")), Tags: splitTags(p.opt("tags", "")), Enabled: !p.has("disabled")}
+		Role: parseRole(p.opt("role", "disk")), Tags: splitTags(p.opt("tags", "")), Enabled: !p.has("disabled"),
+		Remark: p.opt("remark", "")}
 	api("POST", "/agents", body)
 	fmt.Printf("agent %s registered\n", agentID)
 }
@@ -120,10 +123,12 @@ func agentsEdit(args []string) {
 	agentID := firstPos(p)
 	baseURL := p.opt("base-url", "")
 	if agentID == "" || baseURL == "" {
-		fatal("用法: kurrent agents edit <id> --base-url URL [--role disk,cd] [--tags a,b]")
+		fatal("用法: kurrent agents edit <id> --base-url URL [--role disk,cd] [--tags a,b] [--remark TEXT]\n" +
+			"      全量覆盖语义：不带 --remark / --tags 即清空对应字段")
 	}
 	body := agentBody{BaseURL: baseURL, StoragerIP: p.opt("storager-ip", ""),
-		Role: parseRole(p.opt("role", "disk")), Tags: splitTags(p.opt("tags", "")), Enabled: !p.has("disabled")}
+		Role: parseRole(p.opt("role", "disk")), Tags: splitTags(p.opt("tags", "")), Enabled: !p.has("disabled"),
+		Remark: p.opt("remark", "")}
 	api("PUT", "/agents/"+agentID, body)
 	fmt.Printf("agent %s updated\n", agentID)
 }

@@ -1,5 +1,5 @@
 // 子命令参数解析：位置参数与 --key value / --key=value / --flag 任意混排
-// （Go flag 包遇第一个位置参数即停止解析，不满足 kubectl 式 CLI 习惯）。
+// （Go flag 包遇第一个位置参数即停止解析，不满足混排习惯）。
 package main
 
 import "strings"
