@@ -13,6 +13,7 @@ def agent_payload():
         "role": {"disk": True, "cd": True},
         "tags": ["storage", "stgt"],
         "enabled": True,
+        "remark": "主存储节点",
     }
 
 
@@ -26,7 +27,8 @@ class TestAgentCrud:
         assert body["id"] == "ag-01"
         assert body["role"] == {"disk": True, "cd": True}
         assert body["storager_ip"] is None  # 未显式配置 → 缺省空；回退 base_url 主机名仅在 boot-vars 投影时
-        assert "token" not in body  # 身份由 mTLS 组件证书承载（K8S 同构），注册表无 token 字段
+        assert body["remark"] == "主存储节点"  # 备注（人类识别用，展示性质）
+        assert "token" not in body  # 身份由 mTLS 组件证书承载，注册表无 token 字段
         # 列表（live=false：不做健康探测，返回纯台账）
         listing = client.get("/agents", params={"live": "false"}, headers=auth_headers).json()
         assert listing == [body]
@@ -53,6 +55,7 @@ class TestAgentCrud:
             "role": {"disk": True, "cd": False},
             "tags": ["storage", "lio"],
             "enabled": False,
+            "remark": "备存储节点",
         }, headers=auth_headers)
         assert res.status_code == 200
         body = res.json()
@@ -61,6 +64,36 @@ class TestAgentCrud:
         assert body["tags"] == ["storage", "lio"]
         assert body["enabled"] is False
         assert body["storager_ip"] is None
+        assert body["remark"] == "备存储节点"
+
+    def test_update_base_url_refused_for_auto_registered(self, client, auth_headers):
+        """自动登记（tags 含 auto）节点：base_url 由节点声明管理，PUT 改地址 → 409 并指路
+        （改了也会在下次 renew 被声明值冲掉）；同址提交（WebUI 编辑保存的常规形态）不受限。"""
+        client.post("/agents", json={
+            "id": "ag-auto", "base_url": "http://ag-auto:8000",
+            "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
+        }, headers=auth_headers)
+        res = client.put("/agents/ag-auto", json={
+            "base_url": "http://ag-auto-moved:9000",
+            "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
+        }, headers=auth_headers)
+        assert res.status_code == 409
+        assert "node declaration" in res.json()["detail"]
+        res = client.put("/agents/ag-auto", json={
+            "base_url": "http://ag-auto:8000",
+            "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
+        }, headers=auth_headers)
+        assert res.status_code == 200
+
+    def test_update_base_url_allowed_for_manual_agent(self, client, auth_headers, agent_payload):
+        """手工登记节点（无 auto 标签）：无节点声明可依，地址归控制面，仍可改。"""
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+        res = client.put("/agents/ag-01", json={
+            "base_url": "http://ag-01-moved:9000",
+            "role": {"disk": True, "cd": False}, "tags": ["storage"],
+        }, headers=auth_headers)
+        assert res.status_code == 200
+        assert res.json()["base_url"] == "http://ag-01-moved:9000"
 
     def test_update_missing_404(self, client, auth_headers):
         res = client.put("/agents/ag-01", json={
@@ -68,9 +101,65 @@ class TestAgentCrud:
         }, headers=auth_headers)
         assert res.status_code == 404
 
-    def test_requires_token(self, client, agent_payload):
+    def test_delete_agent_reports_impacted_workers(self, client, auth_headers, agent_payload, mock_agent_client):
+        """删除 = 仅清台账（软删除，节点下次 renew 自动重新登记）：不拦截，但响应告知
+        仍挂在该节点上的盘与受影响 Worker（登记即认知——这些盘在重新登记前无法投影引导地址）。"""
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "master", "os": "ubuntu", "name": "m",
+        }, headers=auth_headers)
+        assert res.status_code == 201, res.text
+        res = client.delete("/agents/ag-01", headers=auth_headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["deleted"] == "ag-01"
+        assert body["disks_hosted"] == 1
+        assert body["affected_workers"] == ["worker-01"]
+
+    def test_requires_token(self, client, monkeypatch, agent_payload):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.get("/agents").status_code == 401
         assert client.post("/agents", json=agent_payload).status_code == 401
+
+
+class TestAgentHealthMapping:
+    """列表健康探测三态：ok（健康）/ degraded（在线但数据面不可用）/ error（掉线）。"""
+
+    def test_health_ok(self, client, auth_headers, agent_payload, mock_agent_client):
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+        mock_agent_client.healthz = lambda: {"status": "ok", "backend": "nvmet", "backend_ready": True}
+        listing = client.get("/agents", headers=auth_headers).json()
+        assert listing[0]["health"] == "ok"
+
+    def test_health_degraded_backend_not_ready(self, client, auth_headers, agent_payload, mock_agent_client):
+        """agent 在线但后端未就绪（nvmet-host 不可达 / configfs 未就绪）→ degraded；
+        capabilities 随之失败时保留健康探针的具体原因，不覆盖成笼统 error。"""
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+        mock_agent_client.healthz = lambda: {
+            "status": "ok", "backend": "nvmet", "backend_ready": False,
+            "backend_detail": "nvmet-host reachable; configfs not ready",
+        }
+
+        def caps_fail():
+            raise RuntimeError("agent HTTP 503: nvmet host unreachable")
+
+        mock_agent_client.capabilities = caps_fail
+        listing = client.get("/agents", headers=auth_headers).json()
+        assert listing[0]["health"] == "degraded"
+        assert "configfs" in listing[0]["error"]
+
+    def test_health_error_unreachable(self, client, auth_headers, agent_payload, mock_agent_client):
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+
+        def boom():
+            raise RuntimeError("connection refused")
+
+        mock_agent_client.healthz = boom
+        listing = client.get("/agents", headers=auth_headers).json()
+        assert listing[0]["health"] == "error"
+        assert "connection refused" in listing[0]["error"]
 
 
 class TestAgentProbe:
@@ -87,9 +176,9 @@ class TestAgentProbe:
         assert res.status_code == 200
         body = res.json()
         assert body["role"] == {"disk": True, "cd": True}
-        assert body["tags"] == ["storage", "lio"]
+        assert body["tags"] == ["storage"]  # tags 纯人工标签：后端类型不进 tags
         assert body["storager_ip"] == "ag-probe"
-        assert body["backend"] == "lio"
+        assert body["backend"] == "lio"  # 后端类型单独返回（/boot-vars 实时查 capabilities 判定）
         assert body["base_nqn"] == "nqn.2026-07.com.test"
         # 不落盘：agents 列表仍为空
         assert client.get("/agents", headers=auth_headers).json() == []
@@ -101,8 +190,24 @@ class TestAgentProbe:
         res = client.post("/agents/probe", json={"base_url": "http://down:8000"}, headers=auth_headers)
         assert res.status_code == 502
 
+    def test_probe_capabilities_error_dict_detail(self, client, auth_headers, monkeypatch):
+        """capabilities 失败：502 + {"agent": base_url, "error": ...} dict detail 契约——
+        API 文档「LUN 管理」节的 Agent 代理错误透传结构，WebUI extractDetail 与 CLI detailOf 消费。"""
+        from control_plane.app.agent_client import AgentAPIError
+
+        monkeypatch.setattr(AgentClient, "healthz", lambda self: {"status": "ok"})
+
+        def boom(self):
+            raise AgentAPIError("_probe", 500, "capabilities exploded")
+
+        monkeypatch.setattr(AgentClient, "capabilities", boom)
+        # 尾斜杠顺带验证 base_url 规范化（strip + rstrip "/"）
+        res = client.post("/agents/probe", json={"base_url": "http://ag-down:8000/"}, headers=auth_headers)
+        assert res.status_code == 502
+        assert res.json()["detail"] == {"agent": "http://ag-down:8000", "error": "capabilities exploded"}
+
     def test_probe_edit_scenario(self, client, auth_headers, monkeypatch):
-        """编辑场景探测：经控制面 mTLS 客户端证书鉴权（token 已随 K8S 同构改造移除），
+        """编辑场景探测：经控制面 mTLS 客户端证书鉴权（鉴权不用 token），
         agent_id 仅作编辑场景标识，无 token 回退逻辑。"""
         monkeypatch.setattr(AgentClient, "healthz", lambda self: {"status": "ok"})
         monkeypatch.setattr(AgentClient, "capabilities", lambda self: {"backend": "stgt"})
@@ -149,6 +254,23 @@ class TestAgentLuns:
         client.post("/agents", json=agent_payload, headers=auth_headers)
         res = client.post("/agents/ag-01/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
         assert res.status_code == 400
+
+    def test_create_on_disabled_agent_409(self, client, auth_headers, agent_payload, mock_agent_client):
+        """enabled=排空语义：停用节点不接任何新增（显式点名也拒），查询/删除不受限。"""
+        agent_payload["enabled"] = False
+        client.post("/agents", json=agent_payload, headers=auth_headers)
+        res = client.post("/agents/ag-01/luns/disk", json={
+            "iqn": "iqn.2026-07.com.test:worker-01.ubuntu",
+            "filename": "worker-01.ubuntu.img",
+            "master": "ubuntu-24.04-master",
+        }, headers=auth_headers)
+        assert res.status_code == 409
+        assert "disabled" in res.json()["detail"]
+        res = client.post("/agents/ag-01/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
+        assert res.status_code == 409
+        # 非新增入口不受 enabled 限制
+        assert client.get("/agents/ag-01/luns", headers=auth_headers).status_code == 200
+        assert client.post("/agents/ag-01/luns/scan", headers=auth_headers).status_code == 200
 
     def test_scan(self, client, auth_headers, agent_payload, mock_agent_client):
         client.post("/agents", json=agent_payload, headers=auth_headers)
@@ -266,7 +388,9 @@ class TestMasterTags:
                           headers=auth_headers).status_code == 404
         assert client.delete("/agents/ag-99/masters/x/tag", headers=auth_headers).status_code == 404
 
-    def test_master_tag_requires_token(self, client, agent_payload):
+    def test_master_tag_requires_token(self, client, monkeypatch, agent_payload):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.put("/agents/ag-01/masters/x/tag", json={"os": "ubuntu"}).status_code == 401
         assert client.delete("/agents/ag-01/masters/x/tag").status_code == 401
 

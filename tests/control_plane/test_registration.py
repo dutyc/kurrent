@@ -41,7 +41,9 @@ class TestRegistrationWindowSmoke:
         res = client.delete("/settings/registration-window", headers=auth_headers)
         assert res.status_code == 409
 
-    def test_requires_token(self, client):
+    def test_requires_token(self, client, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.get("/settings/registration-window").status_code == 401
         assert client.post("/settings/registration-window", json={"ttl_minutes": 30}).status_code == 401
         assert client.delete("/settings/registration-window").status_code == 401
@@ -62,6 +64,8 @@ class TestEnforcementSmoke:
         res = client.put("/settings/enforcement", json={"enabled": False}, headers=auth_headers)
         assert res.json() == {"enabled": False}
 
-    def test_enforcement_requires_token(self, client):
+    def test_enforcement_requires_token(self, client, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.get("/settings/enforcement").status_code == 401
         assert client.put("/settings/enforcement", json={"enabled": True}).status_code == 401

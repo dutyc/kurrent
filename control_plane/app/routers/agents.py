@@ -1,7 +1,7 @@
 """Agent 管理端点（Bearer 鉴权）：注册/更新/探测、LUN 管理、母盘聚合（/masters）。
 
-bootstrap token 签发已移至 POST /pki/tokens（kubeadm token create 同构：集群级通用
-引导凭据，不绑节点）；nvmet-host 组件凭据由 enroll 按能力派生，均不在本模块。"""
+bootstrap token 签发已移至 POST /pki/tokens（集群级通用引导凭据，不绑节点）；
+nvmet-host 组件凭据由 enroll 按能力派生，均不在本模块。"""
 
 from typing import Any
 from urllib.parse import urlparse
@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..agent_client import AgentAPIError, AgentClient, AgentConfig
-from ..auth import verify_control_token
+from ..auth import authenticate, authorize_request
 from ..models import (
     CreateAgentRequest,
     CreateCdLunRequest,
@@ -19,9 +19,9 @@ from ..models import (
     UpdateAgentRequest,
 )
 from ..stores import agents, master_tags, record, store
-from ..utils import WORKER_ID_RE, canonical_os, canonical_os_version, client_host
+from ..utils import WORKER_ID_RE, canonical_os, canonical_os_version, client_host, worker_disks
 
-router = APIRouter(dependencies=[Depends(verify_control_token)])
+router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
 
 
 @router.get("/agents")
@@ -56,6 +56,7 @@ def create_agent(req: CreateAgentRequest, request: Request):
             storager_ip=storager_ip,
             enabled=req.enabled,
             tags=tuple(t.strip() for t in req.tags if t.strip()),
+            remark=req.remark.strip(),
         )
     record("agent.register", "ok", agent=agent_id, client=client_host(request))
     return agents.get(agent_id).public_dict()
@@ -64,16 +65,25 @@ def create_agent(req: CreateAgentRequest, request: Request):
 @router.put("/agents/{agent_id}")
 def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
     """更新已有 Agent：覆盖 agents.yml 中对应条目（id 不可改，走路径参数）。
-    enabled=false 停用（不再参与调度与存活探测）。"""
+    enabled=false 停用（排空语义：不接新增盘，存量盘照常服务）。
+    base_url 归属：自动登记（tags 含 auto）的节点其地址由节点声明管理——
+    控制面侧改动会在下次 renew 被声明值冲掉，故拒绝并指路；手工登记节点仍可改。"""
     agent_id = agent_id.strip().lower()
     base_url = req.base_url.strip().rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         raise HTTPException(400, "base_url must start with http:// or https://")
     storager_ip = req.storager_ip.strip() if req.storager_ip else None
     try:
-        agents.get(agent_id)
+        current = agents.get(agent_id)
     except KeyError:
-        raise HTTPException(404, f"agent not found: {agent_id}")
+        raise HTTPException(404, f"agent not found: {agent_id}") from None
+    if base_url != current.base_url and "auto" in current.tags:
+        raise HTTPException(
+            409,
+            f"base_url is managed by the node declaration (storager/kurrent.yaml "
+            f"spec.agent.advertiseUrl): edit the declaration on the node and re-run "
+            f"'kurrent join'; renew will sync it (current: {current.base_url})",
+        )
 
     with store.locked():
         agents.update(
@@ -84,6 +94,7 @@ def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
             storager_ip=storager_ip,
             enabled=req.enabled,
             tags=tuple(t.strip() for t in req.tags if t.strip()),
+            remark=req.remark.strip(),
         )
     record("agent.update", "ok", agent=agent_id, client=client_host(request))
     return agents.get(agent_id).public_dict()
@@ -92,25 +103,50 @@ def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
 @router.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str, request: Request):
     """删除 Agent 台账：移除 agents.yml 条目 + 清理其母盘标签（控制面台账）。
-    仅台账删除：不触碰节点上的证书/盘文件；重新加入需重新签发 bootstrap token。"""
+    仅台账删除：不触碰节点上的证书/盘文件。
+    语义（A2 裁定推论）：删除是**软删除**——节点仍带声明在跑，下次 renew 会按声明
+    自动重新登记；真正下线一台节点须在节点侧操作（停容器/撤声明）。
+    响应附 disks_hosted / affected_workers（仅告知，不拦截）：登记删除后，这些 Worker
+    挂在该节点上的盘在节点重新登记前无法投影引导地址（登记即认知）。"""
     agent_id = agent_id.strip().lower()
     _agent_or_404(agent_id)
     with store.locked():
         agents.delete(agent_id)
+        affected_workers, disks_hosted = _workers_hosted_by(agent_id)
     with master_tags.locked():
         data = master_tags.load()
         removed = bool(data.get("masters", {}).pop(agent_id, None))
         if removed:
             master_tags.save(data)
-    record("agent.delete", "ok", agent=agent_id, client=client_host(request))
-    return {"deleted": agent_id, "master_tags_removed": removed}
+    record("agent.delete", "ok", agent=agent_id, client=client_host(request),
+           disks_hosted=disks_hosted, affected_workers=affected_workers)
+    return {"deleted": agent_id, "master_tags_removed": removed,
+            "disks_hosted": disks_hosted, "affected_workers": affected_workers}
+
+
+def _workers_hosted_by(agent_id: str) -> tuple[list[str], int]:
+    """扫描 workers.yml：仍把系统盘/光驱挂在该 Agent 上的 Worker 列表与盘数
+    （删除响应告知用，派生自台账，不另存状态）。"""
+    data = store.load_workers()
+    affected: list[str] = []
+    count = 0
+    for worker_id, record_ in data["workers"].items():
+        hosted = [d for d in worker_disks(record_) if d.get("agent") == agent_id]
+        cd = record_.get("cd")
+        if cd and cd.get("agent") == agent_id:
+            hosted.append(cd)
+        if hosted:
+            affected.append(worker_id)
+            count += len(hosted)
+    return affected, count
 
 
 @router.post("/agents/probe")
 def probe_agent(req: ProbeAgentRequest, request: Request):
     """探测 Agent：调 /healthz + /capabilities，自动推导注册参数预览（不写任何文件）。
     推导规则：role.disk 恒真（Agent 即存储节点）、role.cd 取 capabilities.cd；
-    tags = [storage, backend]（lio/stgt，供 /boot-vars 连接符推导）；
+    tags = [storage]（纯人工标签——后端类型不进 tags，单独以 backend 字段返回，
+    由 /boot-vars 实时查 /capabilities 判定）；
     storager_ip 缺省回退 base_url 主机名。"""
     base_url = req.base_url.strip().rstrip("/")
     if not base_url.startswith(("http://", "https://")):
@@ -140,7 +176,7 @@ def probe_agent(req: ProbeAgentRequest, request: Request):
     return {
         "base_url": base_url,
         "role": {"disk": True, "cd": bool(caps.get("cd", False))},
-        "tags": ["storage", backend],
+        "tags": ["storage"],
         "storager_ip": urlparse(base_url).hostname or base_url,
         "enabled": True,
         "backend": backend,
@@ -173,6 +209,9 @@ def create_agent_disk_lun(agent_id: str, req: CreateDiskLunRequest, request: Req
     agent = _agent_or_404(agent_id)
     if not agent.role_disk:
         raise HTTPException(400, f"agent {agent_id} not configured for disk role")
+    if not agent.enabled:
+        # enabled = 排空语义（只拦新增，不碰存量：已有 LUN 照常服务）
+        raise HTTPException(409, f"agent {agent_id} disabled: not accepting new LUNs")
     client = agents.client(agent)
     try:
         result = client.create_disk(req.iqn, req.filename or "", master=req.master, size=req.size)
@@ -190,6 +229,9 @@ def create_agent_cd_lun(agent_id: str, req: CreateCdLunRequest, request: Request
     agent = _agent_or_404(agent_id)
     if not agent.role_cd:
         raise HTTPException(400, f"agent {agent_id} not configured for cd role")
+    if not agent.enabled:
+        # enabled = 排空语义（只拦新增，不碰存量）
+        raise HTTPException(409, f"agent {agent_id} disabled: not accepting new LUNs")
     client = agents.client(agent)
     try:
         result = client.create_cd(req.iso, req.iqn or "")

@@ -31,10 +31,10 @@ services:
     container_name: kurrent-control-plane
     restart: unless-stopped
     ports:
-      - "4839:8080"
+      # 唯一对外入口为 nginx 443（443:443）；本机回环保留：kurrent init 健康检查与调试。
+      # 认证器链信任前提：4839 不得对局域网暴露（X-Client-Cert-DN 只信 nginx 注入）
+      - "127.0.0.1:4839:8080"
     environment:
-      # 管理口令（Bearer 鉴权凭据，不进声明配置）：未设置则鉴权关闭
-      - KURRENT_CP_TOKEN=${KURRENT_CP_TOKEN:-}
       # 容器时区（日志时间戳）
       - TZ=Asia/Shanghai
     extra_hosts:
@@ -57,8 +57,9 @@ services:
       dockerfile: Dockerfile
     container_name: kurrent-webui
     ports:
-      - "4838:80"
       # 宿主 HTTPS 入口端口可配（默认 443）：改这里时需同步 tftp/boot.ipxe.cfg 的 set https-port
+      # HTTP（80）仅作 301 升级到 443（不承载任何内容/凭据）；WebUI 不再单独映射端口
+      - "80:80"
       - "${KURRENT_HTTPS_PORT:-443}:443"
     volumes:
       - /etc/localtime:/etc/localtime:ro

@@ -1,15 +1,15 @@
-"""控制面声明式配置加载（K8S 同构：kubeadm InitConfiguration）。
+"""控制面声明式配置加载。
 
 配置来源：control_plane/kurrent.yaml（apiVersion/kind/metadata/spec 单文件权威配置，
 从 kurrent.yaml.example 复制后手工编辑）；容器内挂载路径固定 /etc/kurrent/kurrent.yaml
 （KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
 
-分层职责（K8S 同构）：kurrent.yaml 只声明控制面业务策略（PXE 部署网络/组件 PKI 策略/
+分层职责：kurrent.yaml 只声明控制面业务策略（PXE 部署网络/组件 PKI 策略/
 服务器证书/引导行为/数据面参数），容器内文件路径与容器名属部署清单 docker-compose.yml
 职责，此处以模块常量固化（与 compose 挂载目标一致，单处维护）；运行时状态（注册窗口/
-强制设备认证等）在 state/settings.json，不属声明配置（etcd 类比）。
+强制设备认证等）在 state/settings.json，不属声明配置。
 
-校验语义（K8S 同构）：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入——
+校验语义：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入——
 配置错误在启动即失败，杜绝 env 自由键值的静默偏差。
 """
 
@@ -37,19 +37,30 @@ DEFAULT_CREDENTIALS_FILE = "/app/state/credentials.yml"
 DEFAULT_PKI_DIR = "/app/state/pki"                      # 内部 CA + 组件证书（nginx 只读挂载 ca.crt）
 DEFAULT_CONTROL_PLANE_COMPONENT = "control-plane"       # 控制面自身 client cert 别名（CN=control-plane）
 DEFAULT_MASTERS_FILE = "/app/state/masters.yml"
+DEFAULT_CREDENTIAL_PUSH_FILE = "/app/state/credential-push.yml"  # 凭据推送状态台账（对账/投影用）
+DEFAULT_ADMIN_CONF = "/app/state/admin.conf"               # 管理凭据文件（kurrent 原生扁平 YAML，CLI 自动发现；证书路径为相对引用）
+DEFAULT_SESSION_KEY_FILE = "/app/state/session.key"        # 会话签名密钥（运行时秘密，0600）
 
 # ── 协议契约/安全边界（代码层常量，不收敛 yml）──
 # 注册窗口 TTL 硬上限（分钟）：不可配置为永久，注册只在窗口期
 REGISTRATION_WINDOW_TTL_MAX_MINUTES = 60
 REGISTRATION_WINDOW_TTL_MIN_MINUTES = 1
+# 注册窗口放行额度上限（台）：省略 = 不限（仍受 TTL 约束），上限防误填大数等于关掉额度
+REGISTRATION_WINDOW_MAX_DEVICES_UPPER = 1000
 # 挑战 nonce 短 TTL（秒）：防重放，引导期无可靠时钟不能依赖时间戳
 CHALLENGE_NONCE_TTL_SECONDS = 60
-# nginx mTLS 校验通过后透传的客户端证书 DN 头（renew 用）
+# nginx mTLS 校验通过后透传的客户端证书 DN 头（组件 renew + 管理面身份）
 CLIENT_CERT_DN_HEADER = "x-client-cert-dn"
+# ── 管理面身份常量：证书 CN=用户名、O=组 ──
+ADMIN_CN = "admin"
+ADMIN_GROUP = "admin"
+VIEWER_GROUP = "viewer"
+ADMIN_CERT_DAYS = 365                     # 管理证书 TTL（天）
+SESSION_TTL_DAYS = 7                      # 会话 Cookie TTL（天，滑动续期）
 
 
 class NetworkingSpec(BaseModel):
-    """spec.networking：PXE 部署网络声明（kubeadm ClusterConfiguration.networking 同构）。
+    """spec.networking：PXE 部署网络声明。
 
     掩码由 subnet（CIDR）推导，dnsmasq.conf 由控制面启动时按本块生成——yml 是权威。
     """
@@ -119,7 +130,7 @@ class MetadataSpec(BaseModel):
 
 
 class ControlPlaneConfiguration(BaseModel):
-    """控制面配置根（apiVersion/kind/metadata/spec，kubeadm InitConfiguration 同构）。"""
+    """控制面配置根（apiVersion/kind/metadata/spec）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: str = Field("kurrent.io/v1", alias="apiVersion")
@@ -157,12 +168,16 @@ _PATH_FIELDS = {
     "dnsmasq_hosts_file": "DEFAULT_DNSMASQ_HOSTS_FILE",
     "cert_dir": "DEFAULT_CERT_DIR",
     "credentials_file": "DEFAULT_CREDENTIALS_FILE",
+    "credential_push_file": "DEFAULT_CREDENTIAL_PUSH_FILE",
     "pki_dir": "DEFAULT_PKI_DIR",
     "masters_file": "DEFAULT_MASTERS_FILE",
+    "admin_conf": "DEFAULT_ADMIN_CONF",
+    "session_key_file": "DEFAULT_SESSION_KEY_FILE",
 }
 _STR_FIELDS = {
     "dnsmasq_container": "DEFAULT_DNSMASQ_CONTAINER",
     "control_plane_component": "DEFAULT_CONTROL_PLANE_COMPONENT",
+    "admin_cn": "ADMIN_CN",
 }
 _SPEC_FIELDS = {
     "dnsmasq_reload": ("dnsmasq", "reload"),
@@ -191,9 +206,12 @@ class Settings:
             for part in _SPEC_FIELDS[name]:
                 node = getattr(node, part)
             return node
-        if name == "control_token":
-            # 管理口令（WebUI/API Bearer 鉴权）：凭据不进声明配置，compose environment 注入（KURRENT_CP_TOKEN）
-            return os.getenv("KURRENT_CP_TOKEN", "")
+        if name == "insecure":
+            # 开发模式开关（唯一放行口；生产严禁）：KURRENT_CP_INSECURE=1 显式开启
+            return os.getenv("KURRENT_CP_INSECURE", "") == "1"
+        if name == "credential_reconcile_interval":
+            # 凭据对账周期（秒）：控制面→Agent 推送的幂等重放间隔；0 = 禁用（测试环境）
+            return float(os.getenv("KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL", "60"))
         raise AttributeError(name)
 
 

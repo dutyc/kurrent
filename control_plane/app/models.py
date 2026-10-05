@@ -79,35 +79,44 @@ class AgentRoleRequest(BaseModel):
 
 class ProbeAgentRequest(BaseModel):
     """探测 Agent 并自动推导注册参数（预览，不写任何文件）。
-    身份由 mTLS 组件证书承载（K8S 同构），无需 token。"""
+    身份由 mTLS 组件证书承载，无需 token。"""
     base_url: str
     agent_id: str | None = None
 
 
 class CreateAgentRequest(BaseModel):
-    """注册新 Agent 到 agents.yml。
-    tags 自由标签（如 storage/lio/stgt），仅作展示。"""
+    """注册新 Agent 到 agents.yml（id 为机器身份，自动登记场景由 enroll 带入）。
+    tags 自由标签（如 storage/lio/stgt），仅作展示；remark 为备注（人类识别用，可空）。"""
     id: str
     base_url: str
     storager_ip: str | None = None
     role: AgentRoleRequest = Field(default_factory=AgentRoleRequest)
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
+    remark: str = ""
 
 
 class UpdateAgentRequest(BaseModel):
-    """更新已有 Agent 的配置（id 不可改，走路径参数）。"""
+    """更新已有 Agent 的配置（id 不可改，走路径参数）；remark 为备注（人类识别用，可空）。"""
     base_url: str
     storager_ip: str | None = None
     role: AgentRoleRequest = Field(default_factory=AgentRoleRequest)
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
+    remark: str = ""
 
 
 class BatchDiskTarget(BaseModel):
-    """批量创建时单个 Worker 的存储节点分配（agent 必填：前端接管/拖拽产生）。"""
+    """批量创建时单个 Worker 的存储节点分配（显式点名，绕过放置策略）。"""
     worker_id: str
     agent: str
+
+
+class DiskPlacementRequest(BaseModel):
+    """放置约束（仅对 workers 自动放置生效）：candidates 限定候选节点范围（空 = 全部启用磁盘角色
+    节点）；pins 为逐 Worker 钉死（显式覆盖，不必在 candidates 内）。"""
+    candidates: list[str] = Field(default_factory=list)
+    pins: dict[str, str] = Field(default_factory=dict)
 
 
 class BatchDeleteWorkersRequest(BaseModel):
@@ -119,15 +128,24 @@ class BatchDeleteWorkersRequest(BaseModel):
 
 
 class BatchCreateWorkerDiskRequest(BaseModel):
-    """批量创建系统盘：同一套盘参数应用到 targets 指定的多个 Worker，
-    每个 Worker 使用各自分配的存储节点（agent）。同一 (os, os_version) 至多一块，重复自动跳过；
-    remark 为盘备注（自由文本，可空）。"""
+    """批量创建系统盘：同一套盘参数应用到多个 Worker。同一 (os, os_version) 至多一块，
+    重复自动跳过（不算失败）；remark 为盘备注（自由文本，可空）。
+
+    两种定位方式二选一：
+    - targets：逐项强制指定存储节点（显式覆盖）；
+    - workers + placement：只声明要给哪些 Worker 建盘，存储节点由控制面放置
+      （候选筛选含母盘本地存在性，按现有盘数最少均摊）。
+    dry_run=true 只返回计划（plan/warnings）不建盘，与执行共用同一份放置实现。
+    """
     type: Literal["master", "empty"]
     os: str
     os_version: str = ""
     name: str | None = None
     size: str | None = None
-    targets: list[BatchDiskTarget]
+    targets: list[BatchDiskTarget] = Field(default_factory=list)
+    workers: list[str] = Field(default_factory=list)
+    placement: DiskPlacementRequest | None = None
+    dry_run: bool = False
     remark: str = ""
 
 
@@ -149,8 +167,11 @@ class MasterTagRequest(BaseModel):
 
 class OpenRegistrationWindowRequest(BaseModel):
     """开启注册窗口（2026-08-21 裁定：注册只在窗口期，取代 auto_register 永久开关）。
-    ttl_minutes 为窗口时长，硬上限 60 分钟（代码层强制自动关闭，不可配置为永久）。"""
+    ttl_minutes 为窗口时长，硬上限 60 分钟（代码层强制自动关闭，不可配置为永久）；
+    max_devices 为放行额度（台），省略/null = 不限（仍受 TTL 约束）——
+    只约束未知设备自动入池，不约束密钥认领与管理员手动登记。"""
     ttl_minutes: int
+    max_devices: int | None = None
 
 
 class SetEnforcementRequest(BaseModel):

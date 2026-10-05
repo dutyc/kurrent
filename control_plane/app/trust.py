@@ -55,23 +55,97 @@ def window_open() -> bool:
     return _dt.datetime.now().astimezone() < closes
 
 
-def window_status() -> dict[str, Any]:
-    """窗口状态投影（管理端点用）。"""
+def window_limit(rec: dict[str, Any] | None = None) -> int | None:
+    """窗口放行额度（max_devices，台）：未记录/未配置/非法 → None（不限，仍受 TTL 约束）。
+    额度语义见 boot 入池判定：只约束「未知设备自动入池」，不约束密钥认领与管理员手动登记。"""
+    rec = rec if rec is not None else window_record()
+    if not rec:
+        return None
+    limit = rec.get("max_devices")
+    # bool 是 int 子类，显式排除；<=0 视为未配置（不引入「零额度」这种半开状态）
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return None
+    return limit
+
+
+def _count_admitted(devices_map: dict[str, Any], opened_at: str) -> int:
+    """统计窗口期内已放行的设备数（派生自设备台账，不另存计数器）。
+    口径：source == "ipxe" 且 first_seen >= 窗口开启时刻——即本窗口期内经 PXE 上报自动入池的条目；
+    管理员手动登记 / 清单导入（source=manual）是显式动作，不占额度；
+    窗口开启前的存量设备（认领 key_hash 者亦然）不计入。"""
+    try:
+        opened = _dt.datetime.fromisoformat(opened_at)
+    except (ValueError, TypeError):
+        return 0
+    count = 0
+    for device in devices_map.values():
+        if not isinstance(device, dict) or device.get("source") != "ipxe":
+            continue
+        try:
+            seen = _dt.datetime.fromisoformat(str(device.get("first_seen") or ""))
+        except (ValueError, TypeError):
+            continue
+        if seen >= opened:
+            count += 1
+    return count
+
+
+def window_quota_left(devices_map: dict[str, Any] | None = None) -> int | None:
+    """放行额度余量：None = 不限；0 = 已用尽。
+    传入 devices_map 时以调用方持锁加载的台账为准（boot 上报路径锁内复核，避免并发超额放行）。"""
     rec = window_record()
     if not rec:
-        return {"open": False, "opened_at": None, "ttl_minutes": None, "closes_at": None, "remaining_seconds": 0}
+        return 0
+    limit = window_limit(rec)
+    if limit is None:
+        return None
+    devices_map = devices_map if devices_map is not None else devices.load()["devices"]
+    return max(0, limit - _count_admitted(devices_map, rec["opened_at"]))
+
+
+def admission_allowed(devices_map: dict[str, Any] | None = None) -> bool:
+    """入池放行判定：窗口开启 且 额度未用尽（额度缺省 = 不限）。
+    仅约束未知设备自动入池；密钥认领（存量补 key_hash）只看 window_open()。"""
+    if not window_open():
+        return False
+    left = window_quota_left(devices_map)
+    return left is None or left > 0
+
+
+def window_status() -> dict[str, Any]:
+    """窗口状态投影（管理端点用）：时间维度（open/remaining）+ 额度维度（max_devices/admitted/…）。"""
+    empty = {
+        "open": False,
+        "opened_at": None,
+        "ttl_minutes": None,
+        "closes_at": None,
+        "remaining_seconds": 0,
+        "max_devices": None,
+        "admitted": 0,
+        "remaining_devices": None,
+        "quota_exhausted": False,
+    }
+    rec = window_record()
+    if not rec:
+        return empty
     try:
         opened = _dt.datetime.fromisoformat(rec["opened_at"])
         closes = opened + _dt.timedelta(minutes=int(rec["ttl_minutes"]))
     except (ValueError, TypeError):
-        return {"open": False, "opened_at": None, "ttl_minutes": None, "closes_at": None, "remaining_seconds": 0}
+        return empty
     remaining = max(0, int((closes - _dt.datetime.now().astimezone()).total_seconds()))
+    limit = window_limit(rec)
+    admitted = _count_admitted(devices.load()["devices"], rec["opened_at"])
     return {
         "open": remaining > 0,
         "opened_at": rec["opened_at"],
         "ttl_minutes": int(rec["ttl_minutes"]),
         "closes_at": closes.isoformat(),
         "remaining_seconds": remaining,
+        "max_devices": limit,
+        "admitted": admitted,
+        "remaining_devices": None if limit is None else max(0, limit - admitted),
+        "quota_exhausted": limit is not None and admitted >= limit,
     }
 
 

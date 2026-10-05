@@ -1,4 +1,4 @@
-"""控制面声明式配置（kurrent.yaml）校验与 dnsmasq.conf 派生生成测试（pydantic v2，K8S 同构）。
+"""控制面声明式配置（kurrent.yaml）校验与 dnsmasq.conf 派生生成测试（pydantic v2）。
 
 覆盖：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入、networking 五键声明、
 dnsmasq.conf 渲染（subnet CIDR → netmask 推导）与幂等写。

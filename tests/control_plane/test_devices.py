@@ -51,7 +51,9 @@ class TestDeviceCrud:
     def test_get_device_404(self, client, auth_headers):
         assert client.get(f"/devices/{MAC_A}", headers=auth_headers).status_code == 404
 
-    def test_requires_token(self, client):
+    def test_requires_token(self, client, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.get("/devices").status_code == 401
         assert client.post("/devices", json={"mac": MAC_A}).status_code == 401
 

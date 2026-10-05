@@ -14,7 +14,9 @@ class TestOperations:
         assert body["entries"] == []
         assert body["next_cursor"] == 0
 
-    def test_requires_token(self, client):
+    def test_requires_token(self, client, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.get("/operations").status_code == 401
 
     def test_records_operations(self, client, auth_headers):

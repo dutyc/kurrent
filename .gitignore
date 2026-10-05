@@ -29,6 +29,12 @@ webui/app/dist/
 
 # CLI 构建产物（go build 生成，不入库）
 cli/kurrent
+cli/cli
+
+# iPXE 引导二进制（部署时从固件仓构建产物放入 tftp 根目录，不入库）
+tftp/*.efi
+tftp/*.kpxe
+tftp/*.bak
 
 # 固件仓库对接测试指南（归属 kurrent-firmware 仓库侧，待搬迁后删除）
 firmware-connectivity-test-guide.zh.md
@@ -60,7 +66,7 @@ webui/app/.env
 storager/.env
 # 节点声明式配置（kurrent join 生成，含 bootstrap token，不入库；模板见 kurrent.yaml.example）
 storager/kurrent.yaml
-# 一次性引导凭据文件（bootstrap-kubeconfig 同构，kurrent join 写入，不入库）
+# 一次性引导凭据文件（kurrent join 写入，不入库）
 storager/bootstrap/
 control_plane/config/agents.yml
 # 控制面声明式配置（运行时文件不入库；模板见 kurrent.yaml.example）
@@ -76,12 +82,17 @@ control_plane/state/workers.yml
 control_plane/state/devices.yml
 # NVMe-oF 认证凭据库（DHHC-1 密钥，按 Worker 跟盘，运行时生成）
 control_plane/state/credentials.yml
+# 凭据推送状态台账（运行时生成，只存所推密钥的审计哈希，不入库）
+control_plane/state/credential-push.yml
 # TOFU 自签证书（控制面启动时自动生成，含私钥，不入库）
 control_plane/state/certs/
 # 组件 PKI 与 bootstrap token（运行时签发，含私钥与 token 摘要，不入库）
 control_plane/state/pki/
 # 母盘标签台账（运行时生成，不入库）
 control_plane/state/masters.yml
+# 管理凭据（admin.conf 扁平 YAML / 会话密钥，控制面启动自举，含私钥，不入库）
+control_plane/state/admin.conf
+control_plane/state/session.key
 # 根级误落盘防再犯：未设 env 重定向的本地运行以仓库根为 cwd 时，control_plane 默认相对路径会在此落盘（测试产物）
 /state/
 /config/

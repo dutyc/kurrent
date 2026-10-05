@@ -1,13 +1,15 @@
-"""enroll 自动登记 / bootstrap-token 签发 / agent 删除（一键加入链路，2026-08-31）。
+"""enroll 自动登记 / bootstrap-token 签发 / agent 删除（一键加入链路）。
 
-K8S 同构：kubelet 首次上报自动注册 Node（enroll 自动登记）+ kubeadm token create
-（集群级通用 bootstrap token，不绑节点、TTL 内可复用）+ kubectl delete node。
+首次引导自动登记（enroll）+ 集群级通用 bootstrap token（不绑节点、TTL 内可复用）
++ 节点删除（仅清登记，节点续期自动重新登记）。
 nvmet-host 组件凭据：agent enroll 上报 backend=nvmet 时控制面派生随响应下发。
 """
 
+import json
 import re
 
 import pytest
+import yaml
 
 from control_plane.app import pki as pki_mod
 from control_plane.app.config import settings
@@ -34,7 +36,7 @@ def _mock_issue(monkeypatch):
     monkeypatch.setattr(pki_mod, "ca_cert_pem", lambda d: b"FAKE-CA")
 
 
-def _enroll(client, token, agent_id, component, base_url="", capabilities=None):
+def _enroll(client, token, agent_id, component, base_url="", capabilities=None, remark=None):
     body = {
         "agent_id": agent_id, "component": component,
         "csr_client": "FAKE", "csr_serving": "FAKE",
@@ -42,6 +44,8 @@ def _enroll(client, token, agent_id, component, base_url="", capabilities=None):
     }
     if capabilities is not None:
         body["capabilities"] = capabilities
+    if remark is not None:
+        body["remark"] = remark
     return client.post("/enroll", json=body, headers={"Authorization": f"Bearer {token}"})
 
 
@@ -57,6 +61,15 @@ class TestEnrollAutoRegister:
         assert a.base_url == "https://192.168.1.50:4840"
         assert a.role_disk and not a.role_cd and a.enabled
 
+    def test_auto_registered_with_remark(self, client, tmp_pki, monkeypatch):
+        """上报 remark（声明 metadata.remark）→ 随自动登记写入台账（备注，人类识别用）。"""
+        _mock_issue(monkeypatch)
+        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        resp = _enroll(client, token, "auto-10", "agent", "https://192.168.1.50:4840",
+                       remark="storage-nvmet-01")
+        assert resp.status_code == 201
+        assert agents.get("auto-10").remark == "storage-nvmet-01"
+
     def test_auto_registered_without_base_url(self, client, tmp_pki, monkeypatch):
         """无 base_url 也自动登记（空地址，控制面不探测，WebUI/CLI 可补）。"""
         _mock_issue(monkeypatch)
@@ -65,8 +78,57 @@ class TestEnrollAutoRegister:
         assert resp.status_code == 201
         assert agents.get("auto-02").base_url == ""
 
+    def test_reenroll_refreshes_declaration_fields(self, client, tmp_pki, monkeypatch):
+        """A2 裁定（声明权威）：已在册 agent 再次 enroll/renew 时按节点声明刷新
+        base_url / remark / role.cd；控制面属性（enabled/storager_ip/tags）原样保留。"""
+        _mock_issue(monkeypatch)
+        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        assert _enroll(client, token, "auto-r1", "agent", "https://10.0.0.5:4840",
+                       capabilities={"backend": "nvmet", "cd": False},
+                       remark="old-remark").status_code == 201
+        # 运维在控制面侧设置属性（base_url 传现值——自动登记节点禁改地址）
+        res = client.put("/agents/auto-r1", json={
+            "base_url": "https://10.0.0.5:4840", "storager_ip": "10.0.0.5",
+            "role": {"disk": True, "cd": False}, "tags": ["custom"],
+            "enabled": False, "remark": "old-remark",
+        }, headers={"Authorization": "Bearer test-control-token"})
+        assert res.status_code == 200, res.text
+        # 节点搬家 + 改备注 + 光驱能力变化 → renew 按声明对齐
+        assert _enroll(client, token, "auto-r1", "agent", "https://10.0.0.9:4840",
+                       capabilities={"backend": "nvmet", "cd": True},
+                       remark="new-remark").status_code == 201
+        a = agents.get("auto-r1")
+        assert a.base_url == "https://10.0.0.9:4840"  # 声明权威：地址随节点
+        assert a.remark == "new-remark"
+        assert a.role_cd is True
+        assert a.enabled is False  # 控制面属性：renew 不碰
+        assert a.storager_ip == "10.0.0.5"
+        assert a.tags == ("custom",)
+
+    def test_reenroll_unreported_fields_preserved(self, client, tmp_pki, monkeypatch):
+        """旧 agent 兼容：再次 enroll 未上报 base_url/remark/capabilities → 不清空现有值。"""
+        _mock_issue(monkeypatch)
+        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        assert _enroll(client, token, "auto-r2", "agent", "https://10.0.0.5:4840",
+                       remark="kept").status_code == 201
+        assert _enroll(client, token, "auto-r2", "agent").status_code == 201
+        a = agents.get("auto-r2")
+        assert a.base_url == "https://10.0.0.5:4840"
+        assert a.remark == "kept"
+        assert not a.role_cd
+
+    def test_nvmet_host_enroll_does_not_refresh(self, client, tmp_pki, monkeypatch):
+        """仅 agent 组件承载声明字段：nvmet-host enroll 不触发台账刷新。"""
+        _mock_issue(monkeypatch)
+        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        assert _enroll(client, token, "auto-r3", "agent", "https://10.0.0.5:4840").status_code == 201
+        nvmet_token = pki_mod.issue_bootstrap_token(tmp_pki, "auto-r3", "nvmet-host")
+        assert _enroll(client, nvmet_token, "auto-r3", "nvmet-host",
+                       "https://10.9.9.9:4840").status_code == 201
+        assert agents.get("auto-r3").base_url == "https://10.0.0.5:4840"
+
     def test_generic_token_reusable_across_nodes(self, client, tmp_pki, monkeypatch):
-        """通用 token TTL 内可被多次 enroll 复用（kubeadm bootstrap token 不限制次数）。
+        """通用 token TTL 内可被多次 enroll 复用（不限制使用次数）。
 
         同一 token 引导第二个节点（不同 agent_id）→ 同样 201，token 不消耗。
         """
@@ -88,7 +150,7 @@ class TestEnrollAutoRegister:
                        capabilities={"backend": "nvmet", "cd": False})
         assert resp.status_code == 201
         a = agents.get("auto-07")
-        assert a.tags == ("auto", "storage", "nvmet")
+        assert a.tags == ("auto", "storage")  # 后端类型不进 tags（运行事实由 /capabilities 实时判定）
         assert a.role_disk and not a.role_cd
         nvmet_token = resp.json().get("nvmet_token")
         assert nvmet_token and re.fullmatch(r"[0-9a-f]{6}\.[0-9a-f]{16}", nvmet_token)
@@ -107,7 +169,7 @@ class TestEnrollAutoRegister:
         assert resp.status_code == 201
         assert "nvmet_token" not in resp.json()
         a = agents.get("auto-08")
-        assert a.tags == ("auto", "storage", "stgt")
+        assert a.tags == ("auto", "storage")
         assert a.role_disk and a.role_cd
 
     def test_auto_registered_without_capabilities_backward_compat(self, client, tmp_pki, monkeypatch):
@@ -120,6 +182,7 @@ class TestEnrollAutoRegister:
         a = agents.get("auto-09")
         assert a.tags == ("auto",)
         assert a.role_disk and not a.role_cd
+        assert a.remark == ""  # 旧 agent 不上报 remark → 空备注
 
     def test_invalid_base_url_rejected(self, client, tmp_pki, monkeypatch):
         """上报地址格式非法 → 400（不自动登记）。"""
@@ -155,7 +218,7 @@ class TestEnrollAutoRegister:
 
 
 class TestTokenEndpoint:
-    """POST /pki/tokens：集群级通用 bootstrap token 签发（kubeadm token create 同构）。"""
+    """POST /pki/tokens：集群级通用 bootstrap token 签发。"""
 
     def test_issue(self, client, tmp_pki, auth_headers):
         """签发成功：token 格式 <6位>.<16位>，明文仅本次可见；响应无节点绑定字段。"""
@@ -168,12 +231,14 @@ class TestTokenEndpoint:
         assert "agent_id" not in body and "component" not in body
 
     def test_each_issue_is_new(self, client, tmp_pki, auth_headers):
-        """每次签发都是新 token（kubeadm token create 每次新签；多 token 并存，TTL 复用）。"""
+        """每次签发都是新 token（每次新签；多 token 并存，TTL 复用）。"""
         first = client.post("/pki/tokens", headers=auth_headers).json()["token"]
         second = client.post("/pki/tokens", headers=auth_headers).json()["token"]
         assert first != second
 
-    def test_requires_bearer(self, client, tmp_pki):
+    def test_requires_bearer(self, client, tmp_pki, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         resp = client.post("/pki/tokens")
         assert resp.status_code == 401
 
@@ -182,6 +247,55 @@ class TestTokenEndpoint:
         _mock_issue(monkeypatch)
         resp = _enroll(client, "deadbe.0123456789abcdef", "auto-x", "agent")
         assert resp.status_code == 401
+
+
+class TestTokenManagement:
+    """token 台账管理：GET /pki/tokens（列表）+ DELETE /pki/tokens/{token_id}（吊销）。"""
+
+    def test_list_fields_no_secret(self, client, tmp_pki, auth_headers):
+        """列表条目字段完备且不含 secret hash；admin token 归属字段为 admin。"""
+        resp = client.post("/pki/tokens", json={"usage": "admin"}, headers=auth_headers)
+        assert resp.status_code == 201
+        token_id = resp.json()["token"].split(".", 1)[0]
+        items = client.get("/pki/tokens", headers=auth_headers).json()
+        entry = next(i for i in items if i["token_id"] == token_id)
+        assert set(entry) == {"token_id", "usage", "groups", "component", "agent_id",
+                              "name", "created_at", "expires_at"}
+        assert entry["usage"] == ["admin"] and entry["groups"] == ["admin"]
+        assert entry["name"] == "admin" and entry["component"] == "" and entry["agent_id"] == ""
+        assert entry["created_at"] and entry["expires_at"]  # created_at 签发时注入
+
+    def test_list_excludes_expired_and_legacy_created_at(self, client, tmp_pki, auth_headers):
+        """过期条目不出现；旧条目（无 created_at 字段）返回空串（不伪造时间）。"""
+        pki_mod._token_file(tmp_pki).write_text(yaml.safe_dump({
+            "exp111": {"component": "", "agent_id": "", "token_secret_hash": "x" * 64,
+                       "created_at": "2020-01-01T00:00:00+00:00",
+                       "expires_at": "2020-01-02T00:00:00+00:00",
+                       "usage": ["enroll"], "groups": []},
+            "old111": {"component": "", "agent_id": "", "token_secret_hash": "y" * 64,
+                       "expires_at": "2999-01-01T00:00:00+00:00",
+                       "usage": ["enroll"], "groups": []},
+        }), encoding="utf-8")
+        items = client.get("/pki/tokens", headers=auth_headers).json()
+        assert [i["token_id"] for i in items] == ["old111"]
+        assert items[0]["created_at"] == ""
+
+    def test_revoke_removes_and_audits(self, client, tmp_pki, auth_headers):
+        """吊销 = 删条目：立即从列表消失；审计留痕（op + token_id）。"""
+        token = client.post("/pki/tokens", json={"usage": "admin"},
+                            headers=auth_headers).json()["token"]
+        token_id = token.split(".", 1)[0]
+        res = client.delete(f"/pki/tokens/{token_id}", headers=auth_headers)
+        assert res.status_code == 200 and res.json() == {"revoked": token_id}
+        assert all(i["token_id"] != token_id
+                   for i in client.get("/pki/tokens", headers=auth_headers).json())
+        ops = [json.loads(l) for l in settings.operations_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        revokes = [e for e in ops if e.get("op") == "pki.token.revoke"]
+        assert revokes and revokes[-1]["token_id"] == token_id
+        assert revokes[-1]["status"] == "ok"
+
+    def test_revoke_unknown_404(self, client, tmp_pki, auth_headers):
+        assert client.delete("/pki/tokens/beef99", headers=auth_headers).status_code == 404
 
 
 class TestEnrollDualComponent:

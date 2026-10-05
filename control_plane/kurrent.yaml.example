@@ -1,4 +1,4 @@
-# 控制面声明式配置（kubeadm InitConfiguration 同构）：业务策略全部收敛到此文件，
+# 控制面声明式配置：业务策略全部收敛到此文件，
 # 容器内路径/容器名属部署清单 docker-compose.yml 职责；运行时状态（注册窗口等）在
 # state/settings.json，不属声明配置。运行时文件不入库：模板与
 # `kurrent config print init-defaults` 输出同源——生成或复制本文件为 kurrent.yaml
@@ -8,7 +8,7 @@ kind: ControlPlaneConfiguration
 metadata:
   name: kurrent-cp
 spec:
-  # PXE 部署网络声明（kubeadm ClusterConfiguration.networking 同构）：
+  # PXE 部署网络声明：
   # dnsmasq.conf 由控制面启动时按本块生成（yml 是权威，conf 为派生物），勿手工编辑 dnsmasq.conf
   networking:
     interface: enp3s0                  # 绑定网卡（dnsmasq interface= + bind-interfaces）

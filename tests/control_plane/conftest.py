@@ -15,6 +15,10 @@ from control_plane.app.main import app
 
 TEST_TOKEN = "test-control-token"
 
+# 共享 fake Agent 上宣告存在的母盘：放置策略要求候选节点本地确有该母盘（克隆在节点本地完成），
+# 所以用例里用来克隆的母盘名必须在这里列出。
+FAKE_MASTERS = ["ubuntu-24.04-master", "m", "unlabeled-master"]
+
 # 常用测试 MAC（规范冒号格式）
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
@@ -33,6 +37,7 @@ def client():
         settings.settings_file,
         settings.dnsmasq_hosts_file,
         settings.credentials_file,
+        settings.credential_push_file,
         settings.masters_file,
     ):
         f.unlink(missing_ok=True)
@@ -43,7 +48,8 @@ def client():
 
 @pytest.fixture()
 def auth_headers():
-    """控制面 API Bearer 鉴权头（与 tests/conftest.py 的 KURRENT_CP_TOKEN 一致）。"""
+    """控制面 API 鉴权头：测试环境为开发模式（KURRENT_CP_INSECURE=1，见 tests/conftest.py），
+    该头不被校验；保留以贴近真实请求形态。认证器链本身的断言见 test_auth.py。"""
     return {"Authorization": f"Bearer {TEST_TOKEN}"}
 
 
@@ -86,8 +92,8 @@ def register_claimed_device(client, auth_headers, ec_keypair):
 def mock_agent_client(monkeypatch):
     """外置 Agent 客户端：patch AgentRegistry.client → 内存 fake client。
 
-    用例内先 POST /agents 注册（role.disk=true）即可走完整建盘/删盘/选择链路
-    （select_disk_agent 内部 healthz/capabilities 同样命中 fake）。
+    用例内先 POST /agents 注册（role.disk=true）即可走完整建盘/删盘/放置链路
+    （放置策略内部 healthz/capabilities/list_masters/list_luns 同样命中 fake）。
     """
     from control_plane.app.stores import agents
 
@@ -98,7 +104,7 @@ def mock_agent_client(monkeypatch):
         create_cd=lambda iso, iqn: {"iqn": iqn, "backing": iso},
         delete_lun=lambda iqn, delete_file=False: {"deleted": iqn},
         list_luns=lambda: [],
-        list_masters=lambda: {"masters": []},
+        list_masters=lambda: {"masters": [{"name": name} for name in FAKE_MASTERS]},
         scan=lambda: {"created": [], "skipped": []},
         set_credential=lambda worker_id, secret, sub_nqns, host_nqns: {"worker_id": worker_id, "secret": bool(secret)},
     )

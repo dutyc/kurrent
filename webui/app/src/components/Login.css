@@ -1,0 +1,141 @@
+/* 登录页 / 启动屏（mono 极简：黑白 + 1px 边框 + 零圆角，对齐全局调性） */
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--white);
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  border: 1px solid var(--black);
+  padding: 36px 32px 24px;
+}
+
+.login-brand {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.login-subtitle {
+  font-size: 12px;
+  color: var(--gray-500);
+  margin-top: 6px;
+  margin-bottom: 28px;
+}
+
+.login-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--gray-600);
+  margin-bottom: 8px;
+}
+
+.login-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 10px 12px;
+  border: 1px solid var(--gray-300);
+  background: var(--white);
+  color: var(--black);
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.login-input:focus {
+  border-color: var(--black);
+}
+
+.login-input::placeholder {
+  color: var(--gray-400);
+}
+
+.login-error {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--gray-900);
+  border-left: 2px solid var(--black);
+  padding-left: 8px;
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 20px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 10px 0;
+  background: var(--black);
+  color: var(--white);
+  border: 1px solid var(--black);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.login-submit:hover:not(:disabled) {
+  background: var(--white);
+  color: var(--black);
+}
+
+.login-submit:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.login-hint {
+  margin-top: 18px;
+  font-size: 11px;
+  color: var(--gray-500);
+  line-height: 1.8;
+}
+
+.login-foot {
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 2px;
+}
+
+.login-lang {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--gray-500);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.login-lang:hover {
+  color: var(--gray-900);
+}
+
+.login-lang-active {
+  color: var(--black);
+  border-color: var(--border);
+}
+
+.login-lang-sep {
+  color: var(--gray-300);
+  font-size: 11px;
+}
+
+.login-boot {
+  text-align: center;
+  font-size: 12px;
+  color: var(--gray-500);
+  padding: 44px 32px;
+}

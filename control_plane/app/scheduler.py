@@ -35,6 +35,7 @@ class AgentRegistry:
                     storager_ip=raw.get("storager_ip") or None,
                     enabled=bool(raw.get("enabled", True)),
                     tags=tuple(raw.get("tags") or ()),
+                    remark=str(raw.get("remark", "")),
                 )
             )
         return agents
@@ -55,6 +56,7 @@ class AgentRegistry:
         storager_ip: str | None = None,
         enabled: bool = True,
         tags: tuple[str, ...] = (),
+        remark: str = "",
     ) -> None:
         """注册新 Agent：写入 agents.yml（重复 id 由调用方先行校验）。"""
         self.agents_file.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +75,7 @@ class AgentRegistry:
             "storager_ip": storager_ip or "",
             "tags": list(tags),
             "enabled": enabled,
+            "remark": remark,
         }
         with self.agents_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
@@ -87,6 +90,7 @@ class AgentRegistry:
         storager_ip: str | None = None,
         enabled: bool = True,
         tags: tuple[str, ...] = (),
+        remark: str = "",
     ) -> None:
         """更新已有 Agent：覆盖 agents.yml 中对应条目（id 不可改，不存在抛 KeyError）。"""
         with self.agents_file.open("r", encoding="utf-8") as f:
@@ -101,9 +105,50 @@ class AgentRegistry:
             "storager_ip": storager_ip or "",
             "tags": list(tags),
             "enabled": enabled,
+            "remark": remark,
         }
         with self.agents_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+
+    def refresh_from_declaration(
+        self,
+        agent_id: str,
+        *,
+        base_url: str,
+        role_cd: bool | None,
+        remark: str,
+    ) -> bool:
+        """按节点声明刷新声明拥有的字段（base_url / remark / role.cd）。
+
+        A2 裁定（声明权威）：storager/kurrent.yaml 是节点事实的来源，enroll/renew 时
+        以节点上报对齐台账。控制面属性（enabled / storager_ip / tags）与 role.disk
+        不碰；base_url / remark 为空视为"未上报"（旧 agent 兼容），保留现有值；
+        role_cd=None（capabilities 未含 cd 键）同样跳过。返回是否有实际变更。"""
+        with self.agents_file.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        agents_data = data.get("agents")
+        entry = agents_data.get(agent_id) if isinstance(agents_data, dict) else None
+        if not isinstance(entry, dict):
+            raise KeyError(agent_id)
+        changed = False
+        base_url = base_url.strip().rstrip("/")
+        if base_url and entry.get("base_url") != base_url:
+            entry["base_url"] = base_url
+            changed = True
+        remark = remark.strip()
+        if remark and entry.get("remark") != remark:
+            entry["remark"] = remark
+            changed = True
+        if role_cd is not None:
+            role = dict(entry.get("role") or {})
+            if bool(role.get("cd", False)) != role_cd:
+                role["cd"] = role_cd
+                entry["role"] = role
+                changed = True
+        if changed:
+            with self.agents_file.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        return changed
 
     def delete(self, agent_id: str) -> None:
         """删除注册条目（不存在抛 KeyError）。"""
@@ -118,9 +163,6 @@ class AgentRegistry:
 
     def client(self, agent: AgentConfig) -> AgentClient:
         return AgentClient(agent, self.timeout)
-
-    def select_disk_agent(self) -> tuple[AgentConfig, dict[str, Any]]:
-        return self._select(lambda agent: agent.role_disk, require_cd=False)
 
     def select_cd_agent(self) -> tuple[AgentConfig, dict[str, Any]]:
         return self._select(lambda agent: agent.role_cd, require_cd=True)
@@ -158,9 +200,21 @@ class AgentRegistry:
             if live and agent.enabled and agent.base_url:
                 try:
                     client = self.client(agent)
-                    client.healthz()
+                    hz = client.healthz()
                     item["health"] = "ok"
-                    item["capabilities"] = client.capabilities()
+                    # 数据面就绪度：agent 进程活着但后端不可用（nvmet-host 不可达 / configfs 未就绪）
+                    # → degraded（把「节点掉线」与「在线但存储不可用」区分开）
+                    if hz.get("backend") and hz.get("backend_ready") is False:
+                        item["health"] = "degraded"
+                        item["error"] = hz.get("backend_detail", "backend not ready")
+                    try:
+                        item["capabilities"] = client.capabilities()
+                    except Exception as exc:
+                        if item["health"] != "ok":
+                            item.setdefault("error", str(exc))
+                        else:
+                            item["health"] = "error"
+                            item["error"] = str(exc)
                 except Exception as exc:
                     item["health"] = "error"
                     item["error"] = str(exc)

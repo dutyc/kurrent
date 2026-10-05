@@ -1,3 +1,4 @@
+import contextvars
 import datetime as _dt
 import json
 import os
@@ -8,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+# 当前请求身份（app/auth.py 认证器链写入）：OperationLog.record 自动附加审计 actor，
+# 各业务调用点无需逐个传递（无认证上下文的内部调用记空）
+current_actor: contextvars.ContextVar[str] = contextvars.ContextVar("kurrent_actor", default="")
 
 
 class FileStateStore:
@@ -123,6 +128,38 @@ class CredentialStore:
         _atomic_write_text(self.credentials_file, yaml.safe_dump(data, sort_keys=True, allow_unicode=False))
 
 
+class CredentialPushStore:
+    """凭据推送状态台账（credential-push.yml）：键 = "<worker_id>/<agent_id>"。
+
+    期望状态（credentials.yml）与观测状态（本文件）分离：记录每个 (worker, agent) 对
+    最后一次推送的结果（ok/failed/n-a）与所推密钥的审计哈希，供控制面对账比较
+    （跳过已送达对）与状态投影（push 视图）。secret_hash 为 "" 表示已推送吊销。
+    """
+
+    def __init__(self, push_file: Path):
+        self.push_file = push_file
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def locked(self):
+        with self._lock:
+            yield
+
+    def load(self) -> dict[str, Any]:
+        data = _load_yaml(self.push_file, {"pushes": {}})
+        pushes = data.get("pushes")
+        if pushes is None:
+            data["pushes"] = {}
+        if not isinstance(data["pushes"], dict):
+            raise ValueError(f"invalid credential push file: {self.push_file}")
+        return data
+
+    def save(self, data: dict[str, Any]) -> None:
+        if "pushes" not in data:
+            data["pushes"] = {}
+        _atomic_write_text(self.push_file, yaml.safe_dump(data, sort_keys=True, allow_unicode=False))
+
+
 class RuntimeSettings:
     """运行时设置（任意 JSON 值）：文件存在则覆盖环境变量默认值（进程内立即生效、重启保留），
     文件不存在时回退默认。布尔开关（auto_register 已废止）与结构化字段（注册窗口）共用。
@@ -172,6 +209,8 @@ class OperationLog:
                 "status": status,
             }
             entry.update(extra)
+            if "actor" not in entry and current_actor.get():
+                entry["actor"] = current_actor.get()
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             return entry

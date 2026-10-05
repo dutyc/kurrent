@@ -235,6 +235,53 @@ class TestBootVarsWithDisk:
         assert "set os ubuntu" in res.text  # 盘 os 投影（默认盘 = 唯一盘）
         assert "set menu-default reboot" in res.text  # 单盘建盘不自动设 default_disk → reboot
 
+    def test_backend_from_capabilities_not_stale_tags(self, client, auth_headers, ec_keypair, mock_agent_client):
+        """后端类型以 Agent 自报的能力为准，登记信息里的过期标签不得覆盖实况。
+
+        回归：原实现优先读 agents.yml 的 tags（命中即返回），标签与实况漂移时按过期值拼连接符。
+        此处注册时 tags 带陈旧的 nvmet，Agent /capabilities 实报 stgt → 必须按 stgt 拼（发 iscsi-sep）。
+        """
+        client.post("/agents", json={
+            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "role": {"disk": True, "cd": False}, "tags": ["storage", "nvmet"],
+        }, headers=auth_headers)
+        hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+        }, headers=auth_headers)
+        assert res.status_code == 201, res.text
+
+        nonce = _challenge(client)
+        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
+        assert res.status_code == 200
+        assert "set iscsi-sep :::1:" in res.text  # mock capabilities 实报 stgt，压过陈旧的 nvmet 标签
+
+    def test_disabled_agent_still_projects_boot_vars(self, client, auth_headers, ec_keypair, mock_agent_client):
+        """enabled=排空语义的边界回归：停用只拦新增，存量盘的引导投影照常
+        （storager_ip_for 无 enabled 守卫是裁定的一部分，不是遗漏）。"""
+        client.post("/agents", json={
+            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
+        }, headers=auth_headers)
+        hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+        }, headers=auth_headers)
+        assert res.status_code == 201, res.text
+        res = client.put("/agents/ag-01", json={
+            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+            "tags": ["storage"], "enabled": False,
+        }, headers=auth_headers)
+        assert res.status_code == 200
+
+        nonce = _challenge(client)
+        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
+        assert res.status_code == 200
+        assert "set storager-ip ag-01" in res.text  # 存量盘照常投影
+        assert "set base-nqn nqn.2026-07.com.test" in res.text
+
     def test_default_disk_projects_boot_vars(self, client, auth_headers, ec_keypair, mock_agent_client):
         client.post("/agents", json={
             "id": "ag-01", "base_url": "http://ag-01:8000",

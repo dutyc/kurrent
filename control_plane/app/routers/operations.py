@@ -2,11 +2,11 @@
 
 from fastapi import APIRouter, Depends
 
-from ..auth import verify_control_token
+from ..auth import authenticate, authorize_request
 from ..stores import operations
 from ..utils import canonical_mac
 
-router = APIRouter(dependencies=[Depends(verify_control_token)])
+router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
 
 
 @router.get("/operations")

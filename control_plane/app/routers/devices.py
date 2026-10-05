@@ -6,14 +6,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from ..auth import verify_control_token
+from ..auth import authenticate, authorize_request
 from ..models import BatchBindRequest, BindPair, CreateDeviceRequest, ImportDevicesRequest
 from ..stores import dnsmasq, devices, record, store
 from ..utils import canonical_mac, clean_str, client_host, now_iso
 
 log = logging.getLogger("control-plane")
 
-router = APIRouter(dependencies=[Depends(verify_control_token)])
+router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
 
 
 @router.get("/devices")

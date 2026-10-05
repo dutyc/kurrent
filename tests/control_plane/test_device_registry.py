@@ -12,6 +12,8 @@ import pytest
 
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
+MAC_C = "00:11:22:33:44:77"
+MAC_D = "00:11:22:33:44:88"
 
 
 def _pubkey_hash(pubkey_hex: str) -> str:
@@ -185,3 +187,123 @@ class TestRegistrationWindowExpiry:
         assert res.status_code == 201
         assert res.json()["open"] is True
         assert res.json()["ttl_minutes"] == 15
+
+
+class TestRegistrationWindowQuota:
+    """窗口放行额度（max_devices）：只约束未知设备自动入池，不约束密钥认领与手动登记。
+    已放行数派生自设备台账（窗口期内 source=ipxe 且 first_seen >= 开启时刻的条目），不另存计数器。"""
+
+    def _report(self, client, mac, ec_keypair):
+        return client.get("/devices/report", params={"mac": mac, "pubkey": ec_keypair["pubkey_hex"]})
+
+    def test_quota_stops_admission(self, client, auth_headers, ec_keypair):
+        # 额度 2：前两台入池，第三台被拒（200 空响应，不阻断引导）
+        res = client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 2}, headers=auth_headers
+        )
+        assert res.status_code == 201
+        for mac in (MAC_A, MAC_B):
+            assert self._report(client, mac, ec_keypair).status_code == 200
+        assert self._report(client, MAC_C, ec_keypair).status_code == 200
+        macs = [d["mac"] for d in client.get("/devices", headers=auth_headers).json()]
+        assert sorted(macs) == sorted([MAC_A, MAC_B])
+        # 被拒的第三台不写审计（只有成功入池的记 device.register）
+        entries = client.get("/operations", headers=auth_headers).json()["entries"]
+        assert not any(e.get("mac") == MAC_C for e in entries)
+
+    def test_status_projection_counts_admitted(self, client, auth_headers, ec_keypair):
+        client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 2}, headers=auth_headers
+        )
+        body = client.get("/settings/registration-window", headers=auth_headers).json()
+        assert body["max_devices"] == 2
+        assert body["admitted"] == 0
+        assert body["remaining_devices"] == 2
+        assert body["quota_exhausted"] is False
+
+        self._report(client, MAC_A, ec_keypair)
+        body = client.get("/settings/registration-window", headers=auth_headers).json()
+        assert body["admitted"] == 1
+        assert body["remaining_devices"] == 1
+        assert body["quota_exhausted"] is False
+
+        self._report(client, MAC_B, ec_keypair)
+        body = client.get("/settings/registration-window", headers=auth_headers).json()
+        assert body["admitted"] == 2
+        assert body["remaining_devices"] == 0
+        assert body["quota_exhausted"] is True
+        # 额度用尽不主动清窗口记录：时间维度仍为开启（等待管理员关闭或 TTL 到期）
+        assert body["open"] is True
+
+    def test_quota_omitted_means_unlimited(self, client, auth_headers, ec_keypair):
+        client.post("/settings/registration-window", json={"ttl_minutes": 30}, headers=auth_headers)
+        body = client.get("/settings/registration-window", headers=auth_headers).json()
+        assert body["max_devices"] is None
+        assert body["remaining_devices"] is None
+        assert body["quota_exhausted"] is False
+        for mac in (MAC_A, MAC_B, MAC_C):
+            self._report(client, mac, ec_keypair)
+        assert len(client.get("/devices", headers=auth_headers).json()) == 3
+        assert client.get("/settings/registration-window", headers=auth_headers).json()["admitted"] == 3
+
+    def test_manual_registration_not_counted(self, client, auth_headers, ec_keypair):
+        # 手动登记（source=manual）是管理员显式动作，不占 PXE 放行额度
+        client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1}, headers=auth_headers
+        )
+        res = client.post("/devices", json={"mac": MAC_C}, headers=auth_headers)
+        assert res.status_code == 201
+        assert res.json()["source"] == "manual"
+        assert client.get("/settings/registration-window", headers=auth_headers).json()["admitted"] == 0
+        # 额度 1 仍完整可用
+        self._report(client, MAC_A, ec_keypair)
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).status_code == 200
+        assert client.get("/settings/registration-window", headers=auth_headers).json()["quota_exhausted"] is True
+        # 用尽后额度内不再放行第二台 PXE 设备
+        self._report(client, MAC_B, ec_keypair)
+        assert client.get(f"/devices/{MAC_B}", headers=auth_headers).status_code == 404
+
+    def test_claim_not_blocked_by_exhausted_quota(self, client, auth_headers, ec_keypair):
+        # 存量设备（手动登记，无 key_hash）的密钥认领只看窗口期，不受额度约束
+        client.post("/devices", json={"mac": MAC_C}, headers=auth_headers)
+        client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1}, headers=auth_headers
+        )
+        self._report(client, MAC_A, ec_keypair)  # 额度 1 被 PXE 新设备用掉
+        res = self._report(client, MAC_C, ec_keypair)
+        assert res.status_code == 200
+        dev = client.get(f"/devices/{MAC_C}", headers=auth_headers).json()
+        assert dev["key_hash"] == ec_keypair["pubkey_hex"]  # 认领成功
+        assert dev["source"] == "manual"  # 认领不改来源，也不计入放行数
+        assert client.get("/settings/registration-window", headers=auth_headers).json()["admitted"] == 1
+
+    def test_reopen_resets_quota(self, client, auth_headers, ec_keypair):
+        # 额度用尽 → 关闭 → 重开：新窗口的额度从零起算（已放行数按开启时刻重新派生）
+        client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1}, headers=auth_headers
+        )
+        self._report(client, MAC_A, ec_keypair)
+        self._report(client, MAC_B, ec_keypair)
+        assert client.get(f"/devices/{MAC_B}", headers=auth_headers).status_code == 404
+        client.delete("/settings/registration-window", headers=auth_headers)
+        client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1}, headers=auth_headers
+        )
+        assert client.get("/settings/registration-window", headers=auth_headers).json()["admitted"] == 0
+        self._report(client, MAC_B, ec_keypair)
+        assert client.get(f"/devices/{MAC_B}", headers=auth_headers).status_code == 200
+
+    def test_max_devices_bounds(self, client, auth_headers):
+        for bad in (0, -1, 1001):
+            res = client.post(
+                "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": bad}, headers=auth_headers
+            )
+            assert res.status_code == 400
+        # 边界值合法
+        assert client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1}, headers=auth_headers
+        ).status_code == 201
+        assert client.delete("/settings/registration-window", headers=auth_headers).status_code == 200
+        assert client.post(
+            "/settings/registration-window", json={"ttl_minutes": 30, "max_devices": 1000}, headers=auth_headers
+        ).status_code == 201
