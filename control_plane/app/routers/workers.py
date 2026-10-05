@@ -1,29 +1,36 @@
 """Worker 管理端点（Bearer 鉴权）：CRUD / 批量 / 系统盘 / 默认启动 / MAC 换绑，及 Worker 台账投影。
-含 NVMe-oF 凭据端点（/workers/{worker_id}/credential，DHHC-1 密钥按 Worker 跟盘）。"""
+含 NVMe-oF 凭据端点（/workers/{worker_id}/credential，DHHC-1 密钥按 Worker 跟盘）；
+nvmet 节点上建系统盘即由控制面自动签发密钥（见 _issue_credential），手工端点用于轮换/吊销。"""
 
 import base64
 import copy
 import hashlib
 import logging
+import secrets
+import threading
+import time
 import zlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..agent_client import AgentAPIError
-from ..auth import verify_control_token
+from ..auth import authenticate, authorize_request
 from ..config import settings
+from ..placement import PlacementError, resolve as resolve_placement
 from ..models import (
     BatchCreateWorkerDiskRequest,
     BatchCreateWorkersRequest,
     BatchDeleteWorkersRequest,
+    BatchDiskTarget,
     CreateWorkerDiskRequest,
     CreateWorkerRequest,
     CredentialRequest,
+    DiskPlacementRequest,
     SetWorkerDefaultBootRequest,
     UpdateWorkerMacRequest,
 )
-from ..stores import agents, credentials, devices, dnsmasq, record, store
+from ..stores import agents, credential_pushes, credentials, devices, dnsmasq, record, store
 from ..utils import (
     add_worker_disk,
     build_disk_filename,
@@ -62,7 +69,7 @@ MENU_NAV_ITEMS = {"menu-diag", "menu-install", "config", "shell", "reboot", "exi
 # OS_ITEMS 已退役（2026-08-30 裁定）：os 为备注性质（人类理解用），唯一性由 os_tag 随机标识保证；
 # 建盘不再白名单校验，os 合法集合不再存在
 
-router = APIRouter(dependencies=[Depends(verify_control_token)])
+router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
 
 
 @router.get("/workers")
@@ -364,6 +371,9 @@ def create_worker_disk(worker_id: str, req: CreateWorkerDiskRequest, request: Re
                 disk_agent = agents.get(req.disk_agent)
                 if not disk_agent.role_disk:
                     raise HTTPException(400, f"agent {req.disk_agent} not configured for disk role")
+                if not disk_agent.enabled:
+                    # enabled = 排空语义（只拦新增，不碰存量：已有盘照常服务/引导）
+                    raise HTTPException(409, f"agent {req.disk_agent} disabled: not accepting new disks")
                 client = agents.client(disk_agent)
                 try:
                     client.healthz()
@@ -371,7 +381,13 @@ def create_worker_disk(worker_id: str, req: CreateWorkerDiskRequest, request: Re
                 except Exception as exc:
                     raise HTTPException(503, f"agent {req.disk_agent} not reachable: {exc}") from exc
             else:
-                disk_agent, disk_caps = agents.select_disk_agent()
+                # 未点名节点 → 交给放置策略（候选须启用、磁盘角色、数据面就绪，且母盘在该节点本地存在）
+                try:
+                    plan = resolve_placement(agents, [worker_id], disk_type=req.type, master=req.name)
+                except PlacementError as exc:
+                    raise HTTPException(503, {"error": exc.detail, "excluded": exc.excluded}) from exc
+                chosen = plan.candidates[plan.assignments[worker_id]]
+                disk_agent, disk_caps = chosen.agent, chosen.caps
 
             # 盘标识权威 = NQN（NVMe-oF 首选）：build_nqn 生成盘 NQN（后缀带 os_tag，
             # 同系统多版本/多盘靠随机标识区分），IQN 由其派生（不参与定义）
@@ -405,8 +421,12 @@ def create_worker_disk(worker_id: str, req: CreateWorkerDiskRequest, request: Re
             record("workers.disk.write", "ok", worker_id=worker_id, iqn=disk_record["iqn"])
 
             record("worker.disk.create", "succeeded", worker_id=worker_id, client=client_ip)
-            _push_credentials(worker_id)  # 新子系统须登记 hosts（worker 有密钥时）
+            # 建盘即签发：nvmet 子系统与其认证密钥同时就位（已有密钥保留，不轮换）
+            _issue_credential(worker_id, disk_caps.get("backend", ""))
+            _push_credentials(worker_id)  # 新子系统须登记 hosts（有密钥即注入）
             return _enrich_worker(worker_id, record_)
+        except HTTPException:
+            raise  # 校验类错误（agent 角色/排空 4xx）原样透出，不落 500
         except AgentAPIError as exc:
             record("worker.disk.create", "failed", worker_id=worker_id, client=client_ip, error=exc.detail)
             raise HTTPException(exc.status_code, {"agent": exc.agent_id, "error": exc.detail}) from exc
@@ -415,17 +435,77 @@ def create_worker_disk(worker_id: str, req: CreateWorkerDiskRequest, request: Re
             raise HTTPException(500, str(exc)) from exc
 
 
+def _resolve_batch_targets(
+    req: BatchCreateWorkerDiskRequest,
+) -> tuple[list[BatchDiskTarget], list[dict[str, str]], dict[str, tuple[Any, dict[str, Any]]]]:
+    """把请求解析成逐项 (worker_id, agent)。返回 (targets, warnings, 已校验 agent 缓存)。
+
+    targets 与 workers 是两种定位方式，二选一：targets 逐项点名（显式覆盖）；
+    workers 交给放置策略展开。dry_run 与执行都走这里，保证「预览即执行」。
+    """
+    if req.targets and req.workers:
+        raise HTTPException(400, "specify either targets or workers, not both")
+    if req.targets:
+        return list(req.targets), [], {}
+    if not req.workers:
+        raise HTTPException(400, "workers or targets must not be empty")
+
+    placement_req = req.placement or DiskPlacementRequest()
+    try:
+        plan = resolve_placement(
+            agents,
+            req.workers,
+            disk_type=req.type,
+            master=req.name,
+            candidates=placement_req.candidates or None,
+            pins=placement_req.pins,
+        )
+    except PlacementError as exc:
+        raise HTTPException(503, {"error": exc.detail, "excluded": exc.excluded}) from exc
+
+    targets = [BatchDiskTarget(worker_id=w, agent=plan.assignments[w]) for w in req.workers]
+    validated = {agent_id: (c.agent, c.caps) for agent_id, c in plan.candidates.items()}
+    return targets, plan.warnings, validated
+
+
+def _preview_batch_disks(
+    targets: list[BatchDiskTarget],
+    os_name: str,
+    os_version: str,
+    warnings: list[dict[str, str]],
+) -> dict[str, Any]:
+    """dry_run 计划：逐项给出将落到哪个节点、以及是建盘还是跳过（与执行同一套判定）。"""
+    data = store.load_workers()
+    label = f"{os_name} {os_version}".strip()
+    plan: list[dict[str, Any]] = []
+    for target in targets:
+        worker_id = canonical_id(target.worker_id)
+        record_ = data["workers"].get(worker_id)
+        if not record_:
+            plan.append({"worker_id": worker_id, "agent": target.agent,
+                         "action": "error", "reason": "worker not found"})
+        elif find_disk_by_os_version(record_, os_name, os_version):
+            plan.append({"worker_id": worker_id, "agent": target.agent,
+                         "action": "skip", "reason": f"already has a {label} system disk"})
+        else:
+            plan.append({"worker_id": worker_id, "agent": target.agent, "action": "create"})
+    return {"dry_run": True, "plan": plan, "warnings": warnings}
+
+
 @router.post("/workers/luns/disk/batch")
 def batch_create_worker_disks(req: BatchCreateWorkerDiskRequest, request: Request):
-    """批量给多个 Worker 创建系统盘：每个 target 指定 worker + 存储节点（agent，须已分配）。
+    """批量给多个 Worker 创建系统盘。定位方式二选一：targets 逐项点名存储节点，
+    或 workers + placement 由控制面放置（候选筛选含母盘本地存在性，按现有盘数最少均摊；
+    pins 逐项钉死）。dry_run=true 只返回计划不建盘。
     与单盘一致：master 走母盘克隆，empty 建空白盘；同一 (os, os_version) 至多一块，已存在则自动跳过（不算失败）。
     创建成功的 Worker 自动将 default_disk 设为本次新建盘（批量部署直接进入默认启动）。
     逐项独立执行，单项失败不影响其余；返回 succeeded / skipped / failed 汇总。"""
     os_name = canonical_os(req.os)
     os_version = canonical_os_version(req.os_version)
     validate_disk(req.type, req.name, req.size)
-    if not req.targets:
-        raise HTTPException(400, "targets must not be empty")
+    targets, warnings, validated = _resolve_batch_targets(req)
+    if req.dry_run:
+        return _preview_batch_disks(targets, os_name, os_version, warnings)
 
     client_ip = client_host(request)
     succeeded: list[dict[str, Any]] = []
@@ -434,7 +514,7 @@ def batch_create_worker_disks(req: BatchCreateWorkerDiskRequest, request: Reques
 
     with store.locked():
         data = store.load_workers()
-        for target in req.targets:
+        for target in targets:
             worker_id = canonical_id(target.worker_id)
             record_ = data["workers"].get(worker_id)
             if not record_:
@@ -447,17 +527,27 @@ def batch_create_worker_disks(req: BatchCreateWorkerDiskRequest, request: Reques
 
             record("worker.disk.create", "started", worker_id=worker_id, client=client_ip)
             try:
-                disk_agent = agents.get(target.agent)
-                if not disk_agent:
-                    raise HTTPException(400, f"agent not found: {target.agent}")
-                if not disk_agent.role_disk:
-                    raise HTTPException(400, f"agent {target.agent} not configured for disk role")
-                client = agents.client(disk_agent)
-                try:
-                    client.healthz()
-                    disk_caps = client.capabilities()
-                except Exception as exc:
-                    raise HTTPException(503, f"agent {target.agent} not reachable: {exc}") from exc
+                if target.agent in validated:
+                    # 放置阶段已 healthz/capabilities：同一请求内复用，免去逐项重复探测
+                    disk_agent, disk_caps = validated[target.agent]
+                else:
+                    try:
+                        disk_agent = agents.get(target.agent)
+                    except KeyError:
+                        # agents.get 缺失抛 KeyError（不返回 None）：显式转清晰 404，避免落成 500 "'xxx'"
+                        raise HTTPException(404, f"agent not found: {target.agent}") from None
+                    if not disk_agent.role_disk:
+                        raise HTTPException(400, f"agent {target.agent} not configured for disk role")
+                    if not disk_agent.enabled:
+                        # enabled = 排空语义（只拦新增，不碰存量）
+                        raise HTTPException(409, f"agent {target.agent} disabled: not accepting new disks")
+                    client = agents.client(disk_agent)
+                    try:
+                        client.healthz()
+                        disk_caps = client.capabilities()
+                    except Exception as exc:
+                        raise HTTPException(503, f"agent {target.agent} not reachable: {exc}") from exc
+                    validated[target.agent] = (disk_agent, disk_caps)
 
                 # 盘标识权威 = NQN（NVMe-oF 首选）：build_nqn 生成盘 NQN（后缀带 os_tag），IQN 由其派生（不参与定义）
                 os_tag = gen_os_tag()
@@ -499,6 +589,8 @@ def batch_create_worker_disks(req: BatchCreateWorkerDiskRequest, request: Reques
                 )
                 record("worker.disk.create", "succeeded", worker_id=worker_id, client=client_ip)
                 succeeded.append({"worker_id": worker_id, "agent": disk_agent.id, "iqn": disk_record["iqn"]})
+                # 建盘即签发：批量 N 台 = N 份密钥一次到位，无需逐台手工设置
+                _issue_credential(worker_id, disk_caps.get("backend", ""))
                 _push_credentials(worker_id)  # 批量建盘后同步 hosts 登记
             except Exception as exc:
                 detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
@@ -703,6 +795,8 @@ def delete_worker(
             del data["workers"][worker_id]
             store.save_workers(data)
             record("workers.delete", "ok", worker_id=worker_id)
+            # worker 已消失 → 其凭据条目与推送台账一并作废（避免孤儿密钥被同 id 重建继承）
+            _forget_worker_credentials(worker_id)
             for mac in unbound:
                 record("device.unbind", "ok", mac=mac, worker_id=worker_id,
                        reason="worker.delete", client=client_ip)
@@ -769,6 +863,8 @@ def batch_delete_workers(req: BatchDeleteWorkersRequest, request: Request):
                         unbound_devices.extend(unbound)
                 del data["workers"][worker_id]
                 record("workers.delete", "ok", worker_id=worker_id)
+                # worker 已消失 → 其凭据条目与推送台账一并作废（避免孤儿密钥被同 id 重建继承）
+                _forget_worker_credentials(worker_id)
                 for mac in unbound:
                     record("device.unbind", "ok", mac=mac, worker_id=worker_id,
                            reason="worker.delete", client=client_ip)
@@ -795,7 +891,15 @@ def batch_delete_workers(req: BatchDeleteWorkersRequest, request: Request):
 
 
 def _delete_target(target_record: dict[str, Any], *, delete_file: bool, ignore_missing: bool) -> None:
-    agent = agents.get(target_record["agent"])
+    try:
+        agent = agents.get(target_record["agent"])
+    except KeyError:
+        # 登记缺失（删除语义 = 仅清控制面记录）：该节点上的 target 无从删除——
+        # ignore_missing 视为已缺失；否则走 AgentAPIError 通道报清晰 404（不再 KeyError 500）
+        if ignore_missing:
+            return
+        raise AgentAPIError(target_record["agent"], 404,
+                            f"agent not registered: {target_record['agent']}")
     try:
         agents.client(agent).delete_lun(target_record["iqn"], delete_file=delete_file)
     except AgentAPIError as exc:
@@ -884,6 +988,9 @@ def _persist_failed_worker(
 
 
 # ============================ NVMe-oF 凭据（DHHC-1，按 Worker 跟盘） ============================
+# 签发时机：nvmet 节点上建系统盘即自动签发（`_issue_credential`），密钥随子系统就位；
+# 手工端点（PUT/DELETE /credential）只用于显式轮换或吊销——吊销是明确的「不用认证」，
+# 不会被后续建盘复活（只有无条目才签发，吊销后条目已删）。
 
 # Host NQN 与盘 NQN 同域：base 取盘 NQN 前缀（盘 NQN 由 build_nqn 按 Agent 上报的
 # capabilities.base_nqn 生成——节点侧 spec.agent.nqnBase 权威，控制面不声明）
@@ -905,38 +1012,254 @@ def _host_nqn_for(base_nqn: str, worker_id: str) -> str:
 
 _UNSET = object()
 
+# 推送结果三值：ok=已送达（Agent 缓存与宿主服务均已同步）；failed=未送达（Agent 不可达 /
+# 宿主同步失败），对账会持续重放；n/a=目标 Agent 非 nvmet 后端（凭据不适用，非故障）。
+PUSH_OK = "ok"
+PUSH_FAILED = "failed"
+PUSH_NA = "n/a"
+
+
+def _credential_targets(record_: dict) -> dict[str, list[str]]:
+    """worker 的推送目标：agent_id → 该 Agent 上本 worker 的盘 NQN 列表。
+
+    NVMe-oF 子系统标识 = NQN（盘记录权威字段）；缺 nqn（存量盘）跳过该盘，不派生
+    （不兼容遗留）：该盘不支持 NVMe-oF 凭据/引导。"""
+    groups: dict[str, list[str]] = {}
+    for disk in worker_disks(record_):
+        if disk.get("nqn"):
+            groups.setdefault(disk["agent"], []).append(disk["nqn"])
+    return groups
+
+
+def _registered_agent_ids() -> set[str]:
+    return {agent.id for agent in agents.load()}
+
+
+def _sync_targets(record_: dict, registered: set[str] | None = None) -> dict[str, list[str]]:
+    """有同步语义的推送目标：`_credential_targets` ∩ 已登记 Agent。
+
+    未登记的 Agent（登记被删 / 尚未 enroll）无从投递——对账据此剪除记录，投影也须据此
+    排除，否则会显示永不收敛的「待推送」（对账只服务已登记 Agent，永远不会消费它）。
+    批量调用（对账）可传入预取的 registered 以避免逐 worker 重读登记表。"""
+    if registered is None:
+        registered = _registered_agent_ids()
+    return {agent_id: nqns for agent_id, nqns in _credential_targets(record_).items()
+            if agent_id in registered}
+
+
+def _forget_worker_credentials(worker_id: str) -> None:
+    """删除 Worker 时清空它在凭据域的全部痕迹：密钥条目 + 该 worker 的推送台账。
+
+    不清理会留孤儿——条目对已不存在的 worker 既不可见（`GET /credential` 404）也删不掉；
+    同 id 的 worker 若日后被建出来，还会静默继承旧密钥并被推给新机器的盘。"""
+    with credentials.locked():
+        creds = credentials.load()
+        if creds["credentials"].pop(worker_id, None) is not None:
+            credentials.save(creds)
+            record("credential.forget", "ok", worker_id=worker_id, reason="worker.delete")
+    prefix = f"{worker_id}/"  # 推送台账键 = "<worker_id>/<agent_id>"（worker_id 不含 "/"）
+    with credential_pushes.locked():
+        data = credential_pushes.load()
+        stale = [key for key in data["pushes"] if key.startswith(prefix)]
+        if stale:
+            for key in stale:
+                data["pushes"].pop(key)
+            credential_pushes.save(data)
+
+
+def _push_state_key(worker_id: str, agent_id: str) -> str:
+    return f"{worker_id}/{agent_id}"
+
+
+def _set_push_state(worker_id: str, agent_id: str, result: str,
+                    secret: str | None, error: str = "") -> None:
+    """回写推送状态记录（secret_hash 记期望密钥审计哈希，"" = 期望吊销）。"""
+    entry: dict[str, Any] = {
+        "worker_id": worker_id,
+        "agent_id": agent_id,
+        "secret_hash": _secret_hash(secret) if secret else "",
+        "result": result,
+        "updated_at": now_iso(),
+    }
+    if error:
+        entry["error"] = error
+    with credential_pushes.locked():
+        data = credential_pushes.load()
+        data["pushes"][_push_state_key(worker_id, agent_id)] = entry
+        credential_pushes.save(data)
+
+
+def _push_one(worker_id: str, agent_id: str, sub_nqns: list[str], secret: str | None,
+              *, audit_always: bool) -> str:
+    """推送单个 (worker, agent) 对并回写状态记录；返回 ok|failed|n/a|skipped。
+
+    审计：用户动作（audit_always=True）每次记录；对账重放仅在结果或期望密钥变化时
+    记录（周期重放不刷屏）。Agent 登记缺失（登记删除语义 = 仅清控制面记录）跳过且
+    不留状态——登记恢复后由对账补推；非 nvmet 后端记 n/a（凭据不适用，不计故障）。"""
+    try:
+        agent = agents.get(agent_id)
+    except KeyError:
+        record("credential.push", "skipped", worker_id=worker_id, agent=agent_id,
+               reason="agent not registered")
+        return "skipped"
+    with credential_pushes.locked():
+        prev = credential_pushes.load()["pushes"].get(_push_state_key(worker_id, agent_id), {})
+    # Host NQN base：盘 NQN 前缀（与 base_nqn 投影同机制）——同一 worker 持多盘
+    # 时各盘同 agent 同域，base 一致；缺 nqn 的盘已跳过，此处恒有值
+    host_nqns = [_host_nqn_for(_base_nqn_from_target(sub_nqns[0]), worker_id)]
+    try:
+        agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns)
+        result, error = PUSH_OK, ""
+    except AgentAPIError as exc:
+        if exc.status_code == 400 and "backend=nvmet" in exc.detail:
+            result, error = PUSH_NA, ""
+        else:
+            result, error = PUSH_FAILED, exc.detail
+    except Exception as exc:
+        result, error = PUSH_FAILED, str(exc)
+    _set_push_state(worker_id, agent_id, result, secret, error)
+    if result == PUSH_FAILED:
+        log.warning(f"credential push failed: worker={worker_id} agent={agent_id}: {error}")
+    desired_hash = _secret_hash(secret) if secret else ""
+    if audit_always or prev.get("result") != result or prev.get("secret_hash", "") != desired_hash:
+        extra: dict[str, Any] = {"worker_id": worker_id, "agent_id": agent_id,
+                                 "injected": bool(secret), "sub_count": len(sub_nqns),
+                                 "host_count": len(host_nqns)}
+        status = result
+        if result == PUSH_NA:
+            status, extra["reason"] = "skipped", "backend not nvmet"
+        if error:
+            extra["error"] = error
+        record("credential.push", status, **extra)
+    return result
+
+
+def _push_state(worker_id: str, agent_id: str) -> dict:
+    with credential_pushes.locked():
+        return credential_pushes.load()["pushes"].get(_push_state_key(worker_id, agent_id), {})
+
+
+def _no_sync_needed(prev: dict, secret: str | None) -> bool:
+    """无密钥且该对从无推送历史 → 无需同步。
+
+    nvmet 建盘已自动签发密钥，此处无密钥只剩两类：盘在非 nvmet 后端（DHHC-1 不适用，
+    推送只会得 n/a），或密钥已被显式吊销（有历史记录，不走本判定）。这两类都不该产生
+    新推送记录，否则 agent 离线时会显示「同步失败 / 待同步」的虚假故障。"""
+    return not prev and not secret
+
+
+def _issue_credential(worker_id: str, backend: str) -> bool:
+    """为 nvmet 节点上的新子系统签发认证密钥：无条目则生成，已有条目原样保留。
+
+    建盘即签发——盘一旦在 nvmet 上有了子系统，认证密钥就是它的配套凭据，由系统签发
+    而非逐个手工设置（批量建盘 N 台即 N 份密钥）。已有条目视为已签发：按 Worker 跟盘，
+    同一 worker 的多盘共用一把密钥，建盘不触发轮换。非 nvmet 后端不签发——DHHC-1 是
+    NVMe-oF 专属（iSCSI 走 CHAP，不在本链路）。返回是否新签发。"""
+    if backend != "nvmet":
+        return False
+    now = now_iso()
+    with credentials.locked():
+        creds = credentials.load()
+        if worker_id in creds["credentials"]:
+            return False
+        secret = _generate_dhhc1()
+        creds["credentials"][worker_id] = {
+            "worker_id": worker_id,
+            "secret": secret,
+            "secret_hash": _secret_hash(secret),
+            "created_at": now,
+            "updated_at": now,
+        }
+        credentials.save(creds)
+    record("credential.issue", "ok", worker_id=worker_id, backend=backend)
+    return True
+
 
 def _push_credentials(worker_id: str, secret: object = _UNSET) -> None:
-    """把 worker 的 NVMe-oF 凭据期望状态推送给持有其盘的 Agent（失败仅审计，不阻断主流程）。
+    """把 worker 的 NVMe-oF 凭据期望状态推送给持有其盘的 Agent（失败仅审计与记录，不阻断主流程）。
     secret 缺省取密钥库当前条目（无条目 → None 吊销推送）；审计不记密钥本体。"""
-    data = store.load_workers()
-    record_ = data["workers"].get(worker_id)
-    if not record_:
-        return
     if secret is _UNSET:
         with credentials.locked():
             entry = credentials.load()["credentials"].get(worker_id)
         secret = entry.get("secret") if entry else None
-    host_nqns = []  # 按持盘 Agent 的盘 NQN 前缀派生（节点侧 nqnBase 权威，见 _host_nqn_for）
-    groups: dict[str, list[str]] = {}
-    for disk in worker_disks(record_):
-        # NVMe-oF 子系统标识 = NQN（盘记录权威字段）；缺 nqn（存量盘）→ 跳过该盘，
-        # 不派生（不兼容遗留）：该盘不支持 NVMe-oF 凭据/引导
-        if disk.get("nqn"):
-            groups.setdefault(disk["agent"], []).append(disk["nqn"])
-    for agent_id, sub_nqns in groups.items():
-        agent = agents.get(agent_id)
-        # Host NQN base：盘 NQN 前缀（与 base_nqn 投影同机制）——同一 worker 持多盘
-        # 时各盘同 agent 同域，base 一致；缺 nqn 的盘已跳过，此处恒有值
-        host_nqns = [_host_nqn_for(_base_nqn_from_target(sub_nqns[0]), worker_id)]
-        try:
-            agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns)
-            record("credential.push", "ok", worker_id=worker_id, agent=agent_id,
-                   injected=bool(secret), sub_count=len(sub_nqns), host_count=len(host_nqns))
-        except Exception as exc:
-            log.warning(f"credential push failed: worker={worker_id} agent={agent_id}: {exc}")
-            record("credential.push", "failed", worker_id=worker_id, agent=agent_id,
-                   injected=bool(secret), error=str(exc))
+    with store.locked():
+        record_ = store.load_workers()["workers"].get(worker_id)
+    if not record_:
+        return
+    for agent_id, sub_nqns in _sync_targets(record_).items():
+        if _no_sync_needed(_push_state(worker_id, agent_id), secret):
+            continue
+        _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=True)
+
+
+_reconcile_thread_started = False
+
+
+def reconcile_credentials_once() -> dict[str, int]:
+    """对账全量重放（周期线程调用；可测核心）。
+
+    期望（credentials.yml）× 目标（workers.yml 的盘 NQN 分组）逐对比较推送记录，
+    密钥哈希一致且已送达（ok/n-a）才跳过——覆盖三类静默缺口：推送失败未重试、
+    崩溃缝隙（台账已改、进程未推）、吊销未送达（期望吊销 = 无条目）。未被任何当前
+    目标引用的记录剪除：Agent 注销后重新登记 / 盘迁移后无记录，会自然触发重推。"""
+    with credentials.locked():
+        creds = credentials.load()["credentials"]
+    with store.locked():
+        workers = store.load_workers()["workers"]
+    targets: dict[str, tuple[str, str, list[str], str | None]] = {}
+    registered = _registered_agent_ids()
+    for worker_id, record_ in workers.items():
+        secret = (creds.get(worker_id) or {}).get("secret")
+        for agent_id, sub_nqns in _sync_targets(record_, registered).items():
+            targets[_push_state_key(worker_id, agent_id)] = (worker_id, agent_id, sub_nqns, secret)
+    with credential_pushes.locked():
+        data = credential_pushes.load()
+        stale = [key for key in data["pushes"] if key not in targets]
+        if stale:
+            for key in stale:
+                data["pushes"].pop(key)
+            credential_pushes.save(data)
+    pushed = skipped = failed = 0
+    for key, (worker_id, agent_id, sub_nqns, secret) in targets.items():
+        with credential_pushes.locked():
+            prev = credential_pushes.load()["pushes"].get(key, {})
+        desired_hash = _secret_hash(secret) if secret else ""
+        if _no_sync_needed(prev, secret):
+            skipped += 1
+            continue
+        if prev.get("result") in (PUSH_OK, PUSH_NA) and prev.get("secret_hash", "") == desired_hash:
+            skipped += 1
+            continue
+        if _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=False) == PUSH_FAILED:
+            failed += 1
+        else:
+            pushed += 1
+    return {"targets": len(targets), "pushed": pushed, "skipped": skipped, "failed": failed}
+
+
+def start_credential_reconciler() -> None:
+    """启动控制面→Agent 凭据对账线程（FastAPI lifespan 调用；间隔 ≤0 禁用——测试环境）。
+
+    三层互补：本线程覆盖「控制面→Agent」段；Agent reconcile 覆盖「Agent→宿主服务」段；
+    Agent 启动重放覆盖其自身重启窗口（见 storager/agent NvmetCredentialCache）。"""
+    global _reconcile_thread_started
+    interval = settings.credential_reconcile_interval
+    if interval <= 0 or _reconcile_thread_started:
+        return
+    _reconcile_thread_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                summary = reconcile_credentials_once()
+                if summary["failed"] or summary["pushed"]:
+                    log.info(f"credential reconcile: {summary}")
+            except Exception:
+                log.exception("credential reconcile failed")
+
+    threading.Thread(target=_loop, name="credential-reconcile", daemon=True).start()
+    log.info(f"credential reconcile loop started: interval={interval}s")
 
 
 def _validate_dhhc1(secret: str) -> None:
@@ -960,6 +1283,16 @@ def _validate_dhhc1(secret: str) -> None:
         raise ValueError("secret CRC32 checksum mismatch")
 
 
+def _generate_dhhc1() -> str:
+    """生成 DHHC-1:01:<base64(32B 随机 ‖ CRC32 小端终值)>（固件 2.1 契约）。
+
+    与 CLI `workers credential set --generate` 同一格式；产出必过 `_validate_dhhc1`
+    （生成与自检互为闭环）。明文不落审计、不经 API 返回，仅存密钥库供 /boot-vars 注入。"""
+    key = secrets.token_bytes(32)
+    crc = zlib.crc32(key)
+    return "DHHC-1:01:" + base64.b64encode(key + crc.to_bytes(4, "little")).decode("ascii")
+
+
 def _secret_hash(secret: str) -> str:
     """审计用哈希（不用于注入，注入用明文）：sha256 全量，审计输出仅前缀。"""
     return "sha256:" + hashlib.sha256(secret.encode("utf-8")).hexdigest()
@@ -976,14 +1309,63 @@ def _credential_meta(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _credential_push_view(worker_id: str, record_: dict, *, desired: str | None) -> dict[str, Any]:
+    """推送状态投影（GET/PUT/DELETE 响应）：逐 Agent 明细 + 汇总，供 CLI/WebUI 呈现。
+
+    汇总 result：ok=全部适用目标已送达 / failed=任一未送达 / pending=等待对账重放
+    （含密钥已轮换、记录仍是旧值）/ n-a=目标均非 nvmet 后端（凭据不适用）/ none=无同步目标
+    （未设置凭据且无推送历史，或盘所在 Agent 未登记）。"""
+    targets = _sync_targets(record_)
+    if not targets:
+        return {"result": "none", "updated_at": None, "agents": []}
+    desired_hash = _secret_hash(desired) if desired else ""
+    with credential_pushes.locked():
+        pushes = credential_pushes.load()["pushes"]
+    items: list[dict[str, Any]] = []
+    for agent_id in targets:
+        prev = pushes.get(_push_state_key(worker_id, agent_id)) or {}
+        if _no_sync_needed(prev, desired):
+            # 未设置凭据且无历史：无同步语义，不显示为「待同步」
+            continue
+        result = prev.get("result", "")
+        item: dict[str, Any] = {"agent_id": agent_id, "updated_at": prev.get("updated_at") or None}
+        if not prev:
+            item["result"] = "pending"
+        elif result == PUSH_FAILED:
+            item["result"] = PUSH_FAILED
+            item["error"] = prev.get("error", "")
+        elif result == PUSH_NA:
+            item["result"] = PUSH_NA
+        elif result == PUSH_OK and prev.get("secret_hash", "") == desired_hash:
+            item["result"] = PUSH_OK
+        else:
+            # 记录为旧值（轮换后未重推）：待对账重放
+            item["result"] = "pending"
+        items.append(item)
+    if not items:
+        return {"result": "none", "updated_at": None, "agents": []}
+    results = [item["result"] for item in items]
+    if PUSH_FAILED in results:
+        overall = PUSH_FAILED
+    elif "pending" in results:
+        overall = "pending"
+    elif all(r == PUSH_NA for r in results):
+        overall = PUSH_NA
+    else:
+        overall = PUSH_OK
+    stamps = [item["updated_at"] for item in items if item["updated_at"]]
+    return {"result": overall, "updated_at": max(stamps) if stamps else None, "agents": items}
+
+
 @router.put("/workers/{worker_id}/credential")
 def set_worker_credential(worker_id: str, req: CredentialRequest, request: Request):
     """设置/更新 NVMe-oF 认证密钥（DHHC-1，按 Worker 跟盘裁定）：密钥库键 = worker_id。
-    自检失败 422；worker 不存在 404；重复设置同值幂等（updated_at 不变）。"""
+    自检失败 422；worker 不存在 404；重复设置同值幂等（updated_at 不变，但仍触发推送补推）。
+    响应含 push 投影：逐 Agent 送达状态（未送达由对账线程重放）。"""
     worker_id = canonical_id(worker_id)
     with store.locked():
-        data = store.load_workers()
-        if worker_id not in data["workers"]:
+        worker_record = store.load_workers()["workers"].get(worker_id)
+        if worker_record is None:
             raise HTTPException(404, f"worker not found: {worker_id}")
     secret = req.secret.strip()
     try:
@@ -1000,7 +1382,8 @@ def set_worker_credential(worker_id: str, req: CredentialRequest, request: Reque
             # 幂等重放也触发推送：上次推送失败（agent 不在线/中途失败）时，
             # 重放同值密钥可补推；agent 侧 set_host 幂等，重复推送无害。
             _push_credentials(worker_id, secret=secret)
-            return _credential_meta(entry)
+            return {**_credential_meta(entry),
+                    "push": _credential_push_view(worker_id, worker_record, desired=secret)}
         entry = {
             "worker_id": worker_id,
             "secret": secret,
@@ -1012,33 +1395,37 @@ def set_worker_credential(worker_id: str, req: CredentialRequest, request: Reque
         credentials.save(creds)
     record("credential.set", "ok", worker_id=worker_id, changed=True, client=client_ip)
     _push_credentials(worker_id, secret=secret)
-    return _credential_meta(entry)
+    return {**_credential_meta(entry),
+            "push": _credential_push_view(worker_id, worker_record, desired=secret)}
 
 
 @router.get("/workers/{worker_id}/credential")
 def get_worker_credential(worker_id: str, request: Request):
-    """凭据元数据（不返回明文）：exists / secret_hash 前缀 / 更新时间。"""
+    """凭据元数据 + 推送状态投影（不返回明文）：exists / secret_hash 前缀 / 更新时间；
+    push 为逐 Agent 送达状态（对账依据，见 reconcile_credentials_once）。"""
     worker_id = canonical_id(worker_id)
     with store.locked():
-        data = store.load_workers()
-        if worker_id not in data["workers"]:
+        worker_record = store.load_workers()["workers"].get(worker_id)
+        if worker_record is None:
             raise HTTPException(404, f"worker not found: {worker_id}")
     with credentials.locked():
-        creds = credentials.load()
-        entry = creds["credentials"].get(worker_id)
+        entry = credentials.load()["credentials"].get(worker_id)
     record("credential.get", "ok", worker_id=worker_id, exists=bool(entry), client=client_host(request))
     if not entry:
-        return {"worker_id": worker_id, "exists": False}
-    return _credential_meta(entry)
+        return {"worker_id": worker_id, "exists": False,
+                "push": _credential_push_view(worker_id, worker_record, desired=None)}
+    return {**_credential_meta(entry),
+            "push": _credential_push_view(worker_id, worker_record, desired=entry.get("secret"))}
 
 
 @router.delete("/workers/{worker_id}/credential")
 def delete_worker_credential(worker_id: str, request: Request):
-    """删除密钥（吊销该 worker 名下全部绑定设备的认证资格）：下次启动回落明文连接。"""
+    """删除密钥（吊销该 worker 名下全部绑定设备的认证资格）：下次启动回落明文连接。
+    响应 push 投影反映吊销推送送达状态（未送达由对账重放，不会静默滞留）。"""
     worker_id = canonical_id(worker_id)
     with store.locked():
-        data = store.load_workers()
-        if worker_id not in data["workers"]:
+        worker_record = store.load_workers()["workers"].get(worker_id)
+        if worker_record is None:
             raise HTTPException(404, f"worker not found: {worker_id}")
     with credentials.locked():
         creds = credentials.load()
@@ -1048,4 +1435,5 @@ def delete_worker_credential(worker_id: str, request: Request):
         credentials.save(creds)
     record("credential.revoke", "ok", worker_id=worker_id, client=client_host(request))
     _push_credentials(worker_id, secret=None)
-    return {"worker_id": worker_id, "deleted": True}
+    return {"worker_id": worker_id, "deleted": True,
+            "push": _credential_push_view(worker_id, worker_record, desired=None)}

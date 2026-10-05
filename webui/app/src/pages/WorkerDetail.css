@@ -262,3 +262,57 @@
   align-self: end;
   padding-bottom: 10px;
 }
+
+/* NVMe-oF 认证凭据卡片（identity Tab）：状态行 + 逐 Agent 推送明细 + 操作 */
+.cred-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 推送状态行与 .info-row 共用列定义（160px 标签列 + 内容列），保持左对齐一致 */
+.cred-push {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 24px;
+  padding: 13px 24px;
+  align-items: start;
+}
+
+.cred-push-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.cred-agent {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--gray-600);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.cred-agent-error {
+  color: var(--gray-500);
+  word-break: break-all;
+}
+
+.cred-hint {
+  font-size: 12px;
+  color: var(--gray-500);
+  margin-top: 12px;
+  padding: 0 24px;
+}
+
+.cred-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 0 24px;
+}

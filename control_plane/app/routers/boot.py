@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from ..config import settings
 from ..stores import agents, credentials, devices, dnsmasq, record, store
 from ..trust import (
+    admission_allowed,
     device_auth_blocked,
     device_for_boot,
     issue_nonce,
@@ -73,8 +74,9 @@ def device_report(
 ):
     """iPXE 设备信息上报（不鉴权）：11 字段指纹 + 可带 pubkey（ECDSA P-256 公钥，注册/认领用），
     宽松解析（空值容忍，mem 兼容 0x hex/十进制），更新指纹 + last_seen。
-    注册只在窗口期（2026-08-21 裁定）：未知 MAC 仅在窗口开启且带有效公钥时入池；
-    存量设备窗口期内带公钥上报 = 密钥认领（key_hash 填充）。返回空响应（chain 无脚本副作用）。"""
+    注册只在窗口期（2026-08-21 裁定）：未知 MAC 仅在窗口开启、额度未用尽且带有效公钥时入池；
+    存量设备窗口期内带公钥上报 = 密钥认领（key_hash 填充，不占放行额度）。
+    返回空响应（chain 无脚本副作用）。"""
     normalized = normalize_boot_mac(mac)
     if not normalized:
         return Response("#!ipxe\n", media_type="text/plain", status_code=200)  # 非法 MAC 忽略，不阻断引导
@@ -91,7 +93,7 @@ def device_report(
     }.items() if v is not None}
     now = now_iso()
     key_hex = parse_pubkey(pubkey)  # 合法 → 规范化 hex；无参数/非法 → None
-    window_open_ = window_open()
+    window_open_ = window_open()  # 密钥认领条件：只看窗口期，不看额度
     updated = False
     claimed = False
     with devices.locked():
@@ -119,8 +121,10 @@ def device_report(
             devices.save(data)
             updated = True
         else:
-            if not (window_open_ and key_hex):
-                return Response("#!ipxe\n", media_type="text/plain", status_code=200)  # 注册只在窗口期且须带有效公钥
+            # 入池放行：窗口期 + 额度未用尽 + 带有效公钥。额度在锁内以本次加载的台账复核，
+            # 避免并发上报各自读到余量 1 而超额放行（已放行数派生自台账，不另存计数器）。
+            if not (key_hex and admission_allowed(devs)):
+                return Response("#!ipxe\n", media_type="text/plain", status_code=200)
             devs[normalized] = {
                 "mac": normalized,
                 "uuid": clean_str(uuid),
@@ -263,17 +267,15 @@ def _reboot_boot_payload() -> dict[str, Any]:
 def _backend_for(agent_id: str) -> str:
     """返回 Agent 的存储后端类型（stgt | lio | nvmet）。
 
-    优先读配置 tags 标记（离线零成本），未标记时查询 /capabilities
-    （Agent 自报），查询失败默认 stgt 以保持既有格式兼容。
+    一律实时查询 Agent `/capabilities` 的 `backend` 字段（节点自报，能力即真相）：
+    后端类型是节点的运行事实，不由控制面登记信息推导——`agents.yml` 的 `tags` 只作人工
+    标签，不参与本判定（标签与实况漂移时会拼出错误的 iSCSI 连接符，且标签优先会盖掉实况）。
+    未登记 / 查询失败 / 取值非法 → 默认 stgt（保持既有格式兼容）。
     """
     try:
         agent = agents.get(agent_id)
     except KeyError:
         return "stgt"
-    tags = {str(t).strip().lower() for t in agent.tags}
-    for backend in ("nvmet", "lio", "stgt"):
-        if backend in tags:
-            return backend
     try:
         backend = str(agents.client(agent).capabilities().get("backend", "")).lower()
         if backend in {"stgt", "lio", "nvmet"}:

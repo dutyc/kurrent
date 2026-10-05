@@ -11,6 +11,10 @@ import {
   getAgents,
   getMasters,
   updateWorkerMac,
+  getWorkerCredential,
+  setWorkerCredential,
+  revokeWorkerCredential,
+  generateDHHC1,
 } from '../api/client'
 import { useI18n } from '../i18n'
 import Button from '../components/Button'
@@ -69,7 +73,11 @@ export default function WorkerDetail() {
   const [macValue, setMacValue] = useState('')
   const [macSaving, setMacSaving] = useState(false)
   const [macError, setMacError] = useState(null)
-  // 分类页（与 Agent 详情页一致）：identity / disks / boot / cd / status
+  // NVMe-oF 认证凭据（DHHC-1：状态 + 推送投影 + 生成设置/吊销）
+  const [cred, setCred] = useState(null)
+  const [credBusy, setCredBusy] = useState(false)
+  const [credError, setCredError] = useState(null)
+  // 分类页（与 Agent 详情页一致）：identity / disks / boot / cd / credential / status
   const [activeTab, setActiveTab] = useState('identity')
   // 系统盘 Tab：建盘弹窗开关 + 展开中的盘（os_tag 唯一键）
   const [diskModalOpen, setDiskModalOpen] = useState(false)
@@ -81,8 +89,8 @@ export default function WorkerDetail() {
   const CLEAR_OPTION = { value: '__clear__', label: t('workerDetail.clear') }
 
   const DISK_TYPE_OPTIONS = [
-    { value: 'empty', label: t('workers.empty') },
-    { value: 'master', label: t('workers.master') },
+    { value: 'empty', label: t('workers.plan.empty') },
+    { value: 'master', label: t('workers.plan.master') },
   ]
 
   // 盘显示标签：os[ os_version]（版本为备注性质，'' 不显示）
@@ -93,12 +101,18 @@ export default function WorkerDetail() {
   const masterOptions = (mastersData?.agents || [])
     .filter((entry) => !diskForm.disk_agent || entry.agent === diskForm.disk_agent)
     .flatMap((entry) =>
-      (entry.masters || []).map((m) => ({
-        value: m.name,
-        label: m.os ? `${m.name} (${m.os}${m.os_version ? ' ' + m.os_version : ''})` : m.name,
-        os: m.os || '',
-        os_version: m.os_version || '',
-      }))
+      (entry.masters || []).map((m) => {
+        const tag = m.os ? ` (${m.os}${m.os_version ? ' ' + m.os_version : ''})` : ''
+        // 512 扇区布局母盘不可克隆（nvmet 按底层 4K 块导出，EDK2 找不到 ESP）：禁用并标注
+        const badGpt = m.gpt === '512'
+        return {
+          value: m.name,
+          label: badGpt ? `${m.name}${tag} — ${t('workers.masterGpt512')}` : `${m.name}${tag}`,
+          disabled: badGpt,
+          os: m.os || '',
+          os_version: m.os_version || '',
+        }
+      })
     )
 
   // 母盘文件大小：按名称索引（卡片收起态显示克隆盘大小）
@@ -135,14 +149,16 @@ export default function WorkerDetail() {
     let cancelled = false
     async function load() {
       try {
-        const [w, s, bv] = await Promise.all([
+        const [w, s, bv, cred] = await Promise.all([
           getWorker(id),
           getWorkerStatus(id).catch(() => null),
           bootVars({ hostname: id, format: 'json' }).catch(() => null),
+          getWorkerCredential(id).catch(() => null),
         ])
         if (cancelled) return
         setWorker(w)
         setStatus(s)
+        setCred(cred)
         setBootForm({
           disk: w.default_disk || '',
           menu_default: w.boot?.menu_default || w.boot?.['menu-default'] || '',
@@ -311,11 +327,73 @@ export default function WorkerDetail() {
     }
   }
 
+  // 凭据设置：密钥在浏览器就地生成（明文只随本次请求发出，不落浏览器存储）
+  const handleSetCredential = async () => {
+    setCredBusy(true)
+    setCredError(null)
+    try {
+      await setWorkerCredential(id, generateDHHC1())
+      setCred(await getWorkerCredential(id).catch(() => null))
+    } catch (err) {
+      setCredError(err.message)
+    } finally {
+      setCredBusy(false)
+    }
+  }
+
+  const handleRevokeCredential = async () => {
+    setCredBusy(true)
+    setCredError(null)
+    try {
+      await revokeWorkerCredential(id)
+      setCred(await getWorkerCredential(id).catch(() => null))
+    } catch (err) {
+      setCredError(err.message)
+    } finally {
+      setCredBusy(false)
+    }
+  }
+
+  // 推送状态文案（ok 单目标不展开明细；failed 列原因）
+  const PUSH_LABEL = {
+    ok: t('workerDetail.pushOk'),
+    failed: t('workerDetail.pushFailed'),
+    pending: t('workerDetail.pushPending'),
+    'n/a': t('workerDetail.pushNa'),
+  }
+  const renderCredentialPush = () => {
+    const push = cred?.push
+    if (!push || push.result === 'none') return null
+    const label = PUSH_LABEL[push.result] || push.result
+    const agents = push.agents || []
+    const details = agents.filter((a) => a.result !== 'ok')
+    return (
+      <div className="cred-push">
+        <span className="info-label">{t('workerDetail.credentialPush')}</span>
+        <span className="cred-push-body">
+          <Badge variant={push.result === 'ok' ? 'ok' : push.result === 'failed' ? 'failed' : 'degraded'}>
+            {label}
+          </Badge>
+          {(details.length > 0 ? details : agents.length > 1 ? agents : []).map((a) => (
+            <span key={a.agent_id} className="cred-agent">
+              <span className="info-mono">{a.agent_id}</span>
+              <span>{PUSH_LABEL[a.result] || a.result}</span>
+              {a.error && <span className="cred-agent-error">{a.error}</span>}
+            </span>
+          ))}
+        </span>
+      </div>
+    )
+  }
+
   if (loading) return <p className="page-loading">{t('common.loading')}</p>
   if (error) return <p className="page-error">{error}</p>
   if (!worker) return <EmptyState message={t('workerDetail.notFoundMsg')} />
 
   const { disks = [], cd, mac } = worker
+  // 凭据按盘生效：盘标识权威 = NQN，缺 NQN 的存量盘不支持 NVMe-oF 凭据（与后端推送目标口径一致），
+  // 故无 NVMe-oF 盘时整个页签不出现（不支持即隐藏）
+  const hasNvmeof = disks.some((d) => d.nqn)
 
   return (
     <div>
@@ -343,7 +421,7 @@ export default function WorkerDetail() {
         />
       </div>
 
-      {/* 分类 Tab：基本信息 / 系统盘 / 启动配置 / 光驱 / 实时状态 */}
+      {/* 分类 Tab：基本信息 / 系统盘 / 启动配置 / 光驱 / NVMe-oF 凭据（有 NVMe-oF 盘才出现）/ 实时状态 */}
       <div className="agent-tabs">
         <button
           className={`agent-tab${activeTab === 'identity' ? ' active' : ''}`}
@@ -369,6 +447,14 @@ export default function WorkerDetail() {
             onClick={() => setActiveTab('cd')}
           >
             {t('workerDetail.tabCd')}
+          </button>
+        )}
+        {hasNvmeof && (
+          <button
+            className={`agent-tab${activeTab === 'credential' ? ' active' : ''}`}
+            onClick={() => setActiveTab('credential')}
+          >
+            {t('workerDetail.tabCredential')}
           </button>
         )}
         <button
@@ -426,6 +512,59 @@ export default function WorkerDetail() {
         <InfoRow label={t('workerDetail.state')} value={worker.state} />
       </Card>
         </>
+      )}
+
+      {activeTab === 'credential' && hasNvmeof && (
+        // NVMe-oF 认证凭据（DHHC-1，按 worker 跟盘）：保存态 + 逐 Agent 推送状态 + 生成/轮换/吊销
+        <Card className="detail-card">
+          {cred === null ? (
+            <p className="page-muted">{t('workerDetail.credentialUnavailable')}</p>
+          ) : (
+            <>
+              <div className="info-row">
+                <span className="info-label">{t('workerDetail.credentialState')}</span>
+                <span className="cred-state">
+                  <Badge variant={cred.exists ? 'ok' : 'default'}>
+                    {cred.exists ? t('workerDetail.credentialSetState') : t('workerDetail.credentialNone')}
+                  </Badge>
+                  {cred.exists && <span className="info-value info-mono">{cred.secret_hash}</span>}
+                </span>
+              </div>
+              {cred.exists && (
+                <InfoRow label={t('workerDetail.credentialUpdated')} value={cred.updated_at} mono />
+              )}
+              {renderCredentialPush()}
+              <p className="cred-hint">{t('workerDetail.credentialHint')}</p>
+              <div className="cred-actions">
+                <ConfirmAction
+                  trigger={
+                    <Button disabled={credBusy}>
+                      {credBusy
+                        ? t('workerDetail.credentialBusy')
+                        : cred.exists
+                          ? t('workerDetail.credentialRotate')
+                          : t('workerDetail.credentialSet')}
+                    </Button>
+                  }
+                  message={t('workerDetail.credentialSetConfirm', { id })}
+                  onConfirm={handleSetCredential}
+                />
+                {cred.exists && (
+                  <ConfirmAction
+                    trigger={
+                      <Button variant="danger" disabled={credBusy}>
+                        {t('workerDetail.credentialRevoke')}
+                      </Button>
+                    }
+                    message={t('workerDetail.credentialRevokeConfirm', { id })}
+                    onConfirm={handleRevokeCredential}
+                  />
+                )}
+              </div>
+              {credError && <p className="create-error">{credError}</p>}
+            </>
+          )}
+        </Card>
       )}
 
       {activeTab === 'disks' && (
@@ -538,18 +677,18 @@ export default function WorkerDetail() {
                     name="os"
                     value={diskForm.os}
                     onChange={(e) => { setDiskForm((prev) => ({ ...prev, os: e.target.value })) }}
-                    placeholder={t('workers.osPlaceholder')}
+                    placeholder={t('workers.plan.osPlaceholder')}
                     required
                   />
                   <Input
-                    label={t('workers.osVersion')}
+                    label={t('workers.plan.osVersion')}
                     name="os_version"
                     value={diskForm.os_version}
                     onChange={(e) => { setDiskForm((prev) => ({ ...prev, os_version: e.target.value })) }}
-                    placeholder={t('workers.osVersionPlaceholder')}
+                    placeholder={t('workers.plan.osVersionPlaceholder')}
                   />
                   <Select
-                    label={t('workers.diskType')}
+                    label={t('workers.plan.type')}
                     name="type"
                     value={diskForm.type}
                     onChange={(e) => { setDiskForm((prev) => ({ ...prev, type: e.target.value })) }}
@@ -557,7 +696,7 @@ export default function WorkerDetail() {
                   />
                   {diskForm.type === 'master' ? (
                     <Select
-                      label={t('workers.masterName')}
+                      label={t('workers.plan.masterName')}
                       name="disk_name"
                       value={diskForm.name}
                       onChange={(e) => {
@@ -571,16 +710,16 @@ export default function WorkerDetail() {
                         }))
                       }}
                       options={masterOptions}
-                      placeholder={masterOptions.length === 0 ? t('workers.noMasters') : t('workers.masterSelectPlaceholder')}
+                      placeholder={masterOptions.length === 0 ? t('workers.plan.noMasters') : t('workers.plan.masterPlaceholder')}
                       required
                     />
                   ) : (
                     <Input
-                      label={t('workers.diskSize')}
+                      label={t('workers.plan.size')}
                       name="disk_size"
                       value={diskForm.size}
                       onChange={(e) => { setDiskForm((prev) => ({ ...prev, size: e.target.value })) }}
-                      placeholder={t('workers.diskSizePlaceholder')}
+                      placeholder={t('workers.plan.sizePlaceholder')}
                       required
                     />
                   )}

@@ -7,7 +7,11 @@ import zlib
 import pytest
 
 from control_plane.app.config import settings
-from control_plane.app.routers.workers import _secret_hash, _validate_dhhc1
+from control_plane.app.routers.workers import (
+    _generate_dhhc1,
+    _secret_hash,
+    _validate_dhhc1,
+)
 
 MAC_A = "00:11:22:33:44:55"
 
@@ -87,7 +91,10 @@ def test_set_get_delete_roundtrip(client, auth_headers):
 
     res = client.get("/workers/worker-01/credential", headers=auth_headers)
     assert res.status_code == 200
-    assert res.json() == {"worker_id": "worker-01", "exists": False}
+    body = res.json()
+    assert body["worker_id"] == "worker-01" and body["exists"] is False
+    # 无盘 worker：无推送目标（push 投影 result=none）
+    assert body["push"] == {"result": "none", "updated_at": None, "agents": []}
 
     # 删除后再删 → 404
     res = client.delete("/workers/worker-01/credential", headers=auth_headers)
@@ -123,8 +130,10 @@ def test_set_credential_idempotent(client, auth_headers):
     assert third["created_at"] == first["created_at"]
 
 
-def test_credential_requires_auth(client, auth_headers):
+def test_credential_requires_auth(client, auth_headers, monkeypatch):
+    """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
     _create_worker(client, auth_headers)
+    monkeypatch.setenv("KURRENT_CP_INSECURE", "")
     res = client.put("/workers/worker-01/credential", json={"secret": make_secret()})
     assert res.status_code == 401
 
@@ -349,3 +358,136 @@ def test_push_failure_nonblocking(client, auth_headers, register_claimed_device,
     ops = [json.loads(line) for line in settings.operations_file.read_text(encoding="utf-8").splitlines()]
     assert any(e["op"] == "credential.push" and e["status"] == "failed" for e in ops)
     assert "agent unreachable" in settings.operations_file.read_text(encoding="utf-8")
+
+
+# ============================ 建盘即签发（nvmet 子系统与密钥同时就位） ============================
+
+NVMET_CAPS = {"base_nqn": "nqn.2026-07.com.test", "cd": False, "backend": "nvmet"}
+
+
+def _make_nvmet(mock_agent_client) -> None:
+    mock_agent_client.capabilities = lambda: dict(NVMET_CAPS)
+
+
+def _credential_exists(client, auth_headers, worker_id: str = "worker-01") -> bool:
+    return client.get(f"/workers/{worker_id}/credential", headers=auth_headers).json()["exists"]
+
+
+def test_generate_dhhc1_satisfies_contract():
+    """服务端生成器产出必过自检（生成与自检互为闭环），且两次生成不同。"""
+    first, second = _generate_dhhc1(), _generate_dhhc1()
+    assert first.startswith("DHHC-1:01:")
+    raw = base64.b64decode(first.split(":", 2)[2], validate=True)
+    assert len(raw) == 36  # 32 字节密钥 + CRC32 小端终值
+    assert zlib.crc32(raw[:-4]) == int.from_bytes(raw[-4:], "little")
+    _validate_dhhc1(first)  # 不抛即合法
+    assert first != second
+
+
+def test_disk_create_issues_credential_on_nvmet(client, auth_headers, mock_agent_client):
+    """nvmet 节点建盘即签发密钥并推送：密钥随子系统就位，无需人工设置。
+
+    推送携带明文（注入必需）；审计只记事件与哈希，密钥本体既不进审计也不经 API 回传。"""
+    res = client.post("/agents", json={
+        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "role": {"disk": True, "cd": False}, "tags": ["storage"],
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    _create_worker(client, auth_headers)
+    _make_nvmet(mock_agent_client)
+    pushes = []
+    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+
+    res = client.post("/workers/worker-01/luns/disk", json={
+        "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    disk_nqn = res.json()["disks"][0]["nqn"]
+
+    assert len(pushes) == 1
+    worker_id, secret, sub_nqns, _hosts = pushes[0]
+    assert worker_id == "worker-01" and secret is not None and sub_nqns == [disk_nqn]
+    _validate_dhhc1(secret)
+
+    body = client.get("/workers/worker-01/credential", headers=auth_headers).json()
+    assert body["exists"] is True and body["push"]["result"] == "ok"
+    assert secret not in client.get("/workers/worker-01/credential", headers=auth_headers).text
+
+    ops = settings.operations_file.read_text(encoding="utf-8")
+    assert '"credential.issue"' in ops and secret not in ops
+    assert _secret_hash(secret)[:15] == body["secret_hash"]
+
+
+def test_disk_create_keeps_existing_credential_on_nvmet(client, auth_headers, mock_agent_client):
+    """已有密钥的 worker 再建盘不轮换：按 Worker 跟盘，多盘共用一把（updated_at 不动）。"""
+    res = client.post("/agents", json={
+        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "role": {"disk": True, "cd": False}, "tags": ["storage"],
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    _create_worker(client, auth_headers)
+    secret = make_secret()
+    client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
+    before = client.get("/workers/worker-01/credential", headers=auth_headers).json()
+    _make_nvmet(mock_agent_client)
+    pushes = []
+    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+
+    res = client.post("/workers/worker-01/luns/disk", json={
+        "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+
+    assert pushes == [("worker-01", secret, [res.json()["disks"][0]["nqn"]], [HOST_NQN])]
+    after = client.get("/workers/worker-01/credential", headers=auth_headers).json()
+    assert after["secret_hash"] == before["secret_hash"]
+    assert after["created_at"] == before["created_at"]
+    assert '"credential.issue"' not in settings.operations_file.read_text(encoding="utf-8")
+
+
+def test_disk_create_no_credential_on_non_nvmet(client, auth_headers, mock_agent_client):
+    """非 nvmet 后端不签发（stgt 默认）：DHHC-1 是 NVMe-oF 专属，iSCSI 链路不受影响。"""
+    res = client.post("/agents", json={
+        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "role": {"disk": True, "cd": False}, "tags": ["storage"],
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    _create_worker(client, auth_headers)
+    pushes = []
+    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+
+    res = client.post("/workers/worker-01/luns/disk", json={
+        "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+
+    assert pushes == [] and _credential_exists(client, auth_headers) is False
+    assert '"credential.issue"' not in settings.operations_file.read_text(encoding="utf-8")
+
+
+def test_batch_disk_create_issues_credentials(client, auth_headers, mock_agent_client):
+    """批量建盘 N 台 = N 份密钥一次到位，各 worker 密钥互不相同。"""
+    res = client.post("/agents", json={
+        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "role": {"disk": True, "cd": False}, "enabled": True, "tags": ["storage"],
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    for worker_id in ("w-01", "w-02"):
+        _create_worker(client, auth_headers, worker_id)
+    _make_nvmet(mock_agent_client)
+    pushes = {}
+    mock_agent_client.set_credential = (lambda w, s, subs, hosts:
+                                        pushes.__setitem__(w, s) or {})
+
+    res = client.post("/workers/luns/disk/batch", json={
+        "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+        "workers": ["w-01", "w-02"],
+    }, headers=auth_headers)
+    assert res.status_code == 200, res.text
+    assert [item["worker_id"] for item in res.json()["succeeded"]] == ["w-01", "w-02"]
+
+    assert sorted(pushes) == ["w-01", "w-02"]
+    assert all(secret is not None for secret in pushes.values())
+    assert len(set(pushes.values())) == 2
+    for worker_id in ("w-01", "w-02"):
+        assert _credential_exists(client, auth_headers, worker_id) is True

@@ -25,6 +25,7 @@ class AgentConfig:
     storager_ip: str | None = None
     enabled: bool = True
     tags: tuple[str, ...] = ()
+    remark: str = ""
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -34,11 +35,12 @@ class AgentConfig:
             "role": {"disk": self.role_disk, "cd": self.role_cd},
             "enabled": self.enabled,
             "tags": list(self.tags),
+            "remark": self.remark,
         }
 
 
 class AgentClient:
-    """控制面 → Agent 的 mTLS 客户端（K8S 同构：apiserver 持自身 client cert 访问 kubelet）。
+    """控制面 → Agent 的 mTLS 客户端（控制面持自身客户端证书访问 Agent）。
 
     身份 = 控制面组件证书（CN=control-plane，内部 CA 签发）；对端 agent 以
     uvicorn ssl_cert_reqs=2 + 应用层 CN 匹配校验。缺证书材料时拒绝连接

@@ -75,7 +75,9 @@ class TestWorkerCreate:
         assert res.status_code == 409
         assert "not in pool" in res.json()["detail"]
 
-    def test_requires_token(self, client):
+    def test_requires_token(self, client, monkeypatch):
+        """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
+        monkeypatch.setenv("KURRENT_CP_INSECURE", "")
         assert client.post("/workers", json={"worker_id": "worker-01"}).status_code == 401
         assert client.get("/workers").status_code == 401
 
@@ -187,6 +189,45 @@ class TestWorkerDisks:
         assert disk["filename"] == f"worker-01.ubuntu.{disk['os_tag']}.img"
         assert disk["agent"] == "ag-01"
         assert disk["source"] == {"type": "master", "name": "ubuntu-24.04-master"}
+
+    def test_create_disk_disabled_agent_409(self, client, auth_headers, register_agent):
+        """enabled=排空语义：显式点名停用节点建盘 → 409（不碰存量是另一条边界，见 trust_chain）。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        res = client.put("/agents/ag-01", json={
+            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+            "tags": ["storage"], "enabled": False,
+        }, headers=auth_headers)
+        assert res.status_code == 200
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+            "disk_agent": "ag-01",
+        }, headers=auth_headers)
+        assert res.status_code == 409
+        assert "disabled" in res.json()["detail"]
+
+    def test_batch_disk_disabled_and_missing_agent(self, client, auth_headers, register_agent):
+        """批量建盘逐项独立：停用节点 → 409 文案；不存在的 agent → 清晰 404 文案
+        （回归：agents.get 抛 KeyError，原死代码 `if not disk_agent` 使其落成 500 "'xx'"）。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-02"}, headers=auth_headers)
+        res = client.put("/agents/ag-01", json={
+            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+            "tags": ["storage"], "enabled": False,
+        }, headers=auth_headers)
+        assert res.status_code == 200
+        res = client.post("/workers/luns/disk/batch", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+            "targets": [
+                {"worker_id": "worker-01", "agent": "ag-01"},
+                {"worker_id": "worker-02", "agent": "ag-gone"},
+            ],
+        }, headers=auth_headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["succeeded"] == []
+        failed = {item["worker_id"]: item["error"] for item in body["failed"]}
+        assert "disabled" in failed["worker-01"]
+        assert failed["worker-02"] == "agent not found: ag-gone"
 
     def test_create_disk_duplicate_os_409(self, client, auth_headers, register_agent):
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
@@ -387,3 +428,22 @@ class TestWorkerDelete:
         }, headers=auth_headers)
         res = client.delete("/workers/worker-01", params={"delete_disk": "true"}, headers=auth_headers)
         assert res.status_code == 200
+
+    def test_delete_worker_with_deregistered_agent(self, client, auth_headers, register_agent):
+        """登记缺失韧性（删除语义 = 仅清台账）：节点登记删除后，其上的 Worker 仍可删——
+        凭据推送跳过、target 视为已缺失；不带 ignore_missing 时报清晰 404 而非 500。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "master", "os": "ubuntu", "name": "m",
+        }, headers=auth_headers)
+        assert res.status_code == 201, res.text
+        assert client.delete("/agents/ag-01", headers=auth_headers).status_code == 200
+        # 回归：原 KeyError（agents.get / _delete_target）落成 500 "'ag-01'"
+        res = client.delete("/workers/worker-01", headers=auth_headers)
+        assert res.status_code == 404
+        assert "agent not registered" in res.json()["detail"]["error"]
+        # 带 ignore_missing：删除成功
+        res = client.delete("/workers/worker-01", params={"ignore_missing_target": "true"},
+                            headers=auth_headers)
+        assert res.status_code == 200
+        assert client.get("/workers/worker-01", headers=auth_headers).status_code == 404
