@@ -36,6 +36,9 @@ const STATE_OPTIONS = (t) => [
 const TTL_OPTIONS = (t) =>
   [5, 15, 30, 60].map((v) => ({ value: String(v), label: t('devices.regWindow.ttlUnit', { n: v }) }))
 
+// 注册窗口放行额度服务端上限（与 control_plane config REGISTRATION_WINDOW_MAX_DEVICES_UPPER 对齐）
+const MAX_DEVICES_UPPER = 1000
+
 // 解析配对清单：每行 mac, worker_id[, manufacturer, product, serial, uuid]（逗号/制表符分隔，# 注释行忽略）
 function parseManifestLines(text) {
   const lines = text
@@ -92,10 +95,11 @@ export default function Devices() {
   const [bindingsError, setBindingsError] = useState(null)
 
   // ===== 注册窗口（部署期：仅窗口开启期间新设备上报可携公钥注册入池） + 设备身份验签强制开关 =====
-  const [regWindow, setRegWindow] = useState(null) // null = 未加载；{ open, opened_at, ttl_minutes, closes_at, remaining_seconds }
+  const [regWindow, setRegWindow] = useState(null) // null = 未加载；{ open, opened_at, ttl_minutes, closes_at, remaining_seconds, max_devices, admitted, remaining_devices, quota_exhausted }
   const [windowBusy, setWindowBusy] = useState(false)
   const [windowError, setWindowError] = useState(null)
   const [ttlChoice, setTtlChoice] = useState('30')
+  const [maxChoice, setMaxChoice] = useState('') // 放行额度（台），'' = 不限
   const [countdown, setCountdown] = useState(0) // 本地逐秒递减的剩余秒数（以服务端 remaining_seconds 为基准）
   const [enforcement, setEnforcementState] = useState(null)
   const [enforcementBusy, setEnforcementBusy] = useState(false)
@@ -217,12 +221,29 @@ export default function Devices() {
     if (regWindow?.open && countdown <= 0) fetchRegistrationWindow()
   }, [countdown, regWindow?.open, fetchRegistrationWindow])
 
-  // 开启注册窗口：窗口开启期间新设备上报可携公钥自动注册入池（TTL 到期自动关闭）
+  // 窗口开启期间每 10s 重拉窗口状态：已放行数派生自设备台账，不轮询就看不到额度被消耗。
+  // 同时刷新设备列表（多选 / 绑定向导进行中除外，避免打断选择），否则计数在涨、表格却还是旧行。
+  useEffect(() => {
+    if (!regWindow?.open) return undefined
+    const iv = setInterval(() => {
+      fetchRegistrationWindow()
+      if (!unbindMode && !wizardOpen) fetchDevices()
+    }, 10000)
+    return () => clearInterval(iv)
+  }, [regWindow?.open, fetchRegistrationWindow, fetchDevices, unbindMode, wizardOpen])
+
+  // 开启注册窗口：窗口开启期间新设备上报可携公钥自动注册入池（TTL 到期自动关闭；额度用尽即停）
   const handleOpenWindow = async () => {
     setWindowBusy(true)
     setWindowError(null)
+    const maxDevices = maxChoice === '' ? null : Number(maxChoice)
+    if (maxDevices !== null && (!Number.isInteger(maxDevices) || maxDevices < 1 || maxDevices > MAX_DEVICES_UPPER)) {
+      setWindowError(t('devices.regWindow.maxInvalid', { max: MAX_DEVICES_UPPER }))
+      setWindowBusy(false)
+      return
+    }
     try {
-      const res = await openRegistrationWindow(Number(ttlChoice))
+      const res = await openRegistrationWindow(Number(ttlChoice), maxDevices)
       setRegWindow(res)
       setCountdown(res.remaining_seconds || 0)
     } catch (e) {
@@ -238,7 +259,7 @@ export default function Devices() {
     setWindowError(null)
     try {
       await closeRegistrationWindow()
-      setRegWindow({ open: false, opened_at: null, ttl_minutes: null, closes_at: null, remaining_seconds: 0 })
+      setRegWindow({ open: false, opened_at: null, ttl_minutes: null, closes_at: null, remaining_seconds: 0, max_devices: null, admitted: 0, remaining_devices: null, quota_exhausted: false })
       setCountdown(0)
     } catch (e) {
       setWindowError(e.message)
@@ -450,7 +471,7 @@ export default function Devices() {
       if (wizardMode === 'manifest') {
         const pairs = wizardBody()
         if (pairs.length === 0) {
-          setWizardError(t('devices.wizard.emptyManifest'))
+          setWizardError(t('devices.wizard.manifestEmpty'))
           return
         }
         const res = await batchBindPreview({ mode: 'manifest', pairs })
@@ -991,12 +1012,16 @@ export default function Devices() {
         </div>
       )}
 
-      {/* 注册窗口面板：部署期开启窗口供新设备携公钥注册入池；窗口关闭后上报只记指纹不入池 */}
+      {/* 注册窗口面板：部署期开启窗口供新设备携公钥注册入池；窗口关闭/额度用尽后上报只记指纹不入池 */}
       <div className="reg-window-panel">
         <div className="reg-window-head">
           <span className="reg-window-title">{t('devices.regWindow.title')}</span>
-          <Badge variant={regWindow?.open ? 'ok' : 'default'}>
-            {regWindow?.open ? t('devices.regWindow.open') : t('devices.regWindow.closed')}
+          <Badge variant={regWindow?.quota_exhausted ? 'partial' : regWindow?.open ? 'ok' : 'default'}>
+            {regWindow?.quota_exhausted
+              ? t('devices.regWindow.quotaFull')
+              : regWindow?.open
+                ? t('devices.regWindow.open')
+                : t('devices.regWindow.closed')}
           </Badge>
         </div>
         <div className="reg-window-body">
@@ -1004,6 +1029,11 @@ export default function Devices() {
             <>
               <span className="reg-window-countdown" title={t('devices.regWindow.countdownHint')}>
                 {t('devices.regWindow.remaining', { time: fmtCountdown(countdown) })}
+              </span>
+              <span className="reg-window-quota" title={t('devices.regWindow.quotaHint')}>
+                {regWindow.max_devices === null || regWindow.max_devices === undefined
+                  ? t('devices.regWindow.admittedNoLimit', { n: regWindow.admitted ?? 0 })
+                  : t('devices.regWindow.admitted', { n: regWindow.admitted ?? 0, max: regWindow.max_devices })}
               </span>
               <Button variant="danger" onClick={handleCloseWindow} disabled={windowBusy}>
                 {t('devices.regWindow.closeBtn')}
@@ -1019,6 +1049,16 @@ export default function Devices() {
                 options={TTL_OPTIONS(t)}
                 style={{ minWidth: 110 }}
               />
+              <Input
+                label=""
+                name="reg-max"
+                type="number"
+                value={maxChoice}
+                onChange={(e) => setMaxChoice(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                placeholder={t('devices.regWindow.maxPlaceholder')}
+                style={{ width: 140 }}
+              />
+              <span className="reg-window-unit">{t('devices.regWindow.maxUnit')}</span>
               <Button variant="primary" onClick={handleOpenWindow} disabled={windowBusy}>
                 {t('devices.regWindow.openBtn')}
               </Button>

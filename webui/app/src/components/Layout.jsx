@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useState } from 'react'
+import { useAuth } from '../auth'
 import { useI18n } from '../i18n'
 import './Layout.css'
 
@@ -33,6 +34,12 @@ const ICON_AGENTS = (
     <path d="M5 8h6M5 8l5.5-4M5 8l5.5 4" />
   </>
 )
+const ICON_CREDENTIALS = (
+  <>
+    <circle cx="5" cy="8" r="2.5" />
+    <path d="M7.5 8H14M11 8v2.5M14 8v2" />
+  </>
+)
 const ICON_OPERATIONS = (
   <>
     <circle cx="8" cy="8" r="5.5" />
@@ -58,6 +65,7 @@ function NavIcon({ children }) {
 
 export default function Layout() {
   const { t, locale, setLocale } = useI18n()
+  const { signOut } = useAuth()
   const [collapsed, setCollapsed] = useState(false)
 
   const NAV_ITEMS = [
@@ -65,6 +73,7 @@ export default function Layout() {
     { to: '/workers', label: t('nav.workers'), icon: ICON_WORKERS },
     { to: '/devices', label: t('nav.devices'), icon: ICON_DEVICES },
     { to: '/agents', label: t('nav.agents'), icon: ICON_AGENTS },
+    { to: '/credentials', label: t('nav.credentials'), icon: ICON_CREDENTIALS },
     { to: '/operations', label: t('nav.operations'), icon: ICON_OPERATIONS },
   ]
 
@@ -98,6 +107,14 @@ export default function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
+          <button className="logout-btn" onClick={signOut} title={t('auth.signOut')}>
+            <NavIcon>
+              <path d="M6 2.5H3.5v11H6" />
+              <path d="M13 8H6.5" />
+              <path d="M10.5 5.5 13 8l-2.5 2.5" />
+            </NavIcon>
+            <span className="nav-label">{t('auth.signOut')}</span>
+          </button>
           <div className="lang-switch">
             <button
               className={`lang-btn${locale === 'zh-CN' ? ' lang-active' : ''}`}

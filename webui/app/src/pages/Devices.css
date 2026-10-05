@@ -419,6 +419,18 @@
   cursor: help;
 }
 
+.reg-window-quota {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--gray-600);
+  cursor: help;
+}
+
+.reg-window-unit {
+  font-size: 12px;
+  color: var(--gray-600);
+}
+
 .reg-window-enforce {
   display: inline-flex;
   align-items: center;

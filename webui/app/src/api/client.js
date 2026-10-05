@@ -1,15 +1,52 @@
 const BASE = '/api/cp';
 
-function getToken() {
-  return import.meta.env.VITE_CP_TOKEN || localStorage.getItem('cp_token') || '';
+// 会话失活全局钩子（AuthProvider 注册）：任何请求 401 → 自动回登录页
+let unauthorizedHandler = null;
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler;
 }
 
-export function hasToken() {
-  return !!getToken();
+// 从错误响应体提取人类可读的 detail（与 CLI detailOf，cli/api.go 同语义）：
+// - 字符串 detail 直用；
+// - {agent, error} 对象契约（API 文档「LUN 管理」节）提取 error；
+// - FastAPI 422 数组映射为 "field.path: msg"；
+// - 其余对象 JSON 序列化——防御未知结构裸奔成 "[object Object]"。
+export function extractDetail(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const { detail } = payload;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => {
+        if (!d || typeof d !== 'object') return String(d);
+        const msg = typeof d.msg === 'string' ? d.msg : JSON.stringify(d);
+        const path = Array.isArray(d.loc) ? d.loc.slice(1).join('.') : '';
+        return path ? `${path}: ${msg}` : msg;
+      })
+      .join('; ');
+  }
+  for (const c of [detail, payload.error, payload.message]) {
+    if (typeof c === 'string' && c) return c;
+    if (c && typeof c === 'object') {
+      if (typeof c.error === 'string' && c.error) return c.error;
+      try {
+        return JSON.stringify(c);
+      } catch {
+        // 循环引用等无法序列化：继续尝试下一候选
+      }
+    }
+  }
+  try {
+    // 无已知字段的非标准响应体：原样 JSON（空对象除外，交由调用侧落 HTTP 状态兜底）
+    const text = JSON.stringify(payload);
+    return text && text !== '{}' ? text : '';
+  } catch {
+    return '';
+  }
 }
 
 async function request(path, options = {}) {
-  const { method = 'GET', body, params } = options;
+  const { method = 'GET', body, params, raw = false, sessionToken = '' } = options;
 
   let url = `${BASE}${path}`;
   if (params) {
@@ -23,9 +60,10 @@ async function request(path, options = {}) {
 
   const headers = {};
 
-  const token = getToken();
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (sessionToken) {
+    // 仅 POST /session 使用：管理 token 换会话 Cookie（此后凭据在 HttpOnly Cookie 中，
+    // 前端不存任何 token——localStorage 明文凭据已退役）
+    headers['Authorization'] = `Bearer ${sessionToken}`;
   }
 
   if (body) {
@@ -36,29 +74,46 @@ async function request(path, options = {}) {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin', // 会话 Cookie（HttpOnly，登录态）随同源请求携带
   });
 
   if (!res.ok) {
+    if (res.status === 401 && !raw && unauthorizedHandler) {
+      unauthorizedHandler();
+    }
     let detail = '';
+    let payload = null;
     try {
-      const err = await res.json();
-      if (Array.isArray(err.detail)) {
-        // FastAPI 422: detail 是字段校验错误数组
-        detail = err.detail
-          .map((d) => `${(d.loc || []).slice(1).join('.')}: ${d.msg}`)
-          .join('; ');
-      } else {
-        detail = err.detail || err.error || err.message || JSON.stringify(err);
-      }
+      payload = await res.json();
+      detail = extractDetail(payload);
     } catch {
+      // 非 JSON 响应（如网关 HTML）：退回状态文本
       detail = res.statusText;
     }
-    const error = new Error(detail || `HTTP ${res.status}`);
+    const error = new Error(detail || res.statusText || `HTTP ${res.status}`);
     error.status = res.status;
+    // 原始响应体：detail 之外的字段（如放置失败的 excluded 逐节点原因）调用侧按需自取
+    error.payload = payload;
     throw error;
   }
 
   return res.json();
+}
+
+// ===== Auth（会话与身份） =====
+export function whoami() {
+  // 探测当前凭据：浏览器携带管理证书（mTLS）→ 200 直接进入；否则 401 → 登录页
+  return request('/whoami', { raw: true });
+}
+
+export function sessionLogin(token) {
+  // 管理 token → POST /session 换 HttpOnly 会话 Cookie（TTL 7 天滑动续期）
+  return request('/session', { method: 'POST', raw: true, sessionToken: token });
+}
+
+export function sessionLogout() {
+  // 登出：清除会话 Cookie（无状态签名会话，服务端无吊销态）
+  return request('/session', { method: 'DELETE', raw: true });
 }
 
 // ===== Health =====
@@ -73,13 +128,19 @@ export function bootVars(params) {
 
 // ===== Settings =====
 export function getRegistrationWindow() {
-  // 注册窗口状态: { open, opened_at, ttl_minutes, closes_at, remaining_seconds }（TTL 到期自动关闭，懒计算）
+  // 注册窗口状态: { open, opened_at, ttl_minutes, closes_at, remaining_seconds,
+  //                max_devices, admitted, remaining_devices, quota_exhausted }
+  // （TTL 到期自动关闭，懒计算；额度用尽后不再放行新设备）
   return request('/settings/registration-window');
 }
 
-export function openRegistrationWindow(ttlMinutes) {
-  // TTL 1-60 分钟硬上限（代码层不可配永久）；已开启返回 409（先关闭再开）
-  return request('/settings/registration-window', { method: 'POST', body: { ttl_minutes: ttlMinutes } });
+export function openRegistrationWindow(ttlMinutes, maxDevices = null) {
+  // TTL 1-60 分钟硬上限（代码层不可配永久）；max_devices 1-1000，null = 不限
+  // 已开启返回 409（先关闭再开）
+  return request('/settings/registration-window', {
+    method: 'POST',
+    body: { ttl_minutes: ttlMinutes, max_devices: maxDevices },
+  });
 }
 
 export function closeRegistrationWindow() {
@@ -105,12 +166,29 @@ export function updateAgent(agentId, data) {
 }
 
 export function issueBootstrapToken() {
-  // 签发集群级通用 bootstrap token（kubeadm token create 同构）：不绑节点，每次新签
+  // 签发集群级通用 bootstrap token：不绑节点，每次新签
   return request('/pki/tokens', { method: 'POST' });
 }
 
 export function probeAgent(data) {
   return request('/agents/probe', { method: 'POST', body: data });
+}
+
+// ===== Credentials（token 台账：列表 / 吊销 / 签发管理 token） =====
+export function getTokens() {
+  // 未过期 token 条目：{token_id, usage, groups, component, agent_id, name, created_at, expires_at}
+  // 不返回明文（不可恢复）与 hash；created_at 对旧条目为空串
+  return request('/pki/tokens');
+}
+
+export function revokeToken(tokenId) {
+  // 吊销 = 删条目（立即失效）；不存在 → 404
+  return request(`/pki/tokens/${tokenId}`, { method: 'DELETE' });
+}
+
+export function issueAdminToken() {
+  // 签发管理 token（认证器链 Bearer / WebUI 登录）；明文仅本次响应可见
+  return request('/pki/tokens', { method: 'POST', body: { usage: 'admin' } });
 }
 
 // ===== Agent LUNs =====
@@ -202,6 +280,47 @@ export function setWorkerDefaultBoot(workerId, data) {
 export function updateWorkerMac(workerId, mac) {
   // 修改 MAC 绑定（hostname 不变），审计记录旧/新 MAC
   return request(`/workers/${workerId}/mac`, { method: 'PUT', body: { mac } });
+}
+
+// ===== Worker 凭据（NVMe-oF DHHC-1：查看 / 设置 / 吊销） =====
+export function getWorkerCredential(workerId) {
+  // { worker_id, exists, secret_hash?, created_at?, updated_at?,
+  //   push: { result: ok|failed|pending|n/a|none, updated_at, agents: [{agent_id, result, error?, updated_at}] } }
+  return request(`/workers/${encodeURIComponent(workerId)}/credential`);
+}
+
+export function setWorkerCredential(workerId, secret) {
+  // 设置/轮换 DHHC-1 密钥；响应含逐 Agent 推送状态（未送达由控制面对账线程自动重试）
+  return request(`/workers/${encodeURIComponent(workerId)}/credential`, {
+    method: 'PUT',
+    body: { secret },
+  });
+}
+
+export function revokeWorkerCredential(workerId) {
+  return request(`/workers/${encodeURIComponent(workerId)}/credential`, { method: 'DELETE' });
+}
+
+// crc32：CRC-32/ISO-HDLC（与 zlib.crc32 一致）；DHHC-1 载荷尾 4 字节为其小端序
+export function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const b of bytes) {
+    crc ^= b;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// generateDHHC1：就地生成 32 字节密钥（DHHC-1:01:<base64(key + CRC32 小端)>，固件 2.1 契约）。
+// 明文不经浏览器持久化：仅随本次请求发给控制面，固件经 /boot-vars 注入。
+export function generateDHHC1() {
+  const key = crypto.getRandomValues(new Uint8Array(32));
+  const payload = new Uint8Array(36);
+  payload.set(key);
+  new DataView(payload.buffer).setUint32(32, crc32(key), true);
+  return 'DHHC-1:01:' + btoa(String.fromCharCode(...payload));
 }
 
 export function getWorkerStatus(workerId) {

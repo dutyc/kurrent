@@ -95,6 +95,32 @@
   border-top: 1px solid var(--border);
 }
 
+/* 登出（会话 Cookie 清除；视觉对齐 nav-link） */
+.logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 0;
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--gray-600);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.logout-btn:hover {
+  color: var(--gray-900);
+}
+
+.sidebar.collapsed .logout-btn {
+  justify-content: center;
+  padding: 8px 0;
+}
+
 .lang-switch {
   display: flex;
   align-items: center;

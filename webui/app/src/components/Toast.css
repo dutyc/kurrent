@@ -1,0 +1,71 @@
+/* 结果通知：固定右下角，不进页面流；与全局弹窗同款边框/阴影语言（单色） */
+.toast-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.toast {
+  min-width: 240px;
+  max-width: 380px;
+  padding: 10px 12px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
+}
+
+/* 失败要一眼看见：左侧重墨条 + 深色描边（沿用 badge-error 的反色强调） */
+.toast-error {
+  border-color: var(--gray-900);
+  border-left: 3px solid var(--black);
+}
+
+.toast-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.toast-msg {
+  flex: 1;
+  font-size: 13px;
+  color: var(--black);
+}
+
+.toast-close {
+  border: none;
+  background: none;
+  color: var(--gray-400);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.toast-close:hover {
+  color: var(--black);
+}
+
+.toast-items {
+  list-style: none;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--gray-600);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.toast-items b {
+  font-weight: 500;
+  color: var(--black);
+}
