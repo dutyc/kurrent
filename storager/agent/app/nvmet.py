@@ -1,7 +1,7 @@
 """NVMe-oF 后端（C4，2026-08-22 裁定：宿主原生 nvmet + Agent HTTP 调用）。
 
 组件（按依赖顺序）：
-- NvmetHostClient：urllib 标准库 HTTPS 客户端（不加依赖），mTLS 用本组件 client cert 认证（K8S 同构）
+- NvmetHostClient：urllib 标准库 HTTPS 客户端（不加依赖），mTLS 用本组件 client cert 认证
 - NvmetCredentialCache：按 Worker 跟盘的凭据缓存（JSON 落盘 0600）+ hosts 矩阵同步与幂等重放
 - NvmetBackend：Backend 接口的第三实现（不继承基类——基类 __init__ 初始化 docker 客户端，
   本后端无 docker 依赖，且直接继承会与 main 循环 import；接口契约与 StgtBackend/LioBackend 一致：
@@ -58,7 +58,7 @@ def _http_detail(exc: urllib.error.HTTPError) -> str:
 class NvmetHostClient:
     """nvmet-host 宿主服务 HTTPS 客户端（urllib 标准库，避免加依赖）。
 
-    本组件是宿主服务的唯一调用方：mTLS（K8S 同构，2026-08-31）——
+    本组件是宿主服务的唯一调用方：mTLS——
     用本组件的 client cert（pki_dir/client.{crt,key}）向 nvmet-host 认证，
     服务端证书由内部 CA（pki_dir/ca.crt）校验链 + SAN 校验。"""
 
@@ -69,7 +69,8 @@ class NvmetHostClient:
         ctx.load_cert_chain(str(pki_dir / "client.crt"), str(pki_dir / "client.key"))
         self.ctx = ctx
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> Any:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 timeout: float | None = None) -> Any:
         data = None
         headers = {}
         if body is not None:
@@ -77,7 +78,7 @@ class NvmetHostClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(f"{self.base_url}{path}", data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=timeout or self.timeout) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as exc:
@@ -85,8 +86,9 @@ class NvmetHostClient:
         except (urllib.error.URLError, OSError) as exc:
             raise NvmetHostError(0, f"nvmet host unreachable: {exc}") from None
 
-    def healthz(self) -> dict:
-        return self._request("GET", "/healthz") or {}
+    def healthz(self, timeout: float | None = None) -> dict:
+        """探活（configfs 就绪度）；healthz 投影用短超时，其他场景用客户端默认超时。"""
+        return self._request("GET", "/healthz", timeout=timeout) or {}
 
     def capabilities(self) -> dict:
         return self._request("GET", "/capabilities") or {}
@@ -106,7 +108,6 @@ class NvmetHostClient:
 
     def delete_host(self, nqn: str, hostnqn: str) -> dict:
         return self._request("DELETE", f"/subsystems/{_quote(nqn)}/hosts/{_quote(hostnqn)}") or {}
-
 
 class NvmetCredentialCache:
     """按 Worker 跟盘的凭据缓存（控制面推送驱动）。
@@ -217,12 +218,30 @@ def nqn_to_iqn(nqn: str) -> str:
     return "iqn." + nqn
 
 
+def disk_gpt_layout(path: str) -> str:
+    """盘文件 GPT 扇区布局探测：'4k' | '512' | 'none'（无 GPT 签名或读取失败）。
+
+    GPT 头位于 LBA1：512 字节扇区盘 → offset 512；4096 字节扇区盘 → offset 4096。
+    用途：nvmet file backend 的逻辑块大小跟随底层 FS 块（典型 4096 B），512 扇区布局的
+    母盘在 4K 导出下被发起端按 4K 解释、EDK2 找不到 ESP（生产实测 sanboot EFI_NOT_FOUND），
+    建盘前须拒绝（NvmetBackend.validate_disk_file）。"""
+    try:
+        with open(path, "rb") as f:
+            for offset, layout in ((4096, "4k"), (512, "512")):
+                f.seek(offset)
+                if f.read(8) == b"EFI PART":
+                    return layout
+    except OSError:
+        pass
+    return "none"
+
+
 class NvmetBackend:
     """nvmet 后端（宿主原生，第三实现）。
 
     不继承 Backend 基类（其 __init__ 初始化 docker 客户端，本后端无 docker 依赖；
     直接继承会与 main 循环 import）——接口契约与 StgtBackend/LioBackend 一致，
-    由 main._make_backend 按 KURRENT_BACKEND=nvmet 分支实例化。
+    由 main._make_backend 按声明 spec.agent.backend=nvmet 分支实例化。
     子系统标识使用 NQN（盘标识权威）：入参 iqn 为控制面盘标识的派生形态（由盘 NQN 同后缀
     变换而来），内部经 to_nqn 还原为 NQN 写入 configfs（nvmet 不接受 iqn. 前缀的子系统 NQN）。"""
 
@@ -233,6 +252,25 @@ class NvmetBackend:
         self.disk_dir = disk_dir
         self.nqn_base = nqn_base.rstrip(":")
         self.iqn_base = nqn_to_iqn(self.nqn_base)  # 派生：scan 候选标识（iSCSI 形态）
+
+    def validate_disk_file(self, path: str) -> None:
+        """母盘克隆前的盘文件校验（nvmet file backend 4K 块导出的硬约束）。
+
+        nvmet file backend 按底层 FS 块（典型 4096 B）导出逻辑块：512 字节扇区布局的
+        GPT 母盘在 4K 导出下，发起端按 4K 扇区解释分区表，EDK2 找不到 ESP
+        （生产实测 sanboot EFI_NOT_FOUND）——建盘阶段直接拒绝并给出重建指引；
+        无 GPT 签名（raw/空盘）仅告警放行，由使用方自负。"""
+        layout = disk_gpt_layout(path)
+        if layout == "512":
+            raise HTTPException(400, (
+                f"master GPT is 512-byte-sector layout: {os.path.basename(path)}; "
+                "nvmet file backend exports 4K logical blocks (backing FS block size) and "
+                "EDK2 cannot find the ESP on such a master (sanboot EFI_NOT_FOUND). "
+                "Rebuild master GPT with 4096-byte sectors "
+                "(e.g. losetup --sector-size 4096 then sgdisk/parted, or partition on a 4K-native device)"
+            ))
+        if layout == "none":
+            log.warning(f"master disk has no GPT signature (raw or MBR image?): {path}")
 
     def create_target(self, iqn: str, backing: str, cd: bool) -> None:
         if cd:
@@ -287,7 +325,7 @@ class NvmetBackend:
         # 母盘（*_tpl_*）由 MasterScanner 单独管理（克隆建盘专用），
         # 目录扫描跳过母盘文件，不为其创建普通子系统
         names = [n for n in os.listdir(self.disk_dir)
-                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n]
+                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n.lower()]
         created, skipped = [], []
         # 子系统标识是 NQN（list_targets 返回）：existing 集合统一 NQN 形态
         existing = {t.get("nqn") or t.get("iqn") for t in self.list_targets()}

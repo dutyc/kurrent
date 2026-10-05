@@ -69,14 +69,15 @@ def fake_host():
             self.calls: list = []
             self.subsystems: dict = {}
             self.unreachable = False
+            self.configfs = True
 
         def _check(self):
             if self.unreachable:
                 raise NvmetHostError(0, "nvmet host unreachable: test")
 
-        def healthz(self):
+        def healthz(self, timeout=None):
             self._check()
-            return {"status": "ok", "configfs": True}
+            return {"status": "ok", "configfs": self.configfs}
 
         def capabilities(self):
             self._check()
@@ -137,8 +138,11 @@ def agent_client(monkeypatch, fake_host, tmp_path):
 
     host, calls = fake_host
     cache = NvmetCredentialCache(host, str(tmp_path / "agent-creds.json"))
-    fake = NvmetBackend(host, cache, str(tmp_path / "disks"), "nqn.2026-07.com.test")
+    disk_dir = tmp_path / "disks"
+    disk_dir.mkdir()
+    fake = NvmetBackend(host, cache, str(disk_dir), "nqn.2026-07.com.test")
     monkeypatch.setattr(agent_main, "backend", fake)
+    agent_main._backend_probe_cache.update(ts=0.0, value=None)  # healthz 探针缓存跨用例不残留
     client = TestClient(agent_main.app)
     return client, fake, calls
 

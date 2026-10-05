@@ -1,9 +1,14 @@
 """nvmet 宿主管理服务（NVMe-oF 存储接入 C4：宿主原生 nvmet + Agent HTTP 调用）。
 
-运行形态：存储节点宿主 root 运行（systemd unit），绑定 localhost + mTLS（内部 CA，
-与 agent 同构：bootstrap token 一次性引导 + 证书轮换 + 客户端证书鉴权）；
+运行形态：容器 `kurrent-nvmet-host`（`storager/nvmeof/docker-compose.yml`）——host 网络模式，
+监听 4841（`config.DEFAULT_HOST_PORT`），只对外提供 mTLS（内部 CA，与 agent 同构：派生
+bootstrap token 引导 + 证书轮换 + 客户端证书鉴权；token TTL 内可复用、不消耗）；因 Ubuntu
+docker-default AppArmor 会拒绝 configfs 写入，容器需豁免 AppArmor（见 nvmet-host README）。
 直接操作内核 configfs（/sys/kernel/config/nvmet）——subsystem/namespace/port/hosts(dhchap_key)。
-Agent 是唯一调用方（持有内部 CA 签发的 client cert）；盘文件管理仍归 Agent（本服务不挂载盘目录）。
+Agent 是唯一调用方（持有内部 CA 签发的 client cert，经 https://host.docker.internal:4841）。
+盘文件的创建/管理归 Agent（本服务不建盘、不删盘），但**必须能看见同一份盘目录**——
+configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，故 compose 把宿主盘目录
+挂到 `/srv/nvmet-disks`，device_path 按该前缀重拼（`config.DEFAULT_HOST_DISK_DIR`）。
 契约：blueprint/nvmeof-credential-design.md 第 6 节。
 
 configfs 语义要点（Linux v7.x nvmet）：
@@ -13,6 +18,8 @@ configfs 语义要点（Linux v7.x nvmet）：
   挂载全局 hosts/<HOSTNQN>（target 必须是 nvmet_host_type，否则 EINVAL）；
   symlink 目标由内核按进程 cwd 解析，须用绝对路径
 - 删除子系统前须先摘除 port 挂载（symlink），否则 EBUSY
+- 全局 hosts/<hostnqn> 被多个子系统 allowed_hosts 引用时 rmdir 返回 EBUSY（实测）；
+  回收仅在无引用者时执行（_gc_host）——多盘同 worker 逐个摘链接的中间态须保留条目
 """
 
 import logging
@@ -29,7 +36,7 @@ from .config import (  # noqa: E402
 )
 from .pki_client import ensure_pki
 
-# 组件 PKI 引导/轮换（K8S 同构）：证书未就绪抛错阻断启动（与 storager-agent 同语义）
+# 组件 PKI 引导/轮换：证书未就绪抛错阻断启动（与 storager-agent 同语义）
 ensure_pki()
 
 log = logging.getLogger("nvmet-host")
@@ -95,14 +102,19 @@ class NvmetManager:
                 if os.path.exists(enable):
                     self._write(ns, "enable", "0")
                 shutil.rmtree(ns, ignore_errors=True)
-        # 摘除 allowed_hosts/ 下的 host 准入挂载（default group 本身是内核目录，只 unlink 不 rmdir）
+        # 摘除 allowed_hosts/ 下的 host 准入挂载（default group 本身是内核目录，只 unlink 不 rmdir）；
+        # 收集 host 名用于本体删除后回收全局条目（无引用才删，见 _gc_host）
         allowed = os.path.join(sub, "allowed_hosts")
+        host_names: list[str] = []
         if os.path.isdir(allowed):
             for name in sorted(os.listdir(allowed)):
                 link = os.path.join(allowed, name)
                 if os.path.islink(link):
                     os.unlink(link)
+                host_names.append(name)
         shutil.rmtree(sub, ignore_errors=True)
+        for name in host_names:
+            self._gc_host(name)
 
     def list_subsystems(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -146,14 +158,38 @@ class NvmetManager:
 
     def delete_host(self, nqn: str, hostnqn: str) -> None:
         """移除 host 认证：先摘子系统 allowed_hosts 链接（configfs symlink
-        用 unlink，同 diag teardown 的 rm -f 语义），再 rmdir 全局 hosts/<hostnqn>。"""
+        用 unlink，同 diag teardown 的 rm -f 语义），再回收全局 hosts/<hostnqn>
+        ——仅当没有任何子系统仍链接它（见 _gc_host）。"""
         sub = self._sub_path(nqn)
         link = os.path.join(sub, "allowed_hosts", hostnqn)
         if os.path.lexists(link):
             os.unlink(link)
+        self._gc_host(hostnqn)
+
+    def _gc_host(self, hostnqn: str) -> None:
+        """全局 host 目录回收：无任何子系统引用时才删。
+
+        多盘同 worker 共用一个 hostnqn（一个子系统一块盘）：逐个摘链接期间全局
+        条目必须留着——实测内核 configfs 对仍被 allowed_hosts symlink 引用的目录
+        rmdir 返回 EBUSY；若此处强行删/报错，吊销会卡在第一个子系统（链接已摘、
+        目录删不掉），其余盘的旧密钥原样留存。"""
         host_dir = os.path.join(self.root, "hosts", hostnqn)
-        if os.path.isdir(host_dir):
+        if not os.path.isdir(host_dir) or self._host_referenced(hostnqn):
+            return
+        try:
             os.rmdir(host_dir)
+        except OSError as exc:
+            # 竞态兜底：扫描与删除之间若出现新链接（EBUSY）；未引用的残留条目本身无效果
+            log.warning("host gc skipped (%s): %s", hostnqn, exc)
+
+    def _host_referenced(self, hostnqn: str) -> bool:
+        base = os.path.join(self.root, "subsystems")
+        if not os.path.isdir(base):
+            return False
+        for nqn in os.listdir(base):
+            if os.path.lexists(os.path.join(base, nqn, "allowed_hosts", hostnqn)):
+                return True
+        return False
 
     def ensure_port(self, trtype: str = "tcp", adrfam: str = "ipv4", traddr: str = "0.0.0.0",
                     trsvcid: str = "4420") -> dict[str, str]:
@@ -218,7 +254,7 @@ class HostSet(BaseModel):
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（K8S 同构：kubelet --client-ca-file 信任模型）。
+    """mTLS 客户端证书鉴权（内部 CA 信任模型）。
 
     uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=内部 CA 起服：TLS 层
     强制客户端证书且校验链到内部 CA（无证书/链不符握手即被拒）；身份边界 =
@@ -304,9 +340,15 @@ if __name__ == "__main__":
     # 监听地址/端口为部署细节（host 网络，同机固定拓扑；agent 经 DEFAULT_NVMET_HOST_URL 访问）
     host = DEFAULT_HOST_ADDR
     port = DEFAULT_HOST_PORT
-    # 启动即配置 NVMe/TCP 端口（幂等）：裸端口不允许挂子系统，须先写全 addr_* 属性
-    manager.ensure_port()
-    # mTLS（K8S 同构）：serving cert + 内部 CA 校验客户端证书链（CERT_REQUIRED），
+    # 启动即配置 NVMe/TCP 端口（幂等）：裸端口不允许挂子系统，须先写全 addr_* 属性。
+    # 宿主前置未满足（nvmet 模块/configfs 挂载）时给出可操作报错——宿主侧由
+    # nvmeof/host-prepare.sh 就位（见 README）
+    try:
+        manager.ensure_port()
+    except OSError as exc:
+        log.error("宿主前置未满足（nvmet 模块 + configfs 挂载）: %s——宿主侧修复: sudo bash storager/nvmeof/host-prepare.sh", exc)
+        raise
+    # mTLS：serving cert + 内部 CA 校验客户端证书链（CERT_REQUIRED），
     # 与 storager-agent 的 uvicorn 参数一致；host 网络直连（无 docker-proxy），协议版本不限
     pki_dir = DEFAULT_PKI_DIR
     uvicorn.run(

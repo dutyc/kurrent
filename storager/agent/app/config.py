@@ -1,14 +1,14 @@
-"""节点声明式配置加载（K8S 同构：kubeadm JoinConfiguration）。
+"""节点声明式配置加载。
 
 配置来源：storager/kurrent.yaml（apiVersion/kind/metadata/spec 单文件节点权威配置，
 kurrent CLI 在 join 时生成与更新，手工业务键编辑此文件）；
 容器内挂载路径固定 /etc/kurrent/kurrent.yaml（KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
 
-分层职责（K8S 同构）：kurrent.yaml 只声明节点级业务配置（身份/加入凭据/数据面参数），
+分层职责：kurrent.yaml 只声明节点级业务配置（身份/加入凭据/数据面参数），
 容器内路径（pki/cp-ca/日志/缓存等挂载目标）属于部署清单 docker-compose.yml 职责，
 此处以模块常量固化（与 compose 挂载目标一致，单处维护）。
 
-校验语义（K8S 同构）：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入——
+校验语义：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入——
 配置错误在启动即失败，杜绝 .env 自由键值的静默偏差（ .env 仅保留
 docker-compose 插值键，业务配置全部收敛到此文件）。
 """
@@ -31,7 +31,7 @@ DEFAULT_ISCSI_CONTAINER = "storager-iscsi"                     # compose 服务�
 DEFAULT_PKI_DIR = "/etc/kurrent/pki"                           # compose: ${KURRENT_AGENT_PKI_HOST} → /etc/kurrent/pki
 DEFAULT_CP_CA = "/etc/kurrent/cp-ca.crt"                       # compose: server.crt → /etc/kurrent/cp-ca.crt:ro
 DEFAULT_NVMET_HOST_URL = "https://host.docker.internal:4841"    # 内部组件通讯地址（同机固定拓扑，部署事实）
-DEFAULT_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/agent.token"  # 通用引导凭据（kubeadm bootstrap-kubeconfig 同构，
+DEFAULT_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/agent.token"  # 通用引导凭据（TTL 内可复用，
                                                                      # compose: ../bootstrap → /etc/kurrent/bootstrap，join 写入）
 DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/nvmet-host.token"  # nvmet-host 派生凭据（agent enroll 按能力
                                                                                  # 下发落盘，供 nvmet-host 容器引导）
@@ -42,7 +42,7 @@ BackendType = Literal["nvmet", "stgt", "lio"]
 class AgentSpec(BaseModel):
     """spec.agent：数据面服务配置（后端/存储路径/命名空间/上报地址）。
 
-    diskDir 语义 = 宿主存储路径（数据目录声明，kubeletConfiguration.rootDirectory 类比）；
+    diskDir 语义 = 宿主存储路径（数据目录声明）；
     容器内挂载点由 compose 决定（DEFAULT_DISK_DIR），两者经 compose 卷挂载关联。
     """
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -54,17 +54,19 @@ class AgentSpec(BaseModel):
 
 
 class ControlPlaneSpec(BaseModel):
-    """spec.controlPlane：控制面入口（kubeadm 的 apiServerEndpoint 同构）。"""
+    """spec.controlPlane：控制面入口。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     url: str = Field(alias="url")
 
 
 class MetadataSpec(BaseModel):
-    """metadata：节点身份（name = agent_id，与组件证书 CN 一致）。"""
+    """metadata：节点身份（name = agent_id，由 kurrent join 自动生成，与组件证书 CN 一致；
+    remark = 备注，人类识别用，随首次 enroll 登记进控制面台账）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     name: str = Field(alias="name")
+    remark: str = Field("", alias="remark")
 
 
 class NodeSpec(BaseModel):
@@ -76,7 +78,7 @@ class NodeSpec(BaseModel):
 
 
 class NodeConfiguration(BaseModel):
-    """节点级配置根（apiVersion/kind/metadata/spec，kubeadm JoinConfiguration 同构）。"""
+    """节点级配置根（apiVersion/kind/metadata/spec）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: str = Field("kurrent.io/v1", alias="apiVersion")

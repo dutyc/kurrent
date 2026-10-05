@@ -1,13 +1,13 @@
 # NVMe-oF 后端独立编排：内核 nvmet target 在宿主，管理服务容器 kurrent-nvmet-host；与 iscsi/ 互斥。
 # 部署：cd storager/nvmeof && docker compose --env-file ../.env up -d
-# 前置（宿主）：modprobe nvmet nvmet-tcp + mount configfs（见 nvmet-host/README.md）
+# 前置（宿主）：sudo bash host-prepare.sh（nvmet/nvmet-tcp 模块 + configfs 挂载 + 重启持久化，见 nvmet-host/README.md）
 # 本文件为完整编排：含共享 Agent 服务（代码在 storager/agent/，配置来源：../kurrent.yaml，
-# kubeadm JoinConfiguration 同构节点声明式配置；.env 仅保留 compose 插值键）。
+# 节点声明式配置；.env 仅保留 compose 插值键）。
 # 注：storager-agent 服务块与 storager/iscsi/docker-compose.yml 保持一致。
 
 services:
   # ── 存储节点 Agent（控制面数据面接口）──
-  # 经 docker.sock 调度后端容器；配置来源：../kurrent.yaml（kurrent join 生成/更新，kubeadm 同构）
+  # 经 docker.sock 调度后端容器；配置来源：../kurrent.yaml（kurrent join 生成/更新）
   storager-agent:
     build:
       context: ../agent
@@ -32,16 +32,18 @@ services:
       - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
       # 节点声明式配置：agent/nvmet-host 挂载同一份只读配置
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
-      # 引导凭据目录（bootstrap-kubeconfig 同构，可写）：agent.token 由 kurrent join 写入；
+      # 引导凭据目录（可写）：agent.token 由 kurrent join 写入；
       # nvmet-host.token 为本组件 enroll 按能力派生后落盘（nvmet-host 容器只读共享）
       - ../bootstrap:/etc/kurrent/bootstrap
 
-  # ── NVMe-oF 宿主管理服务（KURRENT_BACKEND=nvmet 时启用）──
-  # 内核 nvmet target 在宿主（modprobe nvmet nvmet-tcp + 挂载 configfs，见 nvmet-host README）；
+  # ── NVMe-oF 宿主管理服务（声明 spec.agent.backend=nvmet 时启用）──
+  # 内核 nvmet target 在宿主（模块/configfs 由 host-prepare.sh 就位，见 nvmet-host README）；
   # 本容器只承载配置面管理进程：bind mount configfs 后普通 root 即可写入，无需 privileged。
   # host 网络模式：nvmet 监听 socket 由写 configfs 的进程（本容器）创建，绑定到该进程所在
   # 网络命名空间；host 模式下即宿主 netns，客户端（iPXE/QEMU）可直接访问 4420，容器重建不丢监听。
-  # Agent 经 https://host.docker.internal:4841 访问本服务（mTLS，见 ../kurrent.yaml 的 spec.agent.nvmetHostUrl）。
+  # Agent 经 https://host.docker.internal:4841 访问本服务（mTLS）；该地址是部署事实常量
+  # （storager/agent/app/config.py DEFAULT_NVMET_HOST_URL），不在节点声明里——声明出现
+  # spec.agent.nvmetHostUrl 会被拒（分层职责：容器内路径/内部通讯归 compose）。
   nvmet-host:
     build:
       context: ./nvmet-host
@@ -50,6 +52,14 @@ services:
     container_name: kurrent-nvmet-host
     restart: unless-stopped
     network_mode: host
+    # 健康检查：mTLS 探活 /healthz（带本组件 client cert；configfs 就绪才报健康）——
+    # 宿主前置缺失（模块/configfs）时如实标记 unhealthy，不再是「容器在跑但数据面不可用」
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,ssl,urllib.request as u; c=ssl.create_default_context(cafile='/etc/kurrent/pki/ca.crt'); c.load_cert_chain('/etc/kurrent/pki/client.crt','/etc/kurrent/pki/client.key'); raise SystemExit(0 if json.load(u.urlopen('https://127.0.0.1:4841/healthz', context=c, timeout=3)).get('configfs') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     # host 网络下无 Docker 注入的 host.docker.internal 解析：显式指到宿主 loopback，
     # 使同一份 kurrent.yaml 的 spec.controlPlane.url 对两组件语义一致（nginx 443 在宿主）
     extra_hosts:
@@ -65,12 +75,12 @@ services:
       # 须让本容器能看见盘文件（与 agent 的 KURRENT_DISK_DIR 一致，容器内路径可不同）
       - ${KURRENT_DISK_DIR:-../../storager_img}:/srv/nvmet-disks
       - /etc/localtime:/etc/localtime:ro
-      # 组件 PKI（K8S 同构）：nvmet-host 独立组件身份（cn=nvmet-<agent_id>）；
+      # 组件 PKI：nvmet-host 独立组件身份（cn=nvmet-<agent_id>）；
       # 宿主路径可用 KURRENT_NVMET_PKI_HOST 覆盖（kurrent join 按 agent_id 写入）
       - ${KURRENT_NVMET_PKI_HOST:-../../control_plane/state/pki/components/nvmet-storage-lio-01}:/etc/kurrent/pki
       - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
       # 节点声明式配置：与 agent 挂载同一份只读配置
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
       # 引导凭据目录（只读共享）：nvmet-host.token 由 agent enroll 按能力派生写入，
-      # 本组件引导时读取（bootstrap-kubeconfig 同构）
+      # 本组件引导时读取
       - ../bootstrap:/etc/kurrent/bootstrap:ro

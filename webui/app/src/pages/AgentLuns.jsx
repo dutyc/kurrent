@@ -148,7 +148,7 @@ export default function AgentLuns() {
   const rows = flattenTargets(luns)
   const boundCount = rows.filter((r) => bindingByIqn[r.iqn]).length
 
-  // 母盘 NQN：target 列表按 backing 文件名的 basename 匹配（母盘必有 target）
+  // 母盘 NQN：正常为空（scan 跳过母盘）；历史存量或误建过 target 时显示其 NQN，便于发现与清理
   const nqnByMaster = useMemo(() => {
     const map = {}
     for (const target of luns || []) {
@@ -387,6 +387,9 @@ export default function AgentLuns() {
                           <span className="mtr-name-text">{m.name}</span>
                           {hasTag && (
                             <Badge>{[m.os, m.os_version].filter(Boolean).join(' ')}</Badge>
+                          )}
+                          {m.gpt === '512' && (
+                            <Badge variant="degraded">{t('agentLuns.masterGpt512')}</Badge>
                           )}
                         </span>
                         <span className="mtr-size">{formatSize(m.size)}</span>
@@ -671,7 +674,7 @@ export default function AgentLuns() {
                         ? `${diskInfo.os}${diskInfo.os_version ? ' ' + diskInfo.os_version : ''}`
                         : '—'}
                     </span>
-                    <span className="lr-backing">{row.backing || t('agentLuns.unknown')}</span>
+                    <span className="lr-backing">{row.backing || '—'}</span>
                     <span className="lr-bound">
                       {binding ? (
                         <Badge variant="installing">

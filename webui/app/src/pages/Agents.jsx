@@ -23,10 +23,17 @@ function AgentCard({ agent, t, onEdit }) {
   return (
     <Card className="agent-card">
       <div className="agent-card-header">
-        <span className="agent-name">{agent.id}</span>
+        <div className="agent-card-title">
+          <span className="agent-name">{agent.id}</span>
+          {agent.remark && <span className="agent-remark">{agent.remark}</span>}
+        </div>
         <div className="agent-card-actions">
           {!agent.enabled && <Badge>{t('agents.disabled')}</Badge>}
-          {agent.health && <Badge>{agent.health}</Badge>}
+          {agent.health && (
+            <span title={agent.error || undefined}>
+              <Badge>{agent.health}</Badge>
+            </span>
+          )}
           <Button
             variant="ghost"
             className="agent-edit-btn"
@@ -98,8 +105,12 @@ function AgentCard({ agent, t, onEdit }) {
 // 编辑 Agent 的两步表单：探测 → 确认 / 修改参数 → 保存（id 只读，走路径参数）
 function AgentForm({ agentId, initial, onClose, onSaved }) {
   const { t } = useI18n()
+  // 自动登记（tags 含 auto）的节点：地址由节点声明管理（renew 自动对齐），控制面只读；
+  // 手工登记节点仍可改
+  const declarationManaged = (initial?.tags || []).includes('auto')
   const [form, setForm] = useState(() => ({
     base_url: initial?.base_url || '',
+    remark: initial?.remark || '',
     storager_ip: initial?.storager_ip || '',
     role_disk: initial?.role?.disk ?? true,
     role_cd: initial?.role?.cd ?? false,
@@ -155,6 +166,7 @@ function AgentForm({ agentId, initial, onClose, onSaved }) {
     setSaveError(null)
     const body = {
       base_url: form.base_url.trim(),
+      remark: form.remark.trim(),
       role: { disk: form.role_disk, cd: form.role_cd },
       enabled: form.enabled,
     }
@@ -184,6 +196,15 @@ function AgentForm({ agentId, initial, onClose, onSaved }) {
           onChange={setField('base_url')}
           placeholder={t('agents.baseUrlPlaceholder')}
           required
+          disabled={declarationManaged}
+        />
+        {declarationManaged && <p className="create-hint">{t('agents.baseUrlManaged')}</p>}
+        <Input
+          label={t('agents.remarkLabel')}
+          name="remark"
+          value={form.remark}
+          onChange={setField('remark')}
+          placeholder={t('agents.remarkPlaceholder')}
         />
       </div>
       <div className="iscsi-collapse">
@@ -291,10 +312,11 @@ function AgentForm({ agentId, initial, onClose, onSaved }) {
   )
 }
 
-// 加入节点弹窗：签发集群级通用 bootstrap token（kubeadm token create 同构，不绑节点）
-// 并输出带控制面地址的 join 命令（kubeadm token create --print-join-command 同构：
+// 加入节点弹窗：签发集群级通用 bootstrap token（不绑节点）
+// 并输出带控制面地址的 join 命令（节点粘贴即用：
 // 节点粘贴执行即获得地址；声明 storager/kurrent.yaml 缺失时由 join 自动生成，
-// metadata.name 留空取宿主机名）；nvmet-host 凭据由 enroll 按能力自动派生。
+// metadata.name 自动生成随机标识（人工输入写 metadata.remark））；nvmet-host 凭据由
+// enroll 按能力自动派生。
 function JoinAgentModal({ onClose }) {
   const { t } = useI18n()
   const [cpUrl, setCpUrl] = useState(() => `https://${window.location.hostname}`)

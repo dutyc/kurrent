@@ -1,4 +1,4 @@
-"""PkiClient 引导请求测试（一键加入链路，2026-08-31）：base_url 上报等 payload 契约。"""
+"""PkiClient 引导请求测试（一键加入链路，2026-08-31）：base_url / remark 上报等 payload 契约。"""
 
 import json
 
@@ -60,6 +60,21 @@ def test_enroll_payload_carries_advertise_url(monkeypatch, pki_dir, captured):
     assert captured["body"]["component"] == "agent"
     assert captured["body"]["base_url"] == "https://192.168.1.50:4840"
     assert "csr_client" in captured["body"] and "csr_serving" in captured["body"]
+
+
+def test_enroll_payload_carries_remark(monkeypatch, pki_dir, captured):
+    """enroll 请求体携带 remark（声明 metadata.remark → 控制面自动登记写入台账）。"""
+    c = _client(monkeypatch, pki_dir, captured, bootstrap_token="tok.123",
+                remark="storage-nvmet-01")
+    c._enroll(renew=False)
+    assert captured["body"]["remark"] == "storage-nvmet-01"
+
+
+def test_enroll_payload_remark_empty_by_default(monkeypatch, pki_dir, captured):
+    """未声明 remark → 上报空串（兼容默认，控制面按空备注登记）。"""
+    c = _client(monkeypatch, pki_dir, captured, bootstrap_token="tok.123")
+    c._enroll(renew=False)
+    assert captured["body"]["remark"] == ""
 
 
 def test_renew_payload_without_bearer(monkeypatch, pki_dir, captured):

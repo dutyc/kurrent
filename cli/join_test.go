@@ -5,20 +5,60 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
+// nodeIDRe 自动生成的节点身份（agent_id）：12 位 hex 随机标识（与盘 os_tag 同构）。
+var nodeIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
 const fakeDocker = `#!/usr/bin/env bash
 echo "FAKE-DOCKER $(pwd) $*" >> "${FAKE_DOCKER_LOG}"
 `
 
+// stubHostReady 注入「宿主前置已就绪」的假环境（假 /proc/mounts + /sys/module）：
+// join 的 nvmet 预检在无内核 nvmet 的沙盒里照常通过。真实路径见 hostEnvPaths 缺省值。
+func stubHostReady(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	mounts := filepath.Join(root, "mounts")
+	content := "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n" +
+		"configfs /sys/kernel/config configfs rw,nosuid,nodev,noexec,relatime 0 0\n"
+	if err := os.WriteFile(mounts, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modRoot := filepath.Join(root, "module")
+	for _, m := range []string{"nvmet", "nvmet_tcp"} {
+		if err := os.MkdirAll(filepath.Join(modRoot, m), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := hostEnvPaths
+	hostEnvPaths = hostEnv{procMounts: mounts, sysModuleRoot: modRoot}
+	t.Cleanup(func() { hostEnvPaths = old })
+}
+
+// breakHost 覆盖为「宿主前置未就绪」的假环境（空 /proc/mounts、空 /sys/module）。
+func breakHost(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	mounts := filepath.Join(root, "mounts")
+	if err := os.WriteFile(mounts, []byte("sysfs /sys sysfs rw 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := hostEnvPaths
+	hostEnvPaths = hostEnv{procMounts: mounts, sysModuleRoot: filepath.Join(root, "module")}
+	t.Cleanup(func() { hostEnvPaths = old })
+}
+
 // newFakeRepo 建临时仓库骨架（control_plane/{app,config,state} +
-// storager/{nvmeof,iscsi} + fake docker，PATH 注入）。
+// storager/{nvmeof,iscsi} + fake docker，PATH 注入；宿主前置假就绪）。
 func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	t.Helper()
+	stubHostReady(t)
 	repo = t.TempDir()
 	controlPlane = filepath.Join(repo, "control_plane")
 	storager = filepath.Join(repo, "storager")
@@ -93,6 +133,7 @@ const nodeYAML = `apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
   name: storage-01
+  remark: 生产存储
 spec:
   agent:
     backend: nvmet
@@ -126,9 +167,10 @@ func TestJoinBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	// 声明值原样保留（非 forbid 式合并：手工编辑权威）
+	// 声明值原样保留（非 forbid 式合并：手工编辑权威；remark = 人工输入的唯一字段）
 	for path, want := range map[string]string{
 		"metadata/name":           "storage-01",
+		"metadata/remark":         "生产存储",
 		"spec/agent/backend":      "nvmet",
 		"spec/agent/advertiseUrl": "https://192.168.1.10:4840",
 		"spec/agent/diskDir":      "/mnt/disks",
@@ -140,7 +182,7 @@ func TestJoinBasic(t *testing.T) {
 			t.Errorf("kurrent.yaml %s = %q, want %q", path, got, want)
 		}
 	}
-	// 容器内路径/监听/内部通讯/一次性 token 不在 yml 声明（K8S 分层职责）
+	// 容器内路径/监听/内部通讯/一次性 token 不在 yml 声明（分层职责）
 	for _, p := range [][]string{
 		{"spec", "agent", "logFile"}, {"spec", "agent", "nvmetCacheFile"},
 		{"spec", "agent", "iscsiContainer"}, {"spec", "agent", "nvmetHostUrl"},
@@ -151,7 +193,7 @@ func TestJoinBasic(t *testing.T) {
 			t.Errorf("kurrent.yaml %v = %q, want 空（部署细节不在 yml 声明）", p, got)
 		}
 	}
-	// 引导凭据在独立文件（bootstrap-kubeconfig 同构）：join 只写通用 token 到 agent.token；
+	// 引导凭据在独立文件：join 只写通用 token 到 agent.token；
 	// nvmet-host.token 是派生凭据（agent enroll 按能力签发），join 不写也不产生
 	tokenFile := filepath.Join(storager, "bootstrap", "agent.token")
 	data, err := os.ReadFile(tokenFile)
@@ -218,13 +260,12 @@ func TestJoinFillsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	hostname, err := os.Hostname()
-	if err != nil {
-		t.Fatal(err)
+	// 声明留空 → 自动生成随机机器身份（12 位 hex，与盘 os_tag 同构）
+	name := yamlValue(t, configFile, "metadata", "name")
+	if !nodeIDRe.MatchString(name) {
+		t.Errorf("metadata/name = %q, want 12 位 hex 随机标识", name)
 	}
-	wantName := normalizeAgentID(hostname)
 	for path, want := range map[string]string{
-		"metadata/name":           wantName, // 声明留空 → 宿主机名（kubelet Node 命名同构）
 		"spec/agent/backend":      "nvmet",
 		"spec/agent/advertiseUrl": "https://192.168.1.10:4840", // 缺省推导 https://<cp-host>:4840
 		"spec/agent/diskDir":      filepath.Join(repo, "storager_img"),
@@ -236,28 +277,27 @@ func TestJoinFillsDefaults(t *testing.T) {
 			t.Errorf("kurrent.yaml %s = %q, want %q", path, got, want)
 		}
 	}
-	// .env PKI 键按注入的 agent_id 同步
+	// .env PKI 键按生成的 agent_id 同步
 	envFile := filepath.Join(storager, ".env")
 	got := envValues(t, envFile, "KURRENT_AGENT_PKI_HOST")[0]
-	if !strings.HasSuffix(got, "components/agent-"+wantName) {
-		t.Errorf("KURRENT_AGENT_PKI_HOST = %s, want suffix agent-%s", got, wantName)
+	if !strings.HasSuffix(got, "components/agent-"+name) {
+		t.Errorf("KURRENT_AGENT_PKI_HOST = %s, want suffix agent-%s", got, name)
 	}
 }
 
 func TestJoinGeneratesConfig(t *testing.T) {
-	// 声明缺失 → 按模板自动生成（kubeadm join 无预置文件同构；地址来自命令）
+	// 声明缺失 → 按模板自动生成（无预置文件时用缺省模板；地址来自命令）
 	repo, _, storager, _ := newFakeRepo(t)
 	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	hostname, err := os.Hostname()
-	if err != nil {
-		t.Fatal(err)
+	name := yamlValue(t, configFile, "metadata", "name")
+	if !nodeIDRe.MatchString(name) {
+		t.Errorf("metadata/name = %q, want 12 位 hex 随机标识", name)
 	}
-	wantName := normalizeAgentID(hostname)
 	for path, want := range map[string]string{
-		"metadata/name":           wantName,
+		"metadata/remark":         "",                     // 人工输入的唯一字段：生成时留空（备注）
 		"spec/controlPlane/url":   "https://192.168.1.10", // 命令地址写入声明
 		"spec/agent/backend":      "nvmet",
 		"spec/agent/advertiseUrl": "https://192.168.1.10:4840",
@@ -268,6 +308,25 @@ func TestJoinGeneratesConfig(t *testing.T) {
 		if got := yamlValue(t, configFile, parts...); got != want {
 			t.Errorf("kurrent.yaml %s = %q, want %q", path, got, want)
 		}
+	}
+}
+
+func TestJoinGeneratesStableID(t *testing.T) {
+	// 声明缺失 → 生成随机身份；重跑 join 身份保留（持久化在声明里，幂等稳定）
+	_, _, storager, _ := newFakeRepo(t)
+	opts := joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}
+	if err := joinRun(opts); err != nil {
+		t.Fatal(err)
+	}
+	first := yamlValue(t, opts.configFile, "metadata", "name")
+	if !nodeIDRe.MatchString(first) {
+		t.Fatalf("metadata/name = %q, want 12 位 hex 随机标识", first)
+	}
+	if err := joinRun(opts); err != nil {
+		t.Fatal(err)
+	}
+	if second := yamlValue(t, opts.configFile, "metadata", "name"); second != first {
+		t.Errorf("重跑后 metadata/name = %q, want %q（身份持久化不变）", second, first)
 	}
 }
 
@@ -364,7 +423,7 @@ func TestJoinAppliesExternalConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	// --config 指向其他路径：应用为 storager/kurrent.yaml（容器挂载权威位）；
-	// 命令地址覆盖声明 url（kubeadm join <endpoint> 引导输入同构）
+	// 命令地址覆盖声明 url（引导输入以命令为准）
 	if err := joinRun(joinOpts{dir: storager, configFile: external, cpURL: "https://cp2", token: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -434,6 +493,62 @@ func TestJoinInvalidNameChars(t *testing.T) {
 	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"})
 	if err == nil || !strings.Contains(err.Error(), "非法字符") {
 		t.Fatalf("err = %v, want 非法字符报错", err)
+	}
+}
+
+func TestJoinNvmetHostPreflightRejects(t *testing.T) {
+	// 宿主前置未就绪（模块未加载 + configfs 未挂载）→ nvmet 后端 fail fast：
+	// 报错列出缺失项并指路 host-prepare.sh；compose 不启动（无 docker 调用）
+	_, _, storager, logFile := newFakeRepo(t)
+	breakHost(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"})
+	if err == nil {
+		t.Fatal("宿主前置未就绪应报错")
+	}
+	for _, want := range []string{"nvmet", "nvmet-tcp", "configfs", "host-prepare.sh"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err 缺 %q:\n%v", want, err)
+		}
+	}
+	if _, statErr := os.Stat(logFile); statErr == nil {
+		t.Error("宿主前置未就绪不应启动 compose（docker 已被调用）")
+	}
+}
+
+func TestJoinHostPreflightSkippedForStgt(t *testing.T) {
+	// stgt/lio 后端无 nvmet 宿主前置要求：前置未就绪也照常收敛启动（iscsi compose）
+	_, _, storager, logFile := newFakeRepo(t)
+	breakHost(t)
+	cfg := strings.Replace(nodeYAML, "backend: nvmet", "backend: stgt", 1)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "iscsi compose") {
+		t.Errorf("stgt 后端应走 iscsi compose: %s", data)
+	}
+}
+
+func TestJoinCreatesDiskDir(t *testing.T) {
+	// 盘目录兜底创建（compose bind 挂载源）：声明默认 diskDir（仓库 storager_img）时 join 建出目录
+	repo, _, storager, _ := newFakeRepo(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(minimalNodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(repo, "storager_img")); err != nil || !fi.IsDir() {
+		t.Fatalf("storager_img 应自动创建: %v", err)
 	}
 }
 

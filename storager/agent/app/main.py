@@ -23,10 +23,10 @@ FICLONE = 0x40049409
 
 # ============================ 框架层：配置 ============================
 
-# 节点声明式配置（K8S 同构）：业务配置收敛到 storager/kurrent.yaml
-# （kubeadm JoinConfiguration 同构，pydantic 校验：未知字段拒绝/必填缺失报错/默认值注入）；
+# 节点声明式配置：业务配置收敛到 storager/kurrent.yaml
+# （pydantic 校验：未知字段拒绝/必填缺失报错/默认值注入）；
 # 容器内路径（盘目录挂载点/日志/缓存/pki/cp-ca/容器名）属部署清单 compose 职责，以模块常量固化；
-# 一次性 bootstrap token 在独立凭据文件（kubelet bootstrap-kubeconfig 同构）。
+# 一次性 bootstrap token 在独立凭据文件。
 # .env 仅保留 compose 插值键。文件缺失/校验失败在 import 即抛错阻断启动。
 from .config import (  # noqa: E402
     CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_DISK_DIR, DEFAULT_ISCSI_CONTAINER,
@@ -52,7 +52,7 @@ IQN_BASE = nqn_to_iqn(NQN_BASE)                  # 派生：iSCSI 数据面（�
 BACKEND = CONFIG.spec.agent.backend
 LOG_FILE = DEFAULT_LOG_FILE  # 容器内路径（compose 挂载目标，部署清单职责）
 
-# 组件 PKI 引导/轮换（K8S 同构）：证书未就绪则抛错阻断启动（uvicorn 起服务前）
+# 组件 PKI 引导/轮换：证书未就绪则抛错阻断启动（uvicorn 起服务前）
 from .pki_client import ensure_pki  # noqa: E402
 ensure_pki()
 
@@ -155,9 +155,11 @@ def _remove_file(path: str) -> None:
 # ============================ 框架层：母盘扫描 ============================
 
 class MasterScanner:
-    """后台线程周期扫描 DISK_DIR，缓存 *_tpl_* 母盘清单（name/size/mtime）。
+    """后台线程周期扫描 DISK_DIR，缓存 *_tpl_* 母盘清单（name/size/mtime/gpt）。
 
-    母盘命名约定：文件名须包含 `_tpl_` 标记（如 _tpl_ubuntu_2204.img）。
+    母盘命名约定：文件名须包含 `_tpl_` 标记（大小写不敏感，如 _tpl_ubuntu_2204.img）。
+    gpt 字段 = GPT 扇区布局探测（disk_gpt_layout）：512 布局母盘不可用于 nvmet 克隆
+    （EDK2 找不到 ESP），前端据此标注。
     扫描结果带锁缓存，GET /masters 直接读缓存，不阻塞文件系统。
     """
 
@@ -169,6 +171,7 @@ class MasterScanner:
         self._stop = threading.Event()
 
     def _scan(self) -> list:
+        from .nvmet import disk_gpt_layout
         items = []
         try:
             names = os.listdir(self.disk_dir)
@@ -176,7 +179,8 @@ class MasterScanner:
             log.warning(f"master scan failed: {e}")
             return items
         for n in sorted(names):
-            if "_tpl_" not in n:
+            # 母盘判定大小写不敏感（_tpl_ / _TPL_ / _Tpl_ 皆认），与后端 scan 的跳过条件严格一致
+            if "_tpl_" not in n.lower():
                 continue
             p = os.path.join(self.disk_dir, n)
             try:
@@ -185,7 +189,8 @@ class MasterScanner:
                 continue
             if not os.path.isfile(p):
                 continue
-            items.append({"name": n, "size": st.st_size, "mtime": int(st.st_mtime)})
+            items.append({"name": n, "size": st.st_size, "mtime": int(st.st_mtime),
+                          "gpt": disk_gpt_layout(p)})
         return items
 
     def start(self) -> None:
@@ -275,7 +280,7 @@ oplog = OperationLog(LOG_FILE)
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（K8S 同构：kubelet --client-ca-file 信任模型）。
+    """mTLS 客户端证书鉴权（内部 CA 信任模型）。
 
     uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=内部 CA 起服：TLS 层
     强制客户端证书且校验链到内部 CA（无证书/链不符握手即被拒），此处只需确认
@@ -330,6 +335,9 @@ class Backend(abc.ABC):
             c.exec_run(["sh", "-c", cmd])
         except Exception:
             pass
+
+    def validate_disk_file(self, path: str) -> None:
+        """克隆建盘前的母盘校验（默认无约束；nvmet 后端覆盖为 4K 原生 GPT 校验）。"""
 
     @abc.abstractmethod
     def create_target(self, iqn: str, backing: str, cd: bool) -> None: ...
@@ -424,7 +432,7 @@ class StgtBackend(Backend):
         # 母盘（*_tpl_*）由 MasterScanner 单独管理（克隆建盘专用），
         # 目录扫描跳过母盘文件，不为其创建普通 target
         names = [n for n in os.listdir(DISK_DIR)
-                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n]
+                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n.lower()]
         created, skipped = [], []
         existing = {t["iqn"] for t in self.list_targets()}
         for name in names:
@@ -516,7 +524,7 @@ class LioBackend(Backend):
         # 母盘（*_tpl_*）由 MasterScanner 单独管理（克隆建盘专用），
         # 目录扫描跳过母盘文件，不为其创建普通 target
         names = [n for n in os.listdir(DISK_DIR)
-                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n]
+                 if n.lower().endswith((".img", ".iso")) and "_tpl_" not in n.lower()]
         created, skipped = [], []
         existing = {t["iqn"] for t in self.list_targets()}
         for name in names:
@@ -623,9 +631,48 @@ class CredentialPushReq(BaseModel):
     host_nqns: list = []
 
 
+# ── 后端就绪度探针（healthz 投影，仅 nvmet 后端）──
+# 短超时（探活要快，宿主服务不可达时秒回）+ 短缓存（控制面/编排会周期探测，避免把探活做成重操作）
+BACKEND_PROBE_TTL = 5.0
+BACKEND_PROBE_TIMEOUT = 2.0
+_backend_probe_lock = threading.Lock()
+_backend_probe_cache: dict = {"ts": 0.0, "value": None}
+
+
+def _backend_probe() -> Optional[dict]:
+    """宿主服务就绪度（nvmet 后端）：可达且 configfs 就绪才算 ready；其他后端无独立探针（None）。"""
+    from .nvmet import NvmetBackend, NvmetHostError
+    if not isinstance(backend, NvmetBackend):
+        return None
+    with _backend_probe_lock:
+        if time.monotonic() - _backend_probe_cache["ts"] < BACKEND_PROBE_TTL:
+            return _backend_probe_cache["value"]
+    try:
+        info = backend.host.healthz(timeout=BACKEND_PROBE_TIMEOUT)
+        ready = bool(info.get("configfs"))
+        value = {"ready": ready, "reachable": True,
+                 "detail": None if ready else "nvmet-host reachable; configfs not ready"}
+    except NvmetHostError as exc:
+        value = {"ready": False, "reachable": False, "detail": exc.detail}
+    with _backend_probe_lock:
+        _backend_probe_cache.update(ts=time.monotonic(), value=value)
+    return value
+
+
 @app.get("/healthz")                             # 唯一不保护的接口，给健康检查/探活
 def healthz():
-    return {"status": "ok"}
+    """进程存活（status 恒 ok）+（nvmet 后端）数据面就绪度。
+
+    backend_ready=false 表示在线但存储不可用（nvmet-host 不可达或 configfs 未就绪）——
+    控制面据此把节点标为 degraded，与「节点掉线（error）」区分开。"""
+    resp = {"status": "ok"}
+    probe = _backend_probe()
+    if probe is not None:
+        resp["backend"] = BACKEND
+        resp["backend_ready"] = probe["ready"]
+        if probe["detail"]:
+            resp["backend_detail"] = probe["detail"]
+    return resp
 
 
 @app.post("/credential", dependencies=[Depends(verify_client_cert)])
@@ -658,6 +705,7 @@ def create_disk(req: DiskReq, request: Request):
             master_path = f"{DISK_DIR}/{req.master}"
             if not _file_exists(master_path):
                 raise HTTPException(404, f"master not found: {master_path}")
+            backend.validate_disk_file(master_path)
             _clone_master(master_path, backing)
         elif req.size:
             _make_empty(backing, req.size)

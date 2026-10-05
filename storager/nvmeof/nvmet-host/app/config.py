@@ -1,10 +1,10 @@
-"""nvmet-host 组件配置加载（K8S 同构）：与 storager-agent 同源。
+"""nvmet-host 组件配置加载：与 storager-agent 同源。
 
 读取同一份 storager/kurrent.yaml（节点级单文件权威配置），本组件消费
 spec.controlPlane（enroll 入口）；spec.agent 块由 agent 组件消费，此处以
 同构模型校验（不消费但节点级配置整体有效——extra="forbid" 语义两侧一致）。
 
-分层职责（K8S 同构）：监听地址/盘目录/pki/cp-ca 等部署细节与一次性引导凭据
+分层职责：监听地址/盘目录/pki/cp-ca 等部署细节与一次性引导凭据
 （bootstrap token 文件）均属部署清单 compose 职责，以模块常量固化。
 
 校验语义与 agent 侧一致：未知字段拒绝（extra="forbid"）、必填缺失报错、默认值注入。
@@ -52,10 +52,12 @@ class ControlPlaneSpec(BaseModel):
 
 
 class MetadataSpec(BaseModel):
-    """metadata：节点身份（name = agent_id，与组件证书 CN 一致）。"""
+    """metadata：节点身份（name = agent_id，由 kurrent join 自动生成，与组件证书 CN 一致；
+    remark = 备注，人类识别用，随首次 enroll 登记进控制面台账）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     name: str = Field(alias="name")
+    remark: str = Field("", alias="remark")
 
 
 class NodeSpec(BaseModel):
@@ -67,7 +69,7 @@ class NodeSpec(BaseModel):
 
 
 class NodeConfiguration(BaseModel):
-    """节点级配置根（apiVersion/kind/metadata/spec，kubeadm JoinConfiguration 同构）。"""
+    """节点级配置根（apiVersion/kind/metadata/spec）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: str = Field("kurrent.io/v1", alias="apiVersion")

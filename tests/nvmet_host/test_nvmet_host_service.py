@@ -15,6 +15,9 @@ BACKING = "/srv/iscsi/worker-01.ubuntu.img"
 DEVICE_PATH = "/srv/nvmet-disks/worker-01.ubuntu.img"
 HOST_NQN = "nqn.2026-07.com.kurrent.host.worker-01"
 SECRET = "DHHC-1:01:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo="
+# 多盘同 worker：同一 hostnqn 被两个子系统（两块盘）共用
+NQN_B = "nqn.2026-07.com.test.worker-01-b.ubuntu"
+BACKING_B = "/srv/iscsi/worker-01-b.ubuntu.img"
 
 
 def test_healthz_no_auth(nvmet, client, configfs):
@@ -30,7 +33,7 @@ def test_healthz_configfs_ready(nvmet, client, configfs):
 
 
 def test_requires_auth(nvmet):
-    """mTLS 鉴权（K8S 同构）：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制
+    """mTLS 鉴权：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制
     （TestClient 无法模拟 TLS 层），应用层 verify_client_cert 仅确认连接信息存在——
     无连接信息（request.client=None）→ 401。"""
     import pytest
@@ -141,6 +144,33 @@ def test_delete_host(client, configfs):
     assert not (configfs / "hosts" / HOST_NQN).exists()
 
 
+def test_delete_host_shared_entry_kept_until_last_reference(client, configfs):
+    """多盘同 worker 共用同一 hostnqn：逐个 delete_host 期间全局条目必须保留。
+    真实内核 configfs 对仍被 allowed_hosts symlink 引用的目录 rmdir 返回 EBUSY（实测）——
+    若先删/报错，吊销会卡在第一个子系统、其余盘的旧密钥原样留存。"""
+    for nqn, backing in ((NQN, BACKING), (NQN_B, BACKING_B)):
+        client.post("/subsystems", json={"nqn": nqn, "backing": backing})
+        client.put(f"/subsystems/{nqn}/hosts", json={"hostnqn": HOST_NQN, "secret": SECRET})
+    # 第一块盘摘链接：仍被第二块盘引用 → 全局条目保留，密钥不动
+    assert client.delete(f"/subsystems/{NQN}/hosts/{HOST_NQN}").status_code == 200
+    assert not (configfs / "subsystems" / NQN / "allowed_hosts" / HOST_NQN).exists()
+    assert (configfs / "hosts" / HOST_NQN / "dhchap_key").read_text() == SECRET
+    # 最后一个引用摘除 → 回收
+    assert client.delete(f"/subsystems/{NQN_B}/hosts/{HOST_NQN}").status_code == 200
+    assert not (configfs / "hosts" / HOST_NQN).exists()
+
+
+def test_delete_subsystem_gc_host_entry(client, configfs):
+    """删除子系统回收其 host 链：全局条目在最后一个引用消失后才删（无引用残留即回收）。"""
+    for nqn, backing in ((NQN, BACKING), (NQN_B, BACKING_B)):
+        client.post("/subsystems", json={"nqn": nqn, "backing": backing})
+        client.put(f"/subsystems/{nqn}/hosts", json={"hostnqn": HOST_NQN, "secret": SECRET})
+    assert client.delete(f"/subsystems/{NQN}").status_code == 200
+    assert (configfs / "hosts" / HOST_NQN).is_dir()   # 仍被 worker-01-b 引用
+    assert client.delete(f"/subsystems/{NQN_B}").status_code == 200
+    assert not (configfs / "hosts" / HOST_NQN).exists()
+
+
 def test_delete_subsystem_detaches_port(client, configfs):
     client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
     client.put(f"/subsystems/{NQN}/hosts",
@@ -154,3 +184,5 @@ def test_delete_subsystem_detaches_port(client, configfs):
 def test_delete_subsystem_404(client, configfs):
     res = client.delete(f"/subsystems/{NQN}")
     assert res.status_code == 404
+
+

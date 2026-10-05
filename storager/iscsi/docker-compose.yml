@@ -1,7 +1,7 @@
 # iSCSI 后端独立编排（stgt 用户态 / lio 内核态，二选一）；与 nvmeof/ 互斥（同一节点同一时刻仅一个后端）。
 # 部署：cd storager/iscsi && docker compose --env-file ../.env up -d
 # 本文件为完整编排：含共享 Agent 服务（代码在 storager/agent/，配置来源：../kurrent.yaml，
-# kubeadm JoinConfiguration 同构节点声明式配置；.env 仅保留 compose 插值键）。
+# 节点声明式配置；.env 仅保留 compose 插值键）。
 # 注：storager-agent 服务块与 storager/nvmeof/docker-compose.yml 保持一致。
 
 services:
@@ -48,7 +48,7 @@ services:
         sleep infinity                     # 兜底占住前台
 
   # ── 存储节点 Agent（控制面数据面接口）──
-  # 经 docker.sock 调度 storager-iscsi 容器；配置来源：../kurrent.yaml（kurrent join 生成/更新，kubeadm 同构）
+  # 经 docker.sock 调度 storager-iscsi 容器；配置来源：../kurrent.yaml（kurrent join 生成/更新）
   storager-agent:
     build:
       context: ../agent
@@ -66,13 +66,13 @@ services:
       # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
       - ${KURRENT_DISK_DIR:-/pool1/iscsi_img}:/home/iscsi_img
       - ../agent/logs:/var/log/kurrent
-      # 组件 PKI（K8S 同构）：本组件证书目录（可写，引导/轮换时落盘）；
+      # 组件 PKI：本组件证书目录（可写，引导/轮换时落盘）；
       # 宿主路径可用 KURRENT_AGENT_PKI_HOST 覆盖（kurrent join 按 agent_id 写入）
       - ${KURRENT_AGENT_PKI_HOST:-../../control_plane/state/pki/components/agent-storage-lio-01}:/etc/kurrent/pki
       # 控制面 nginx 服务器证书（自签，作为 enroll/renew 的 TOFU 信任根）
       - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
-      # 节点声明式配置（kubeadm 同构）：agent 挂载只读节点配置
+      # 节点声明式配置：agent 挂载只读节点配置
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
-      # 引导凭据目录（bootstrap-kubeconfig 同构）：agent.token 由 kurrent join 写入；
+      # 引导凭据目录：agent.token 由 kurrent join 写入；
       # （本节点无 nvmet-host 组件，不产生派生凭据）
       - ../bootstrap:/etc/kurrent/bootstrap

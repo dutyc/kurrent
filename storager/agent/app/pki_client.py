@@ -1,16 +1,16 @@
-"""组件 PKI 客户端（K8S kubelet 证书引导同构）。
+"""组件 PKI 客户端。
 
 职责：首次启动引导（bootstrap token → /enroll 换证书）+ 证书轮换（现有 client cert
 mTLS → /renew），并把 CA/证书落盘到 pki_dir。调用时机：uvicorn 起服务前（模块导入
-时），证书未就绪则进程退出——与 K8S kubelet 无证书不启动同语义。
+时），证书未就绪则进程退出（无证书不启动）。
 
 证书布局（pki_dir 由容器挂载持久化）：
   ca.crt           内部 CA（校验对端证书链）
   client.crt/key   client cert（本组件身份：向 cp renew、向 nvmet-host 认证）
   serving.crt/key  serving cert（本组件 TLS 服务端）
 
-enroll 凭据 = 集群级通用 bootstrap token（独立凭据文件 agent.token，kubeadm
-bootstrap-kubeconfig 同构：不绑节点、TTL 内可多次 enroll 复用）；nvmet-host 派生
+enroll 凭据 = 集群级通用 bootstrap token（独立凭据文件 agent.token：
+不绑节点、TTL 内可多次 enroll 复用）；nvmet-host 派生
 凭据随本组件 enroll/renew 响应下发并落盘（nvmet-host.token，供 nvmet-host 容器引导）；
 renew 凭据 = 现有 client cert（mTLS，nginx 校验后透传 DN 给控制面）。
 """
@@ -35,7 +35,7 @@ log = logging.getLogger("agent")
 RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（与控制面 config 一致）
 
 # 后端 ISO 光驱能力（与各 backend capabilities() 的 cd 字段一致）：stgt 支持，lio/nvmet 不支持。
-# agent 引导时随 enroll 上报，控制面自动登记据此推导 role.cd 与标签（K8S --node-labels 同构）。
+# agent 引导时随 enroll 上报，控制面自动登记据此推导 role.cd 与标签。
 BACKEND_CD_CAPABILITY = {"stgt": True, "lio": False, "nvmet": False}
 
 
@@ -88,7 +88,7 @@ class PkiClient:
     def __init__(self, agent_id: str, component: str, pki_dir: Path,
                  cp_base: str, cp_ca: Path | None, bootstrap_token: str | None,
                  advertise_url: str | None = None, capabilities: dict | None = None,
-                 derived_token_file: Path | None = None):
+                 remark: str = "", derived_token_file: Path | None = None):
         self.component = component          # agent | nvmet-host（与控制面 COMPONENT_PREFIX 键一致）
         self.agent_id = agent_id
         # CN 前缀：nvmet-host → nvmet（与控制面 sign_component_certs 的规则一致）
@@ -100,6 +100,7 @@ class PkiClient:
         self.bootstrap_token = bootstrap_token
         self.advertise_url = (advertise_url or "").strip()  # 自动登记时写入 agents.yml
         self.capabilities = capabilities or {}  # 后端能力摘要（backend/cd），自动登记时推导角色/标签
+        self.remark = (remark or "").strip()   # 备注（人类识别用），自动登记时写入 agents.yml
         # nvmet-host 派生凭据落盘路径（仅 agent 组件）：控制面按 backend=nvmet 能力签发
         # 随 enroll/renew 响应下发，本组件写入供 nvmet-host 容器引导（compose 共享目录）
         self.derived_token_file = Path(derived_token_file) if derived_token_file else None
@@ -133,10 +134,12 @@ class PkiClient:
             "csr_client": _build_csr(key, self.cn, []).decode(),
             "csr_serving": _build_csr(serving_key, self.cn, ["host.docker.internal", "127.0.0.1"]).decode(),
             "serving_sans": ["host.docker.internal", "127.0.0.1"],
-            # 控制面可达地址（KURRENT_ADVERTISE_URL）：控制面自动登记时写入 agents.yml
+            # 控制面可达地址（声明 spec.agent.advertiseUrl）：控制面自动登记时写入 agents.yml
             "base_url": self.advertise_url,
-            # 自身能力摘要（KURRENT_BACKEND → cd 能力）：控制面自动登记推导 role.cd 与标签
+            # 自身能力摘要（声明 spec.agent.backend → cd 能力）：控制面自动登记推导 role.cd 与标签
             "capabilities": self.capabilities,
+            # 备注（metadata.remark，人类识别用）：控制面自动登记时写入 agents.yml
+            "remark": self.remark,
         }
         headers = {"Content-Type": "application/json"}
         context = self._cp_context(renew)
@@ -194,7 +197,7 @@ class PkiClient:
 
 
 def _read_bootstrap_token(path: Path) -> str | None:
-    """读取引导凭据文件（bootstrap-kubeconfig 同构；缺失/空返回 None）。"""
+    """读取引导凭据文件（缺失/空返回 None）。"""
     try:
         value = path.read_text(encoding="utf-8").strip()
         return value or None
@@ -228,4 +231,5 @@ def ensure_pki() -> None:
               Path(DEFAULT_CP_CA),
               _read_bootstrap_token(Path(DEFAULT_BOOTSTRAP_TOKEN_FILE)),
               spec.agent.advertise_url or None, capabilities,
+              remark=CONFIG.metadata.remark,
               derived_token_file=derived).ensure(force_renew=force_renew)

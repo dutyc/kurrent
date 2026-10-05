@@ -1,8 +1,8 @@
-"""组件 PKI 客户端（K8S kubelet 证书引导同构）。
+"""组件 PKI 客户端。
 
 职责：首次启动引导（bootstrap token → /enroll 换证书）+ 证书轮换（现有 client cert
 mTLS → /renew），并把 CA/证书落盘到 pki_dir。调用时机：uvicorn 起服务前（模块导入
-时），证书未就绪则进程退出——与 K8S kubelet 无证书不启动同语义。
+时），证书未就绪则进程退出（无证书不启动）。
 
 证书布局（pki_dir 由容器挂载持久化）：
   ca.crt           内部 CA（校验对端证书链）
@@ -172,7 +172,7 @@ class PkiClient:
 
 
 def _read_bootstrap_token(path: Path) -> str | None:
-    """读取引导凭据文件（bootstrap-kubeconfig 同构；缺失/空返回 None）。"""
+    """读取引导凭据文件（缺失/空返回 None）。"""
     try:
         value = path.read_text(encoding="utf-8").strip()
         return value or None

@@ -303,8 +303,37 @@ def test_push_credential_revoke(agent_client):
     assert "worker-01" not in backend.cache._entries
 
 
+def test_healthz_backend_ready(agent_client):
+    """/healthz：nvmet 后端带数据面就绪度（宿主服务可达 + configfs 就绪 → backend_ready=true）。"""
+    client, backend, calls = agent_client
+    body = client.get("/healthz").json()
+    assert body == {"status": "ok", "backend": "nvmet", "backend_ready": True}
+
+
+def test_healthz_backend_unreachable_degraded(agent_client):
+    """宿主服务不可达：进程活着（status=ok）但 backend_ready=false + detail——控制面据此标 degraded。"""
+    client, backend, calls = agent_client
+    backend.host.unreachable = True
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
+    assert body["backend"] == "nvmet"
+    assert body["backend_ready"] is False
+    assert "unreachable" in body["backend_detail"]
+
+
+def test_healthz_configfs_not_ready_degraded(agent_client):
+    """宿主服务可达但 configfs 未就绪（宿主前置缺失）→ 同样 degraded：
+    这是 /capabilities 探测不到的洞（服务活着，能力接口照常 200）。"""
+    client, backend, calls = agent_client
+    backend.host.configfs = False
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
+    assert body["backend_ready"] is False
+    assert "configfs" in body["backend_detail"]
+
+
 def test_verify_client_cert():
-    """mTLS 鉴权（K8S 同构）：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制，
+    """mTLS 鉴权：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制，
     应用层 verify_client_cert 仅确认连接信息存在——无连接信息（request.client=None）→ 401。"""
     from fastapi import HTTPException
 
@@ -344,3 +373,5 @@ def test_push_credential_host_unreachable(agent_client, fake_host):
     assert "worker-01" in backend.cache._entries  # 缓存先行
     host.unreachable = False
     assert backend.cache.reconcile()["applied"] == 1
+
+

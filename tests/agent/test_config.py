@@ -1,4 +1,4 @@
-"""节点声明式配置（kurrent.yaml）加载与校验测试（pydantic v2，K8S 同构）。
+"""节点声明式配置（kurrent.yaml）加载与校验测试（pydantic v2）。
 
 覆盖：合法加载、默认值注入、未知字段拒绝（extra="forbid"）、必填缺失报错、
 bad backend 拒绝、文件缺失/坏 yaml 阻断启动。conftest 已生成合法 kurrent.yaml
@@ -51,8 +51,20 @@ bootstrap）属部署清单 compose 职责，不在 yml 声明。"""
     assert spec.agent.advertise_url == ""
 
 
+def test_metadata_remark_default_empty(tmp_path):
+    """remark 可缺省（备注：人类识别用，随首次 enroll 登记进控制面台账）→ 默认空串。"""
+    assert _load(tmp_path, _valid()).metadata.remark == ""
+
+
+def test_metadata_remark_loaded(tmp_path):
+    """remark 显式声明原样加载（自由文本，不做格式校验）。"""
+    data = _valid()
+    data["metadata"]["remark"] = "storage-nvmet-01（生产存储）"
+    assert _load(tmp_path, data).metadata.remark == "storage-nvmet-01（生产存储）"
+
+
 def test_container_path_keys_rejected(tmp_path):
-    """容器内路径/监听/内部通讯/一次性 token 键不在 yml 声明（K8S 分层职责）：出现即拒绝。"""
+    """容器内路径/监听/内部通讯/一次性 token 键不在 yml 声明（分层职责）：出现即拒绝。"""
     for path in [("spec", "agent", "logFile"),
                  ("spec", "agent", "nvmetCacheFile"),
                  ("spec", "agent", "iscsiContainer"),
@@ -71,7 +83,7 @@ def test_container_path_keys_rejected(tmp_path):
 
 
 def test_unknown_field_rejected(tmp_path):
-    """未知字段拒绝（extra="forbid"，K8S 同构）：spec.agent 塞未知键 → 启动即失败。"""
+    """未知字段拒绝（extra="forbid"）：spec.agent 塞未知键 → 启动即失败。"""
     data = _valid()
     data["spec"]["agent"]["unknownField"] = "oops"
     with pytest.raises(RuntimeError, match="invalid node configuration"):
