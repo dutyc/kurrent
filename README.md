@@ -10,7 +10,7 @@
 
 K8s made applications cloud-native; Kurrent makes compute cloud-native.
 
-Kurrent is a cloud-native stateless bare-metal delivery platform. A compute node holds no persistent state: identity, system and data are granted by the network and the control plane, and the machine only provides location. See the [manifesto](./about/en/Manifesto.md).
+Kurrent is a cloud-native, stateless bare-metal delivery paradigm. It carries "stateless" down to the physical compute layer: a compute node (Device) holds no persistent state, and identity (Worker), system and data are granted by the network and the control plane. Its unit of scheduling is not the application but the system itself — a system belongs to an identity, not to a machine. A device starts as soon as it is connected to the network, and compute flows between bare-metal nodes like current. See the [manifesto](./about/en/Manifesto.md).
 
 ## NVMe-oF: The Primary Data Plane
 
