@@ -8,6 +8,7 @@ import pytest
 
 from control_plane.app.config import settings
 from control_plane.app.routers.workers import (
+    _derive_tls_psk,
     _generate_dhhc1,
     _secret_hash,
     _validate_dhhc1,
@@ -197,6 +198,106 @@ def test_boot_vars_injects_nbft_secret(client, auth_headers, register_claimed_de
     assert res.json()["hostnqn"] == "nqn.2026-07.com.test:host.worker-01"
 
 
+def _setup_worker_with_disk(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+    *, backend="nvmet", port=None, credential=True,
+):
+    """认领入池 + 绑定 worker + 注册 agent + 建默认盘 + 设凭据；返回 secret。
+
+    `port` 非空时作为 `capabilities.port` 上报（模拟 Agent 侧的数据面端口就绪态）；
+    `credential=False` 时吊销认证密钥（模拟未绑定/已吊销——建盘会自动签发，须显式撤销）。
+    """
+    _bound_worker(client, auth_headers, register_claimed_device)
+    client.post("/agents", json={
+        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "role": {"disk": True, "cd": False}, "tags": ["storage"],
+    }, headers=auth_headers)
+    caps = {"base_nqn": "nqn.2026-07.com.test", "cd": False, "backend": backend}
+    if port is not None:
+        caps["port"] = port
+    mock_agent_client.capabilities = lambda: caps
+    res = client.post("/workers/worker-01/luns/disk", json={
+        "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
+    }, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    secret = make_secret()
+    if credential:
+        client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
+    else:
+        # 建盘即自动签发（_issue_credential），故「无密钥」要靠显式吊销达成
+        client.delete("/workers/worker-01/credential", headers=auth_headers)
+    return secret
+
+
+def test_boot_vars_injects_nbft_tls_when_data_port_ready(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """nvmet 后端 + 数据面端口就绪 → 下发 nbft-tls-psk（密钥纯函数派生）与 nbft-tls-port。"""
+    secret = _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert res.status_code == 200
+    assert f"set nbft-tls-psk {_derive_tls_psk(secret)}" in res.text
+    assert "set nbft-tls-port 4421" in res.text
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01", "format": "json"})
+    assert res.json()["nbft_tls_psk"] == _derive_tls_psk(secret)
+    assert res.json()["nbft_tls_port"] == "4421"
+
+
+def test_boot_vars_denies_boot_when_port_not_ready(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """nvmet 后端但数据面端口未就绪（ready=False）→ 拒绝下发引导变量（默认全链路加密，
+    明文口已撤除，放行只会得到一条连不上的 root-path）。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": False},
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert res.status_code == 200
+    assert "no per-worker boot vars found" in res.text
+    assert "nbft-tls-port" not in res.text
+    assert "nbft-secret" not in res.text
+
+
+def test_boot_vars_denies_boot_without_credential(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """nvmet 后端但无认证密钥（未绑定/已吊销）→ 同样拒绝引导：无密钥即无 PSK，
+    也就没有任何可用的加密路径。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet", credential=False,
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert "no per-worker boot vars found" in res.text
+    assert "nbft-secret" not in res.text
+
+
+def test_boot_vars_no_tls_for_non_nvmet_backend(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """非 nvmet 后端（stgt/lio 无 NVMe-oF TLS）→ 不下发 TLS 变量（即使上报了端口也忽略）。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="stgt",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert "nbft-tls-psk" not in res.text
+    assert "nbft-tls-port" not in res.text
+
+
 def test_boot_vars_no_secret_without_credential(client, auth_headers, register_claimed_device):
     _bound_worker(client, auth_headers, register_claimed_device)
     res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
@@ -260,7 +361,7 @@ def test_push_on_credential_set(client, auth_headers, register_claimed_device, m
     _bind_existing_worker(client, auth_headers, register_claimed_device)
     secret = make_secret()
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
     assert res.status_code == 200
@@ -277,7 +378,7 @@ def test_push_on_credential_revoke(client, auth_headers, register_claimed_device
     _bind_existing_worker(client, auth_headers, register_claimed_device)
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.delete("/workers/worker-01/credential", headers=auth_headers)
     assert res.status_code == 200
@@ -293,7 +394,7 @@ def test_push_host_nqn_derives_from_worker_id(client, auth_headers, mock_agent_c
     res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
     assert res.status_code == 200
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     assert pushes[0][3] == [HOST_NQN]
@@ -310,7 +411,7 @@ def test_push_on_bind_unbind(client, auth_headers, register_claimed_device, mock
     secret = make_secret()
     client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
     assert res.status_code == 200
@@ -332,7 +433,7 @@ def test_push_on_disk_create(client, auth_headers, register_claimed_device, mock
     _bound_worker(client, auth_headers, register_claimed_device)
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -396,7 +497,7 @@ def test_disk_create_issues_credential_on_nvmet(client, auth_headers, mock_agent
     _create_worker(client, auth_headers)
     _make_nvmet(mock_agent_client)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -431,7 +532,7 @@ def test_disk_create_keeps_existing_credential_on_nvmet(client, auth_headers, mo
     before = client.get("/workers/worker-01/credential", headers=auth_headers).json()
     _make_nvmet(mock_agent_client)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -454,7 +555,7 @@ def test_disk_create_no_credential_on_non_nvmet(client, auth_headers, mock_agent
     assert res.status_code == 201, res.text
     _create_worker(client, auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -476,7 +577,7 @@ def test_batch_disk_create_issues_credentials(client, auth_headers, mock_agent_c
         _create_worker(client, auth_headers, worker_id)
     _make_nvmet(mock_agent_client)
     pushes = {}
-    mock_agent_client.set_credential = (lambda w, s, subs, hosts:
+    mock_agent_client.set_credential = (lambda w, s, subs, hosts, tls_psk=None:
                                         pushes.__setitem__(w, s) or {})
 
     res = client.post("/workers/luns/disk/batch", json={
@@ -491,3 +592,44 @@ def test_batch_disk_create_issues_credentials(client, auth_headers, mock_agent_c
     assert len(set(pushes.values())) == 2
     for worker_id in ("w-01", "w-02"):
         assert _credential_exists(client, auth_headers, worker_id) is True
+
+
+# ============================ TLS-PSK（由认证密钥派生，随凭据推送下发） ============================
+
+
+# 已知答案（KAT）：固定 DHHC 密钥 → 固定 TLS-PSK，钉住派生契约（域标签/算法/HMAC 源）
+# 目标端 nvmet-host keyring 与发起端 initramfs 必须得到同一串，改动派生即测试红
+TLS_PSK_KAT = "b99690bb15d5cecfd8388bede984fa660398e879388215d8019d21c98800d4ab"
+
+
+def test_derive_tls_psk_known_answer():
+    """KAT：make_secret() 默认密钥 → 固定 PSK（契约锁定，非自引用）。"""
+    assert _derive_tls_psk(make_secret()) == TLS_PSK_KAT
+
+
+def test_derive_tls_psk_deterministic_and_distinct():
+    """_derive_tls_psk：同密钥同值（纯函数，推送台账指纹无需扩展）、异密钥异值、64 位十六进制。"""
+    s1, s2 = make_secret(), make_secret(b"fedcba9876543210fedcba9876543210")
+    p1, p2 = _derive_tls_psk(s1), _derive_tls_psk(s2)
+    assert p1 == _derive_tls_psk(s1)
+    assert p1 != p2
+    assert len(p1) == 64 and all(c in "0123456789abcdef" for c in p1)
+    assert p1 != s1
+
+
+def test_push_carries_derived_tls_psk(client, auth_headers, register_claimed_device,
+                                      mock_agent_client):
+    """凭据推送携带派生 TLS-PSK；吊销推送 tls_psk=None（Authorization 与加密资格同生命周期）。"""
+    _setup_agent_and_disk(client, auth_headers)
+    _bind_existing_worker(client, auth_headers, register_claimed_device)
+    secret = make_secret()
+    seen: list = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None: seen.append(tls_psk) or {})
+
+    assert secret == make_secret()  # 与 KAT 同输入
+    assert client.put("/workers/worker-01/credential", json={"secret": secret},
+                      headers=auth_headers).status_code == 200
+    assert seen == [TLS_PSK_KAT]
+    assert client.delete("/workers/worker-01/credential", headers=auth_headers).status_code == 200
+    assert seen[-1] is None

@@ -193,12 +193,15 @@ def parse_pubkey(value: str | None) -> str | None:
     return compact
 
 
-def verify_device_signature(mac: str, hostname: str, nonce: str, sig_b64: str, pubkey_hex: str) -> bool:
-    """ECDSA P-256 验签：签名数据 = nonce||mac||hostname（UTF-8 字节拼接，契约见 ipxe-stateless-handoff §5.2）；
-    签名 = base64(DER)；公钥 = 未压缩点 hex（key_hash）。任何异常 → False。"""
+def verify_device_signature(mac: str, nonce: str, sig_b64: str, pubkey_hex: str) -> bool:
+    """ECDSA P-256 验签：签名数据 = nonce||mac（UTF-8 字节拼接，契约见 ipxe-stateless-handoff §5.2）；
+    签名 = base64(DER)；公钥 = 未压缩点 hex（key_hash）。任何异常 → False。
+
+    签名不包含 hostname：hostname 由客户端自报且服务端不与台账比对，放进签名串不增加身份约束；
+    身份由 MAC → 设备台账绑定与一次性 nonce 保证。"""
     try:
         pub = EllipticCurvePublicKey.from_encoded_point(SECP256R1(), bytes.fromhex(pubkey_hex))
-        data = f"{nonce}{mac}{hostname}".encode("utf-8")
+        data = f"{nonce}{mac}".encode("utf-8")
         pub.verify(base64.b64decode(sig_b64), data, ec.ECDSA(hashes.SHA256()))
         return True
     except Exception:
@@ -211,13 +214,12 @@ def sha256_hex(data: bytes) -> str:
 
 def device_auth_blocked(
     mac: str | None,
-    hostname: str | None,
     nonce: str | None,
     sig: str | None,
     worker_id: str,
 ) -> bool:
     """注入四条件第 4 条：设备身份签名验证（挑战-响应，trust-root-blueprint §6.1）。
-    True = 拒绝下发。无 mac 无法验证身份（hostname 识别链），维持现状放行。
+    True = 拒绝下发。无 mac 无法验证身份（仅 hostname 的识别链），维持现状放行。
     无 key_hash：强制开启 → 拒绝（不降级，已绑定也不放行）；过渡期 → 放行现状防冒领。
     带 nonce+sig：重放/验签失败 → 拒绝（过渡期同样拒绝，伪造签名不放行）。"""
     normalized = normalize_boot_mac(mac) if mac else None
@@ -235,14 +237,10 @@ def device_auth_blocked(
             record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="missing_sig")
             return True
         return False
-    hostname_clean = hostname.strip().lower() if hostname else ""
-    if not hostname_clean:
-        record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="missing_hostname")
-        return True
     if not consume_nonce(normalized, nonce):
         record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="nonce_invalid")
         return True
-    if not verify_device_signature(normalized, hostname_clean, nonce, sig, key_hash):
+    if not verify_device_signature(normalized, nonce, sig, key_hash):
         record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="verify_failed")
         return True
     return False

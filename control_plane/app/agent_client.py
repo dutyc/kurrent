@@ -103,12 +103,14 @@ class AgentClient:
         """列出 Agent 上可用母盘（后台扫描缓存的 *_tpl_* 文件清单）。"""
         return self._request("GET", "/masters")
 
-    def set_credential(self, worker_id: str, secret: str | None, sub_nqns: list[str], host_nqns: list[str]) -> dict[str, Any]:
-        """推送 NVMe-oF 凭据期望状态给 Agent（控制面驱动，Agent 转调宿主服务同步 hosts 矩阵）。
-        secret=None 吊销该 worker；sub_nqns = 盘子系统 NQN，host_nqns = 绑定设备派生 NQN。"""
+    def set_credential(self, worker_id: str, secret: str | None, sub_nqns: list[str],
+                       host_nqns: list[str], tls_psk: str | None = None) -> dict[str, Any]:
+        """推送 NVMe-oF 凭据期望状态给 Agent（控制面驱动，Agent 转调宿主服务同步 hosts 矩阵
+        + 目标端 TLS-PSK keyring）。secret=None 吊销该 worker；sub_nqns = 盘子系统 NQN，
+        host_nqns = 绑定设备派生 NQN；tls_psk = 派生自认证密钥的 TLS-PSK（见 _derive_tls_psk）。"""
         return self._request("POST", "/credential", json={
             "worker_id": worker_id, "secret": secret,
-            "sub_nqns": sub_nqns, "host_nqns": host_nqns,
+            "sub_nqns": sub_nqns, "host_nqns": host_nqns, "tls_psk": tls_psk,
         })
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:

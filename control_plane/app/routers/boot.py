@@ -169,7 +169,7 @@ def _boot_vars_payload(
     nonce: str | None = None,
     sig: str | None = None,
 ) -> dict[str, Any]:
-    """启动变量投影。识别链：hostname→worker；mac→设备→绑定 worker。
+    """启动变量投影。识别链：mac→设备台账→绑定 worker；hostname 仅作兜底。
     防冒领（D2）：带 mac 的请求须来自该 worker 绑定的设备（绑定即认证），不符 → 拒绝下发空脚本。
     注入四条件第 4 条（2026-08-21）：设备身份签名验证——强制开关开启后，无 key_hash / 无签名 /
     验签失败一律拒绝（已绑定也不放行）；过渡期无密钥设备照现状放行（防冒领）。
@@ -177,7 +177,7 @@ def _boot_vars_payload(
     match = _find_worker_for_boot(mac=mac, hostname=hostname)
     if match:
         if _boot_binding_ok(match[0], mac):
-            if device_auth_blocked(mac, hostname, nonce, sig, match[0]):
+            if device_auth_blocked(mac, nonce, sig, match[0]):
                 return {}  # 第 4 条不通过 → 拒绝下发
             payload = _worker_boot_payload(match)
             # NVMe-oF 凭据注入审计（C2，不记密钥本体，只记 injected 布尔）
@@ -208,26 +208,20 @@ def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         menu_timeout = boot.get("menu_timeout") or boot.get("menu-timeout") or settings.boot_menu_timeout
     payload: dict[str, Any] = {
         "worker_id": worker_id,
-        "hostname": record_["hostname"],
         "menu_default": str(menu_default),
         "menu_timeout": int(menu_timeout),
     }
-    # 系统标识投影（2026-08-30 MAIN MENU 动态化 + 盘标识分层）：menu.ipxe 通用 OS 项
-    # 消费 ${os} / ${os-version}（label 展示）与 ${os-tag}（NQN 后缀拼接）；
-    # 来源 = 默认盘记录（盘记录权威），与盘 NQN 后缀同源。
+    # 系统标识投影（2026-08-30 MAIN MENU 动态化）：menu.ipxe 通用 OS 项只消费
+    # ${os} / ${os-version} 做展示；盘 NQN 由 disk-nqn 原样下发，不再由固件重拼后缀。
     # 无盘（default_disk_for 返回 None）时不投影，reboot 循环等待建盘。
     if disk and disk.get("os"):
         payload["os"] = str(disk["os"]).lower()
         # os_version 为备注（'' = 无版本）：空值不下发，menu 侧 os-label 拼接自适应
         if disk.get("os_version"):
             payload["os_version"] = str(disk["os_version"]).lower()
-        # os_tag = 盘级随机标识（数据面唯一键）：固件拼盘 NQN 后缀，与盘记录权威值一致
-        if disk.get("os_tag"):
-            payload["os_tag"] = str(disk["os_tag"]).lower()
     if agent_id:
-        # base-nqn 投影（C3 拼接起步）：来源 = 盘 NQN 前缀（盘 NQN 由控制面按统一模板
-        # base:worker_id.os.<os_tag> 生成，无存量盘、无历史命名，固件按模板重拼 = 盘记录权威值）；
-        # 盘记录缺 nqn → 不下发该键，固件不拼 NVMe-oF 路径（不兼容遗留，不派生）
+        # disk-nqn：盘记录里的完整 NQN 权威值，由固件原样拼进 root-path。
+        # 不在客户端用 hostname/os/os-tag 重拼——DHCP hostname 滞后或缺省不应影响数据面。
         nqn = disk.get("nqn")
         base_nqn = _base_nqn_from_target(nqn)
         # base-iqn 投影保持 iSCSI 形态（安装器 iSCSI 引导消费）：来源 = 盘 IQN（由盘 NQN 派生）前缀
@@ -240,7 +234,8 @@ def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         # 只投影 iSCSI root 连接符（差异点），root-path 拼装由 iPXE 侧完成：
         # stgt 需 `:::1:`（lun 占位 1），LIO 需 `::::`（空占位）；
         # nvmet 后端无 iSCSI target，不下发该键，menu 的 iSCSI 安装器项 isset 守卫跳过。
-        payload["base_nqn"] = base_nqn
+        if nqn:
+            payload["disk_nqn"] = str(nqn)
         payload["base_iqn"] = base_iqn
         payload["storager_ip"] = storager_ip
         if backend in {"stgt", "lio"}:
@@ -256,6 +251,21 @@ def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
     secret = _credential_secret_for(worker_id)
     if secret:
         payload["nbft_secret"] = secret
+    # NVMe/TCP 传输加密（默认全链路，无明文回退）：PSK 是认证密钥的纯函数
+    # （workers._derive_tls_psk 域分离派生，轮换认证密钥即同时轮换 PSK，故此处现算，
+    # 不新增存储字段）；端口取 Agent 上报的数据面端口（能力即真相，与 _backend_for 同源）。
+    # nvmet 后端必须同时具备认证密钥与就绪的数据面端口——任一缺失即拒绝下发引导变量
+    # （记审计），因为明文口已撤除，放行只会得到一条连不上的 root-path。
+    if agent_id and _backend_for(agent_id) == "nvmet":
+        tls_port = _nvmet_data_port_for(agent_id)
+        if not (secret and tls_port):
+            record("boot_vars.encryption", "denied", worker_id=worker_id,
+                   reason=("no_credential" if not secret else "port_not_ready"))
+            return {}
+        from .workers import _derive_tls_psk
+
+        payload["nbft_tls_psk"] = _derive_tls_psk(secret)
+        payload["nbft_tls_port"] = tls_port
     return payload
 
 
@@ -285,6 +295,27 @@ def _backend_for(agent_id: str) -> str:
     return "stgt"
 
 
+def _nvmet_data_port_for(agent_id: str) -> str:
+    """返回 Agent 上报的 NVMe/TCP 数据面端口（`/capabilities.port.trsvcid`）。
+
+    数据面端口即 TLS 1.3 端口（默认全链路加密，无明文口）。与 `_backend_for` 同源
+    （能力即真相）：端口是节点运行事实，不从登记信息推导。端口未启用/未就绪
+    （`ready` 为假）或查询失败 → 返回空串，调用方据此拒绝引导。
+    """
+    try:
+        agent = agents.get(agent_id)
+    except KeyError:
+        return ""
+    try:
+        caps = agents.client(agent).capabilities()
+    except Exception:
+        return ""
+    port = caps.get("port") or {}
+    if not isinstance(port, dict) or not port.get("ready"):
+        return ""
+    return str(port.get("trsvcid") or "")
+
+
 def _boot_vars_ipxe(payload: dict[str, Any]) -> str:
     lines = ["#!ipxe"]
     if not payload:
@@ -292,8 +323,8 @@ def _boot_vars_ipxe(payload: dict[str, Any]) -> str:
         return "\n".join(lines) + "\n"
     # reboot 循环 payload(池中未绑定)无 worker_id,统一用 unbound 标识
     lines.append(f"# boot vars for {payload.get('worker_id', 'unbound')}")
-    if payload.get("base_nqn"):
-        lines.append(f"set base-nqn {payload['base_nqn']}")
+    if payload.get("disk_nqn"):
+        lines.append(f"set disk-nqn {payload['disk_nqn']}")
     if payload.get("base_iqn"):
         lines.append(f"set base-iqn {payload['base_iqn']}")
     if payload.get("storager_ip"):
@@ -302,14 +333,16 @@ def _boot_vars_ipxe(payload: dict[str, Any]) -> str:
         lines.append(f"set iscsi-sep {payload['iscsi_sep']}")
     if payload.get("nbft_secret"):
         lines.append(f"set nbft-secret {payload['nbft_secret']}")
+    if payload.get("nbft_tls_psk"):
+        lines.append(f"set nbft-tls-psk {payload['nbft_tls_psk']}")
+    if payload.get("nbft_tls_port"):
+        lines.append(f"set nbft-tls-port {payload['nbft_tls_port']}")
     if payload.get("hostnqn"):
         lines.append(f"set hostnqn {payload['hostnqn']}")
     if payload.get("os"):
         lines.append(f"set os {payload['os']}")
     if payload.get("os_version"):
         lines.append(f"set os-version {payload['os_version']}")
-    if payload.get("os_tag"):
-        lines.append(f"set os-tag {payload['os_tag']}")
     lines.extend(
         [
             f"set menu-default {payload['menu_default']}",
@@ -326,8 +359,8 @@ def _boot_vars_json(payload: dict[str, Any]) -> dict[str, Any]:
         "menu_default": payload["menu_default"],
         "menu_timeout": payload["menu_timeout"],
     }
-    if payload.get("base_nqn"):
-        result["base_nqn"] = payload["base_nqn"]
+    if payload.get("disk_nqn"):
+        result["disk_nqn"] = payload["disk_nqn"]
     if payload.get("base_iqn"):
         result["base_iqn"] = payload["base_iqn"]
     if payload.get("storager_ip"):
@@ -336,14 +369,16 @@ def _boot_vars_json(payload: dict[str, Any]) -> dict[str, Any]:
         result["iscsi_sep"] = payload["iscsi_sep"]
     if payload.get("nbft_secret"):
         result["nbft_secret"] = payload["nbft_secret"]
+    if payload.get("nbft_tls_psk"):
+        result["nbft_tls_psk"] = payload["nbft_tls_psk"]
+    if payload.get("nbft_tls_port"):
+        result["nbft_tls_port"] = payload["nbft_tls_port"]
     if payload.get("hostnqn"):
         result["hostnqn"] = payload["hostnqn"]
     if payload.get("os"):
         result["os"] = payload["os"]
     if payload.get("os_version"):
         result["os_version"] = payload["os_version"]
-    if payload.get("os_tag"):
-        result["os_tag"] = payload["os_tag"]
     return result
 
 
@@ -362,9 +397,21 @@ def _credential_secret_for(worker_id: str) -> str | None:
 
 
 def _find_worker_for_boot(mac: str | None, hostname: str | None) -> tuple[str, dict[str, Any]] | None:
-    """身份识别：有 hostname 用 hostname，无 hostname 退回 MAC 反查。"""
+    """身份识别：设备台账的绑定（mac → bound_worker_id）是唯一权威，优先于 hostname。
+
+    dnsmasq 的 MAC → hostname 只是绑定操作的投影（写文件 + HUP），更新可能滞后：
+    若先按 hostname 识别，陈旧投影会把请求导向旧 Worker 或触发「未绑定」拒绝。
+    故顺序为：mac → 设备台账 → hostname → dnsmasq 投影（仅存量/无台账兜底）。"""
     data = store.load_workers()
     workers = data["workers"]
+    normalized_mac = normalize_boot_mac(mac) if mac else None
+    if normalized_mac:
+        device = device_for_boot(normalized_mac)
+        if device and device.get("state") == "bound":
+            worker_id = device.get("bound_worker_id") or ""
+            record_ = workers.get(worker_id) if worker_id else None
+            if record_:
+                return worker_id, record_
     if hostname:
         try:
             found = _find_worker_by_hostname(workers, canonical_hostname(hostname))
@@ -372,7 +419,6 @@ def _find_worker_for_boot(mac: str | None, hostname: str | None) -> tuple[str, d
                 return found
         except HTTPException:
             pass
-    normalized_mac = normalize_boot_mac(mac) if mac else None
     if normalized_mac:
         for binding in dnsmasq.list_bindings():
             if binding.mac == normalized_mac:

@@ -55,15 +55,15 @@ def auth_headers():
 
 @pytest.fixture()
 def ec_keypair():
-    """ECDSA P-256 测试密钥对：pubkey_hex（未压缩点 130 hex 契约）+ sign(mac, hostname, nonce)。
+    """ECDSA P-256 测试密钥对：pubkey_hex（未压缩点 130 hex 契约）+ sign(mac, nonce)。
 
-    签名数据 = nonce||mac||hostname（UTF-8 字节拼接），输出 base64(DER)，与控制面验签契约一致。
+    签名数据 = nonce||mac（UTF-8 字节拼接），输出 base64(DER)，与控制面验签契约一致。
     """
     priv = ec.generate_private_key(ec.SECP256R1())
     pubkey_hex = priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint).hex()
 
-    def sign(mac: str, hostname: str, nonce: str) -> str:
-        data = f"{nonce}{mac}{hostname}".encode("utf-8")
+    def sign(mac: str, nonce: str) -> str:
+        data = f"{nonce}{mac}".encode("utf-8")
         return base64.b64encode(priv.sign(data, ec.ECDSA(hashes.SHA256()))).decode()
 
     return {"pubkey_hex": pubkey_hex, "sign": sign}
@@ -106,7 +106,7 @@ def mock_agent_client(monkeypatch):
         list_luns=lambda: [],
         list_masters=lambda: {"masters": [{"name": name} for name in FAKE_MASTERS]},
         scan=lambda: {"created": [], "skipped": []},
-        set_credential=lambda worker_id, secret, sub_nqns, host_nqns: {"worker_id": worker_id, "secret": bool(secret)},
+        set_credential=lambda worker_id, secret, sub_nqns, host_nqns, tls_psk=None: {"worker_id": worker_id, "secret": bool(secret)},
     )
     monkeypatch.setattr(agents, "client", lambda agent: fake)
     return fake

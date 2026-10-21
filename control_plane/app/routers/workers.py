@@ -5,6 +5,7 @@ nvmet 节点上建系统盘即由控制面自动签发密钥（见 _issue_creden
 import base64
 import copy
 import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -1107,8 +1108,11 @@ def _push_one(worker_id: str, agent_id: str, sub_nqns: list[str], secret: str | 
     # Host NQN base：盘 NQN 前缀（与 base_nqn 投影同机制）——同一 worker 持多盘
     # 时各盘同 agent 同域，base 一致；缺 nqn 的盘已跳过，此处恒有值
     host_nqns = [_host_nqn_for(_base_nqn_from_target(sub_nqns[0]), worker_id)]
+    # TLS-PSK 随认证密钥派生（_derive_tls_psk）；secret=None（吊销）→ 同步吊销目标端 PSK
+    tls_psk = _derive_tls_psk(secret) if secret else None
     try:
-        agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns)
+        agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns,
+                                            tls_psk=tls_psk)
         result, error = PUSH_OK, ""
     except AgentAPIError as exc:
         if exc.status_code == 400 and "backend=nvmet" in exc.detail:
@@ -1298,6 +1302,17 @@ def _secret_hash(secret: str) -> str:
     return "sha256:" + hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _derive_tls_psk(secret: str) -> str:
+    """从 worker 的 DHHC-1 认证密钥派生 NVMe/TCP TLS-PSK（32 字节，64 位十六进制）。
+
+    HMAC-SHA256 域分离派生（RFC 2104 PRF）——与 DHHC 认证共用同一把源密钥，**轮换认证
+    密钥即同时轮换 TLS-PSK**，因此推送台账的期望指纹不必扩展（PSK 是密钥的纯函数，
+    `_push_one` 每次现算）。目标端（nvmet-host keyring）与发起端（initramfs /boot-vars）
+    用同一串，identity 见 blueprint/nvme-tcp-tls-in-kernel.md §5。"""
+    raw = base64.b64decode(secret.split(":", 2)[2], validate=True)[:32]
+    return hmac.new(raw, b"kurrent-nvme-tls-psk-v1", hashlib.sha256).hexdigest()
+
+
 def _credential_meta(entry: dict[str, Any]) -> dict[str, Any]:
     """凭据元数据视图：不返回明文；secret_hash 只给前缀便于轮换比对。"""
     return {
@@ -1420,8 +1435,9 @@ def get_worker_credential(worker_id: str, request: Request):
 
 @router.delete("/workers/{worker_id}/credential")
 def delete_worker_credential(worker_id: str, request: Request):
-    """删除密钥（吊销该 worker 名下全部绑定设备的认证资格）：下次启动回落明文连接。
-    响应 push 投影反映吊销推送送达状态（未送达由对账重放，不会静默滞留）。"""
+    """删除密钥（吊销该 worker 名下全部绑定设备的认证资格）：下次启动拒绝引导。
+    零明文后没有明文回落路径（PSK 由认证密钥派生，密钥一没就无可用凭据），故吊销即
+    拒绝该 worker 的引导。响应 push 投影反映吊销推送送达状态（未送达由对账重放，不会静默滞留）。"""
     worker_id = canonical_id(worker_id)
     with store.locked():
         worker_record = store.load_workers()["workers"].get(worker_id)

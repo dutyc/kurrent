@@ -18,7 +18,7 @@ cpuid --ext 29 && set archl amd64 || set archl i386
 menu iPXE boot menu for ${initiator-iqn}
 item --gap --             ------------------------- Operating systems ------------------------------
 # 系统启动项动态化（2026-08-30）：MAIN MENU 只保留一个通用 OS 项，
-# 系统标识由控制面 /boot-vars 下发（os / os-version / os-tag，与盘 NQN 后缀同源），不再写死在脚本；
+# 系统标识由控制面 /boot-vars 下发（os / os-version 仅作展示），不再写死在脚本；
 # 支持新系统只需控制面侧建盘，脚本无需改动。
 # os-label：有版本时显示「os version」，无版本（未下发 os-version）回退纯 os
 set os-label ${os}
@@ -71,12 +71,22 @@ goto start
 :boot-os
 echo Booting ${os-label} via NVMe-oF for ${initiator-iqn}
 set netX/gateway ${storager-ip}
-# C3 拼接：root-path = nvme://<storager-ip>:4420/<base-nqn>:<hostname>.<os>.<os-tag>
-# 盘 NQN 由控制面按统一模板 base:worker_id.os.<os_tag> 生成，固件重拼 = 盘记录权威值；
-# os / os-tag 由控制面 /boot-vars 下发（= 默认盘记录投影），与盘 NQN 后缀同源；
-# 已注入 nbft-secret（DHHC-1）时附加 ?secret=（明文连接不附带）
-set root-path nvme://${storager-ip}:4420/${base-nqn}:${hostname}.${os}.${os-tag}
-isset ${nbft-secret} && set root-path nvme://${storager-ip}:4420/${base-nqn}:${hostname}.${os}.${os-tag}?secret=${nbft-secret} ||
+# C3 拼接：root-path = nvme://<storager-ip>:<port>/<disk-nqn>
+# 盘 NQN 由控制面按盘记录原样下发（disk-nqn），固件不再用 hostname/os/os-tag 重拼后缀；
+# 主机名是否及时（DHCP option 12）与数据面路径无关。
+# 端口：控制面下发 nbft-tls-port。默认全链路加密——数据面只有 TLS 1.3 一个端口
+# （4420 明文口已撤除），固件段与内核段共用它，故不存在明文回落分支。
+# 查询串按需拼接：?secret=（DHHC-1 认证）、&tls_psk=&tls_trsvcid=（固件段握手 + 内核段交接）。
+# 缺 nbft-tls-port / nbft-tls-psk / disk-nqn 即说明目标端未就绪，这里拒绝引导，不构造明文 URI。
+# nvme-sep 记录下一个分隔符（首参 '?'，其后 '&'）。
+# 注意：iPXE 脚本对返回失败的行会终止本脚本，故条件行一律以 || 收尾（|| 在此不构成 if/else）。
+isset ${nbft-tls-port} || goto failed
+isset ${nbft-tls-psk} || goto failed
+isset ${disk-nqn} || goto failed
+set nvme-sep ?
+set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}
+isset ${nbft-secret} && set root-path ${root-path}?secret=${nbft-secret} && set nvme-sep & ||
+set root-path ${root-path}${nvme-sep}tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}
 set keep-san 1
 sanboot ${root-path} || goto failed
 goto start

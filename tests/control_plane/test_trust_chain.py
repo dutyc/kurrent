@@ -1,10 +1,12 @@
 """信任根验签链路（boot 域）：/boot-vars 挑战-响应 + 强制开关拦截 + 注入投影。
 
-链路：设备认领（key_hash）→ challenge 取 nonce → 私钥签名（nonce||mac||hostname）→
+链路：设备认领（key_hash）→ challenge 取 nonce → 私钥签名（nonce||mac）→
 boot-vars 携带 nonce+sig 验签放行。强制开关开启后无密钥设备拒绝下发（注入四条件第 4 条）。
 """
 
 import pytest
+
+from control_plane.app.config import settings
 
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
@@ -58,7 +60,7 @@ class TestSignatureChain:
     def test_valid_signature_allows_boot_vars(self, client, auth_headers, ec_keypair):
         hostname = _claim_and_bind(client, auth_headers, ec_keypair)
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
         assert "set menu-default reboot" in res.text  # 无盘 worker → 默认 reboot 循环
@@ -67,7 +69,7 @@ class TestSignatureChain:
     def test_replay_nonce_rejected(self, client, auth_headers, ec_keypair):
         hostname = _claim_and_bind(client, auth_headers, ec_keypair)
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         assert _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig).status_code == 200
         # 同一 nonce+sig 重放 → 拒绝（nonce 一次性，取出即删）
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
@@ -85,7 +87,7 @@ class TestSignatureChain:
         from cryptography.hazmat.primitives.asymmetric import ec as ecm
         import base64
         other = ecm.generate_private_key(ecm.SECP256R1())
-        data = f"{nonce}{MAC_A}{hostname}".encode("utf-8")
+        data = f"{nonce}{MAC_A}".encode("utf-8")
         bad_sig = base64.b64encode(other.sign(data, ecm.ECDSA(hashes.SHA256()))).decode()
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=bad_sig)
         assert res.status_code == 200
@@ -94,14 +96,17 @@ class TestSignatureChain:
         assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
                    and e.get("reason") == "verify_failed" for e in ops)
 
-    def test_tampered_data_rejected(self, client, auth_headers, ec_keypair):
-        hostname = _claim_and_bind(client, auth_headers, ec_keypair)
+    def test_signature_for_other_mac_rejected(self, client, auth_headers, ec_keypair):
+        _claim_and_bind(client, auth_headers, ec_keypair)
         nonce = _challenge(client)
-        # 签名正确但 hostname 被篡改（签名数据含 hostname，验签失败）
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
-        res = _boot_vars(client, mac=MAC_A, hostname="worker-999", nonce=nonce, sig=sig)
+        # 用 MAC_B 的签名数据请求 MAC_A：nonce 绑定 MAC_A，验签失败
+        sig = ec_keypair["sign"](MAC_B, nonce)
+        res = _boot_vars(client, mac=MAC_A, nonce=nonce, sig=sig)
         assert res.status_code == 200
         assert EMPTY_SCRIPT in res.text
+        ops = client.get("/operations", params={"mac": MAC_A}, headers=auth_headers).json()["entries"]
+        assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
+                   and e.get("reason") == "verify_failed" for e in ops)
 
 
 class TestEnforcement:
@@ -127,23 +132,21 @@ class TestEnforcement:
         assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
                    and e.get("reason") == "missing_sig" for e in ops)
 
-    def test_enforcement_rejects_missing_hostname(self, client, auth_headers, ec_keypair):
-        hostname = _claim_and_bind(client, auth_headers, ec_keypair)
+    def test_enforcement_allows_missing_hostname(self, client, auth_headers, ec_keypair):
+        """签名只覆盖 nonce||mac：DHCP 未提供 hostname 时不再阻断引导。"""
+        _claim_and_bind(client, auth_headers, ec_keypair)
         client.put("/settings/enforcement", json={"enabled": True}, headers=auth_headers)
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
-        res = _boot_vars(client, mac=MAC_A, nonce=nonce, sig=sig)  # 缺 hostname
+        sig = ec_keypair["sign"](MAC_A, nonce)
+        res = _boot_vars(client, mac=MAC_A, nonce=nonce, sig=sig)  # 无 hostname
         assert res.status_code == 200
-        assert EMPTY_SCRIPT in res.text
-        ops = client.get("/operations", params={"mac": MAC_A}, headers=auth_headers).json()["entries"]
-        assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
-                   and e.get("reason") == "missing_hostname" for e in ops)
+        assert "set menu-default" in res.text
 
     def test_enforcement_allows_valid_signature(self, client, auth_headers, ec_keypair):
         hostname = _claim_and_bind(client, auth_headers, ec_keypair)
         client.put("/settings/enforcement", json={"enabled": True}, headers=auth_headers)
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
         assert "set menu-default" in res.text
@@ -200,7 +203,7 @@ class TestBootVarsProjection:
     def test_json_format(self, client, auth_headers, ec_keypair):
         hostname = _claim_and_bind(client, auth_headers, ec_keypair)
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig, format_="json")
         assert res.status_code == 200
         body = res.json()
@@ -223,12 +226,14 @@ class TestBootVarsWithDisk:
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
         assert res.json()["state"] == "ready"
+        disk = res.json()["disks"][0]
 
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
-        assert "set base-nqn nqn.2026-07.com.test" in res.text  # base-nqn 投影（C3 拼接前缀，盘 NQN 权威值的前缀）
+        assert f"set disk-nqn {disk['nqn']}" in res.text  # 完整盘 NQN 原样下发（盘记录权威值）
+        assert "set base-nqn" not in res.text  # 不再下发前缀，固件不重拼
         assert "set base-iqn iqn.2026-07.com.test" in res.text  # base-iqn 为前缀，worker 后缀由 iPXE 拼装
         assert "set storager-ip ag-01" in res.text  # storager_ip 缺省回退 base_url 主机名
         assert "set iscsi-sep :::1:" in res.text  # stgt 后端差异连接符
@@ -252,7 +257,7 @@ class TestBootVarsWithDisk:
         assert res.status_code == 201, res.text
 
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
         assert "set iscsi-sep :::1:" in res.text  # mock capabilities 实报 stgt，压过陈旧的 nvmet 标签
@@ -269,6 +274,7 @@ class TestBootVarsWithDisk:
             "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
+        disk = res.json()["disks"][0]
         res = client.put("/agents/ag-01", json={
             "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
             "tags": ["storage"], "enabled": False,
@@ -276,11 +282,11 @@ class TestBootVarsWithDisk:
         assert res.status_code == 200
 
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
         assert "set storager-ip ag-01" in res.text  # 存量盘照常投影
-        assert "set base-nqn nqn.2026-07.com.test" in res.text
+        assert f"set disk-nqn {disk['nqn']}" in res.text
 
     def test_default_disk_projects_boot_vars(self, client, auth_headers, ec_keypair, mock_agent_client):
         client.post("/agents", json={
@@ -297,21 +303,22 @@ class TestBootVarsWithDisk:
         assert res.json()["default_disk"] == os_tag
 
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
-        # 2026-08-30 MAIN MENU 动态化：default_disk 归一到通用项 boot-os，os/os-tag 投影默认盘身份
+        # 2026-08-30 MAIN MENU 动态化：default_disk 归一到通用项 boot-os，os/disk-nqn 投影默认盘身份
         assert "set menu-default boot-os" in res.text
         assert "set os ubuntu" in res.text
-        assert f"set os-tag {os_tag}" in res.text
+        assert f"set disk-nqn {disk['nqn']}" in res.text
+        assert "set os-tag" not in res.text  # NQN 已完整下发，不再暴露后缀
         assert "set os-version" not in res.text  # 无版本 → 不下发
         # default_disk > boot.menu_default 推导链：显式 menu_default 不覆盖 default_disk
         client.put("/workers/worker-01/default-disk", json={"menu_default": "windows"}, headers=auth_headers)
         nonce2 = _challenge(client)
-        sig2 = ec_keypair["sign"](MAC_A, hostname, nonce2)
+        sig2 = ec_keypair["sign"](MAC_A, nonce2)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce2, sig=sig2)
         assert "set menu-default boot-os" in res.text
         assert "set os ubuntu" in res.text
-        assert f"set os-tag {os_tag}" in res.text
+        assert f"set disk-nqn {disk['nqn']}" in res.text
 
     def test_default_disk_projects_os_version(self, client, auth_headers, ec_keypair, mock_agent_client):
         """带版本的默认盘：boot-vars 投影 os-version（menu 侧 os-label 拼版本展示）。"""
@@ -326,9 +333,22 @@ class TestBootVarsWithDisk:
         client.put("/workers/worker-01/default-disk", json={"disk": disk["os_tag"]}, headers=auth_headers)
 
         nonce = _challenge(client)
-        sig = ec_keypair["sign"](MAC_A, hostname, nonce)
+        sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert "set menu-default boot-os" in res.text
         assert "set os ubuntu" in res.text
         assert "set os-version 24.04" in res.text
-        assert f"set os-tag {disk['os_tag']}" in res.text
+        assert f"set disk-nqn {disk['nqn']}" in res.text
+
+
+class TestDeviceBindingAuthority:
+    """设备台账 bound_worker_id 是绑定权威；hostname/dnsmasq 投影只作兜底，不得反向覆盖。"""
+
+    def test_device_binding_beats_stale_dnsmasq_projection(self, client, auth_headers, ec_keypair):
+        # 设备台账（权威）绑定到 worker-01；伪造滞后的 dnsmasq 投影指向 worker-02
+        _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
+        assert client.post("/workers", json={"worker_id": "worker-02"}, headers=auth_headers).status_code == 201
+        settings.dnsmasq_hosts_file.write_text(f"{MAC_A},worker-02\n", encoding="utf-8")
+        res = _boot_vars(client, mac=MAC_A, hostname="worker-02")
+        assert res.status_code == 200
+        assert "# boot vars for worker-01" in res.text
