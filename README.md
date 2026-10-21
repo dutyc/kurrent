@@ -1,6 +1,6 @@
 # Kurrent
 
-[![Stars](https://img.shields.io/github/stars/dutyc/kurrent?style=flat-square&color=555)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent?style=flat-square&color=555)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent?style=flat-square&color=555)](LICENSE) [![Docs](https://img.shields.io/badge/docs-online-555?style=flat-square)](https://dutyc.github.io/kurrent/)
+![Cloud Native](https://img.shields.io/badge/Cloud%20Native-True%20Cloud%20Native-18181b) [![NVMe-oF](https://img.shields.io/badge/Data%20Plane-NVMe--oF%20First-00D4FF)](https://dutyc.github.io/kurrent/guide/deployment.html) [![Stars](https://img.shields.io/github/stars/dutyc/kurrent)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent)](LICENSE) [![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-2563eb)](https://dutyc.github.io/kurrent/)
 
 [中文版](./README.zh-CN.md) | [English](./README.md)
 
