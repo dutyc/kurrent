@@ -136,6 +136,15 @@
   color: var(--black);
 }
 
+/* Badge + 文本并排（数据面端口就绪态）：单一值中混排时不撑破网格轨道 */
+.ap-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .ap-mono {
   font-family: var(--font-mono);
   font-size: 12px;

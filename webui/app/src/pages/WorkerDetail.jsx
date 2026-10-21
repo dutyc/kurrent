@@ -16,6 +16,7 @@ import {
   revokeWorkerCredential,
   generateDHHC1,
 } from '../api/client'
+import { deriveEncryptionPosture } from '../api/posture'
 import { useI18n } from '../i18n'
 import Button from '../components/Button'
 import Card from '../components/Card'
@@ -56,10 +57,14 @@ export default function WorkerDetail() {
   const [worker, setWorker] = useState(null)
   const [status, setStatus] = useState(null)
   const [bootVarsCode, setBootVarsCode] = useState('')
+  // 引导变量 JSON 投影（加密姿态的唯一判据，见 api/posture.js）；null = 未取回
+  const [bootVarsJson, setBootVarsJson] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [agentsList, setAgentsList] = useState([])
+  // 全量 Agent（含 capabilities，供加密姿态归因用）：live 列表才有后端/端口能力
+  const [agentsAll, setAgentsAll] = useState(null)
   const [mastersData, setMastersData] = useState(null)
   const [diskForm, setDiskForm] = useState({ os: 'ubuntu', os_version: '', type: 'empty', name: '', size: '40G', disk_agent: '' })
   const [creatingDisk, setCreatingDisk] = useState(false)
@@ -129,15 +134,16 @@ export default function WorkerDetail() {
   const buildBootVarsCode = (bv, worker) => {
     if (bv && Object.keys(bv).length > 0) {
       const lines = ['#!ipxe', `# boot vars for ${(worker && worker.hostname) || id}`]
-      if (bv.base_nqn) lines.push(`set base-nqn ${bv.base_nqn}`)
+      if (bv.disk_nqn) lines.push(`set disk-nqn ${bv.disk_nqn}`)
       if (bv.base_iqn) lines.push(`set base-iqn ${bv.base_iqn}`)
       if (bv.storager_ip) lines.push(`set storager-ip ${bv.storager_ip}`)
       if (bv.iscsi_sep) lines.push(`set iscsi-sep ${bv.iscsi_sep}`)
       if (bv.nbft_secret) lines.push(`set nbft-secret ${bv.nbft_secret}`)
+      if (bv.nbft_tls_psk) lines.push(`set nbft-tls-psk ${bv.nbft_tls_psk}`)
+      if (bv.nbft_tls_port) lines.push(`set nbft-tls-port ${bv.nbft_tls_port}`)
       if (bv.hostnqn) lines.push(`set hostnqn ${bv.hostnqn}`)
       if (bv.os) lines.push(`set os ${bv.os}`)
       if (bv.os_version) lines.push(`set os-version ${bv.os_version}`)
-      if (bv.os_tag) lines.push(`set os-tag ${bv.os_tag}`)
       if (bv.menu_default) lines.push(`set menu-default ${bv.menu_default}`)
       if (bv.menu_timeout !== undefined) lines.push(`set menu-timeout ${bv.menu_timeout}`)
       return lines.join('\n')
@@ -166,6 +172,7 @@ export default function WorkerDetail() {
           clear_timeout: false,
         })
         setBootVarsCode(buildBootVarsCode(bv, w))
+        setBootVarsJson(bv)
       } catch (e) {
         if (!cancelled) setError(e.message)
       } finally {
@@ -181,19 +188,21 @@ export default function WorkerDetail() {
     async function loadDiskAgents() {
       try {
         const [agents, masters] = await Promise.all([
-          getAgents(false),
+          // live=true：加密姿态归因需要 capabilities.backend / capabilities.port
+          getAgents(true),
           getMasters().catch(() => null), // 全部 Agent 失败时聚合端点 502，母盘下拉置空即可
         ])
         if (cancelled) return
-        const diskAgents = (Array.isArray(agents) ? agents : []).filter(
-          (a) => a.enabled && a.role?.disk
-        )
+        const all = Array.isArray(agents) ? agents : []
+        const diskAgents = all.filter((a) => a.enabled && a.role?.disk)
+        setAgentsAll(all)
         setAgentsList(diskAgents)
         setMastersData(masters)
         if (diskAgents.length > 0) {
           setDiskForm((prev) => ({ ...prev, disk_agent: prev.disk_agent || diskAgents[0].id }))
         }
       } catch {
+        setAgentsAll(null)
         setAgentsList([])
         setMastersData(null)
       }
@@ -235,6 +244,7 @@ export default function WorkerDetail() {
       clear_timeout: false,
     })
     setBootVarsCode(buildBootVarsCode(bv, w))
+    setBootVarsJson(bv)
   }
 
   const handleDeleteDisk = async (osTag, extra) => {
@@ -305,6 +315,7 @@ export default function WorkerDetail() {
         clear_timeout: false,
       })
       setBootVarsCode(buildBootVarsCode(bv, w))
+      setBootVarsJson(bv)
     } catch (err) {
       setBootSaveError(err.message)
     } finally {
@@ -334,6 +345,7 @@ export default function WorkerDetail() {
     try {
       await setWorkerCredential(id, generateDHHC1())
       setCred(await getWorkerCredential(id).catch(() => null))
+      setBootVarsJson(await bootVars({ hostname: id, format: 'json' }).catch(() => null))
     } catch (err) {
       setCredError(err.message)
     } finally {
@@ -347,6 +359,7 @@ export default function WorkerDetail() {
     try {
       await revokeWorkerCredential(id)
       setCred(await getWorkerCredential(id).catch(() => null))
+      setBootVarsJson(await bootVars({ hostname: id, format: 'json' }).catch(() => null))
     } catch (err) {
       setCredError(err.message)
     } finally {
@@ -394,6 +407,20 @@ export default function WorkerDetail() {
   // 凭据按盘生效：盘标识权威 = NQN，缺 NQN 的存量盘不支持 NVMe-oF 凭据（与后端推送目标口径一致），
   // 故无 NVMe-oF 盘时整个页签不出现（不支持即隐藏）
   const hasNvmeof = disks.some((d) => d.nqn)
+
+  // 引导加密姿态（段 2.5）：结论只认 /boot-vars 投影（api/posture.js），
+  // capabilities.port.ready 与 credential.exists 只做归因、不用于下结论。
+  // 端口/后端取自「默认启动盘」所在节点——控制面裁决引导变量时同样按默认盘选 target。
+  const bootDisk = disks.find((d) => d.os_tag === worker.default_disk) || disks.find((d) => d.nqn)
+  const bootAgent = (agentsAll || []).find((a) => a.id === bootDisk?.agent) || null
+  const dataPort = bootAgent?.capabilities?.port || null
+  const posture = deriveEncryptionPosture({
+    hasNvmeofDisk: hasNvmeof,
+    backend: bootAgent?.capabilities?.backend,
+    port: dataPort,
+    credentialExists: cred?.exists,
+    bootVars: bootVarsJson,
+  })
 
   return (
     <div>
@@ -515,8 +542,64 @@ export default function WorkerDetail() {
       )}
 
       {activeTab === 'credential' && hasNvmeof && (
-        // NVMe-oF 认证凭据（DHHC-1，按 worker 跟盘）：保存态 + 逐 Agent 推送状态 + 生成/轮换/吊销
+        // NVMe-oF 认证凭据（DHHC-1，按 worker 跟盘）：引导加密姿态 + 保存态 + 逐 Agent 推送状态 + 生成/轮换/吊销
         <Card className="detail-card">
+          {/* 引导加密姿态：结论只认 /boot-vars 投影；port/credential 仅用于归因（见 api/posture.js） */}
+          <div className="info-row">
+            <span className="info-label">{t('workerDetail.encPosture')}</span>
+            <span className="enc-line">
+              {posture.state === 'encrypted' && (
+                <>
+                  <Badge variant="ok">{t('workerDetail.encActiveBadge')}</Badge>
+                  <span className="info-value">{t('workerDetail.encActive')}</span>
+                </>
+              )}
+              {posture.state === 'refused' && (
+                <>
+                  <Badge variant="error">{t('workerDetail.encRefusedBadge')}</Badge>
+                  <span className="info-value">
+                    {posture.reason === 'port_not_ready'
+                      ? t('workerDetail.encRefusedPort')
+                      : posture.reason === 'no_credential'
+                        ? t('workerDetail.encRefusedNoKey')
+                        : t('workerDetail.encRefusedEmpty')}
+                  </span>
+                </>
+              )}
+              {posture.state === 'n/a' && (
+                <>
+                  <Badge>{t('workerDetail.encNaBadge')}</Badge>
+                  <span className="info-value">{t('workerDetail.encNa')}</span>
+                </>
+              )}
+              {posture.state === 'unavailable' && (
+                <>
+                  <Badge>{t('workerDetail.encUnavailableBadge')}</Badge>
+                  <span className="info-value">{t('workerDetail.encUnavailable')}</span>
+                </>
+              )}
+            </span>
+          </div>
+          {/* 数据面端口：仅 nvmet 后端显示（不支持即隐藏）；端口信息取自盘所在 Agent 的 capabilities.port */}
+          {bootAgent?.capabilities?.backend === 'nvmet' && (
+            <div className="info-row">
+              <span className="info-label">{t('workerDetail.dataPort')}</span>
+              <span className="enc-line">
+                {dataPort ? (
+                  <>
+                    <span className="info-value info-mono">
+                      {dataPort.trsvcid} · {dataPort.tsas}
+                    </span>
+                    <Badge variant={dataPort.ready ? 'ok' : 'error'}>
+                      {dataPort.ready ? t('workerDetail.portReady') : t('workerDetail.portNotReady')}
+                    </Badge>
+                  </>
+                ) : (
+                  <Badge variant="error">{t('workerDetail.dataPortDisabled')}</Badge>
+                )}
+              </span>
+            </div>
+          )}
           {cred === null ? (
             <p className="page-muted">{t('workerDetail.credentialUnavailable')}</p>
           ) : (

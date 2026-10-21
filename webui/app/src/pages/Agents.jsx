@@ -53,6 +53,27 @@ function AgentCard({ agent, t, onEdit }) {
           <span className="ap-label">{t('agents.backend')}</span>
           <span className="ap-value">{agent.capabilities?.backend || t('agents.unknown')}</span>
         </div>
+        {/* 数据面端口（仅 nvmet）：与 health Badge 分开表达——health=degraded 是存储后端不可达，
+            port.ready=false 是数据面 TLS 端口没起来，二者相互独立（见 ENCRYPTION-POSTURE.md R2） */}
+        {agent.capabilities?.backend === 'nvmet' && (
+          <div className="agent-prop">
+            <span className="ap-label">{t('agents.dataPlane')}</span>
+            <span className="ap-value ap-inline">
+              {agent.capabilities?.port ? (
+                <>
+                  <span className="ap-mono">
+                    {agent.capabilities.port.trsvcid} · {agent.capabilities.port.tsas}
+                  </span>
+                  <Badge variant={agent.capabilities.port.ready ? 'ok' : 'error'}>
+                    {agent.capabilities.port.ready ? t('agents.portReady') : t('agents.portNotReady')}
+                  </Badge>
+                </>
+              ) : (
+                <Badge variant="error">{t('agents.dataPlaneDisabled')}</Badge>
+              )}
+            </span>
+          </div>
+        )}
         <div className="agent-prop">
           <span className="ap-label">{t('agents.fsType')}</span>
           <span className="ap-value ap-mono">{agent.capabilities?.fs_type || t('agents.unknown')}</span>

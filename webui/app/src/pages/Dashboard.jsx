@@ -19,7 +19,7 @@ function StatCard({ label, value, sub }) {
 
 export default function Dashboard() {
   const { t } = useI18n()
-  const [stats, setStats] = useState({ workers: 0, agents: 0, agentHealthy: 0, devices: 0 })
+  const [stats, setStats] = useState({ workers: 0, agents: 0, agentHealthy: 0, devices: 0, dataPlaneReady: 0, dataPlaneTotal: 0 })
   const [recentOps, setRecentOps] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -35,12 +35,18 @@ export default function Dashboard() {
           getOperations(0, 10).catch(() => ({ entries: [] })),
         ])
         if (cancelled) return
-        const agentHealthy = agents.filter((a) => a.health === 'ok').length
+        const agentList = Array.isArray(agents) ? agents : []
+        const agentHealthy = agentList.filter((a) => a.health === 'ok').length
+        // 节点级加密前置缺口：nvmet 节点中数据面 TLS 端口就绪数（不逐 Worker 轮询，避免 N+1）
+        const nvmetAgents = agentList.filter((a) => a.capabilities?.backend === 'nvmet')
+        const dataPlaneReady = nvmetAgents.filter((a) => a.capabilities?.port?.ready === true).length
         setStats({
           workers: Array.isArray(workers) ? workers.length : 0,
           devices: Array.isArray(devices) ? devices.length : 0,
-          agents: Array.isArray(agents) ? agents.length : 0,
+          agents: agentList.length,
           agentHealthy,
+          dataPlaneReady,
+          dataPlaneTotal: nvmetAgents.length,
         })
         setRecentOps((ops.entries || []).slice().reverse())
       } catch (e) {
@@ -72,6 +78,11 @@ export default function Dashboard() {
           label={t('dashboard.agents')}
           value={loading ? '—' : `${stats.agentHealthy}/${stats.agents}`}
           sub={t('dashboard.healthyTotal')}
+        />
+        <StatCard
+          label={t('dashboard.dataPlane')}
+          value={loading ? '—' : `${stats.dataPlaneReady}/${stats.dataPlaneTotal}`}
+          sub={t('dashboard.dataPlaneSub')}
         />
       </div>
 

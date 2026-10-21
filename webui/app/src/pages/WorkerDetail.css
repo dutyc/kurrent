@@ -271,6 +271,15 @@
   min-width: 0;
 }
 
+/* 引导加密姿态 / 数据面端口行：Badge + 说明文字并排（与 .cred-state 同构，允许换行） */
+.enc-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 /* 推送状态行与 .info-row 共用列定义（160px 标签列 + 内容列），保持左对齐一致 */
 .cred-push {
   display: grid;
