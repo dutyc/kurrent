@@ -8,13 +8,64 @@
 - **新增**：新功能、新端点、新配置项
 - **变更**：行为调整、接口变更、数据模型调整
 - **修复**：缺陷修复
-- 涉及多个模块的改动，按模块分条列出；接口变更同时需同步 `api/control-plane-api.zh-CN.md` 与 `api/control-plane-api.en.md`（控制面 API 参考唯一权威；docs/ 文档站冻结待重写，不再修改）
+- 记录行为与接口层面的变化；注释、措辞等无行为影响的调整不单列
+- 涉及多个模块的改动，按模块分条列出；接口变更同时需同步 `api/control-plane-api.zh-CN.md` 与 `api/control-plane-api.en.md`（控制面 API 参考唯一权威；docs/ 文档站同步维护）
 
 ---
+
+## 2026-10-20
+
+### 修复
+
+- **文档与实现对齐**：修正 `/boot-vars` 的识别顺序（MAC 优先、主机名兜底）、`hostnqn` 的派生方式与固件补丁号、`menu_timeout` 的配置来源，并将启动变量示例改为 nvmet 后端、补齐 TLS 字段；部署指南同步凭据快照的发现链与已验证宿主环境，WebUI 的 boot-vars 预览补齐 `disk-nqn` 与 TLS 字段；架构文档的引导准入与设备侧描述同步当前实现。
+
+## 2026-10-18
+
+### 变更
+
+- **引导数据面与控制面脱钩：`/boot-vars` 下发完整盘 NQN，移除主机名下发端点**——此前 menu 用 `${hostname}.${os}.${os-tag}` 重拼盘 NQN，使数据面路径依赖 DHCP/DNS 主机名时序；主机名只影响菜单标签后，这层耦合不再有存在理由：
+  - `control_plane/app/routers/boot.py`：`disk_nqn` 取代 `base_nqn`（盘记录 `nqn` 原样下发，不再由前缀派生），`os_tag` 不再下发，`os` / `os_version` 降为菜单展示用；删除 `GET /devices/hostname`；Worker 查找改为 MAC → 设备台账 `bound_worker_id` 优先，hostname 仅作无 MAC / 未命中时的兜底
+  - `control_plane/app/trust.py`：验签数据由 `nonce‖mac‖hostname` 收窄为 `nonce‖mac`——hostname 由客户端自报且服务端不与台账比对，放进签名串不增加身份约束；身份仍由 MAC → 设备绑定与一次性 nonce 保证
+  - `tftp/boot.ipxe.cfg`：删除主机名获取阶段（阶段 2.5），`sign` 改用 `${nonce}${mac}`；`tftp/menu.ipxe`：`root-path` 直接拼 `${disk-nqn}`，缺变量即 `goto failed`
+  - 测试：`tests/control_plane/test_trust_chain.py` 同步契约（验签去 hostname、`disk-nqn` 投影、跨 MAC 签名拒绝、MAC 优先于滞后 dnsmasq 投影），22 passed
+  - 文档：`api/control-plane-api.{zh-CN,en}.md`、`about/{en,zh}/ARCHITECTURE.md`、`webui/deploy/nginx/nginx.conf` 注释
+- **文档站内容对齐实现（`docs/`）**——解除「冻结待重写」状态，按当前实现更新中英双语站点：
+  - 部署指南：数据面改为单口 `4421`（NVMe/TCP TLS 1.3，固件段与内核段共用），补 `4841` 宿主本地管理口；宿主前置改为 `host-prepare.sh` + TLS 内核选项 + `tlshd`；防火墙与排障同步；删除全部 `kubeadm` 血统标注
+  - 新增「使用流程」页（中英）：注册窗口入池 → 绑定 Worker → 创建系统盘（放置/批量/dry_run）→ 设置默认盘 → 开机链 → 凭据轮换/吊销 → 日常操作
+  - 首页特性与侧边栏导航同步；`host-prepare.sh` 注释端口修正为 `4421`
+- **文档站视觉重制：纸墨版式与单色标识**——首页由默认 VitePress 版式改为自绘的刊物式首页，去掉霓虹/终端视觉，主视觉落在「无状态 / 系统即单元」的命题而非引导链：
+  - `docs/.vitepress/theme/components/KurrentHome.vue`：中英双语首页组件（`layout: false`），纸墨色板 `#f4f1ea` / `#151412`、宋体标题、等宽元信息、细分割线；六虚记号按 logo 比例用 CSS 渐变实现断爻对齐；「已验证发行版」一节明确验证范围不构成发行版限制
+  - `docs/.vitepress/theme/index.ts` 注册组件；`docs/index.md`、`docs/en/index.md` 改挂载点
+  - `docs/public/logo.svg` 改为单色墨黑，新增 `logo-dark.svg`（骨白）；`config.mts` logo 明暗双份
+  - `docs/.vitepress/theme/custom.css`：全站纸色 / 石墨暗色两套色板，正文标题改为宋体，代码块与引用块同步
+  - `docs/{,en/}guide/deployment.md`：拓扑图「无盘引导 / Diskless clients」改为「网络引导 / Bare-metal clients」
+
+## 2026-10-06
+
+### 变更
+
+- **NVMe-oF 数据面默认全链路加密：撤明文口（段 2.3 端口收口）**——1.3c 的双口形态（`4420` 明文 + `4421` TLS）以「固件引导段不做 TLS 握手」为前提；固件侧 TLS 1.3 PSK 客户端（固件仓段 2.1/2.2）就绪后，固件段可自行握手，明文口失去存在理由。按「默认全链路加密、不搞特殊」裁定，数据面收敛为单口、无明文回退：
+  - `storager/nvmeof/nvmet-host/app/main.py`：数据面单口（`ports/2`、`4421`、`tsas=tls1.3`）；`/capabilities` 端口键由 `tls_port` 合并为 `port`（含 `port_id`/`trsvcid`/`tsas`/`ready`，数据面关闭时为 `null`）；`POST /port` 无参（幂等确保数据面口）；启动增 `remove_legacy_plain_port()`——拆除历史明文口残留（先摘 `subsystems/*` 挂载再 `rmdir`），使升级宿主收敛单口；`ensure_tls_port()` 失败即 `tls_ready=false`（不再「降级明文」）
+  - `control_plane/app/routers/boot.py`：`/boot-vars` 改为「加密是默认、无明文回退」——nvmet 后端下「有密钥 + 数据面端口就绪」缺一即**整体不下发引导变量**并记审计（`boot_vars.encryption` denied，reason `no_credential`/`port_not_ready`）；端口值取自 `/capabilities.port.trsvcid`（要求 `ready`）
+  - `tftp/menu.ipxe`：`:boot-os` 端口取 `${nbft-tls-port}`（不再硬编码 `4420`、不再回落明文）；`nbft-tls-port`/`nbft-tls-psk` 缺失即 `goto failed`
+  - 测试：`tests/nvmet_host/test_nvmet_host_service.py`（单口能力 / 建口 / 迁移拆口）、`tests/control_plane/test_credentials.py`（端口未就绪拒绝、无凭据拒绝、非 nvmet 后端不下发）；全量 pytest **371 passed**
+  - 文档：`README{,.zh-CN}.md`、`about/{en,zh}/ARCHITECTURE.md`、`storager/nvmeof/nvmet-host/README.md`（单口、「无明文回退」措辞）、`cli/README.md`、`api/control-plane-api.{zh-CN,en}.md`（`nbft_tls_port` 能力来源 `/capabilities.port.trsvcid`、吊销语义「拒绝引导」）、`storager/nvmeof/docker-compose.yml` 注释
 
 ## 2026-10-05
 
 ### 新增
+
+- **数据面传输加密：内核段 NVMe/TCP TLS 1.3（段 1.3 主仓侧）**——DH-HMAC-CHAP 认证只回答「谁能连」，数据面内容此前全程明文；而 TSAS 是**端口级**属性、只接受 `tls1.3`，因此同一子系统必须挂两个端口才能「固件引导段明文 + 内核段加密」：
+  - `storager/nvmeof/nvmet-host/app/main.py`：新增 TLS 端口（`ports/2`、`4421`、`tsas=tls1.3`，内核自动置 `treq=required`；`NVMET_TLS_PORT_ID` 为空 = 关闭 TLS）与 `NvmePskKeyring`——ctypes 直调 `add_key`/`keyctl` 把 `psk` key 注入内核全局 `.nvme` keyring（identity `NVMe0R01 <hostnqn> <subsysnqn>`）；端点 `PUT /subsystems/{nqn}/tls`、`DELETE /subsystems/{nqn}/tls/{hostnqn}`；`/capabilities.tls_port` 如实报 `ready`（建口失败只降级为仅明文并留痕，不静默）；`create/delete_subsystem` 同时挂/摘两口。两处实测坑已固化：`psk` key 的 possessor 权限不含 Write ⇒ 必须先摘旧 key 再写（一条 identity 只留一条）；淘汰须**限定在 `.nvme` 内**（`KEYCTL_READ` 读挂载列表定位），照 `/proc/keys` 全局同名条目找会 UNLINK 得 `ENOENT` 且旧 key 越积越多
+  - `storager/nvmeof/docker-compose.yml`：`security_opt` 增 `seccomp=unconfined` 与 `systempaths=unconfined`——写内核 `.nvme` 的两处默认策略（seccomp 拒 `add_key`/`keyctl` → EPERM；`/proc/keys` 被 MaskedPaths 屏蔽成 `/dev/null`）缺任一即静默失败
+  - `control_plane/app/routers/workers.py` + `app/agent_client.py`：新增 `_derive_tls_psk`（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex）——**PSK 是认证密钥的纯函数，不新增存储字段**，故轮换/吊销认证密钥即原子地轮换/吊销 PSK（推送台账指纹也不需扩展）；`_push_one` 现算并随推送携带（吊销带 `None`），`set_credential` 增 `tls_psk` 形参
+  - `storager/agent/app/{main.py,nvmet.py}`：`PUT /credential` 透传 `tls_psk`（审计只记 `tls: bool`，不记本体）；缓存期望状态含 `tls_psk`；`_sync` 有 PSK → 宿主 `/tls` 注入（**409 = 目标端未启用 TLS，降级明文记警告、非故障**；404 幂等）、吊销 → 摘除、**密钥在但未带 PSK（旧控制面）→ 保持不动**（避免误清已有 PSK）
+  - `control_plane/app/routers/boot.py` + `tftp/menu.ipxe`：`/boot-vars` 在「已绑定 + 有密钥 + 后端 nvmet + Agent 上报的 TLS 端口就绪」四条同时满足时投影 `nbft_tls_psk` / `nbft_tls_port`（缺任一不下发——固件走明文，与未启用 TLS 的 target 兼容）；menu 在 sanboot URI 追加 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}`，随 NBCT 表交给 initramfs，由其在 `4421` 以 `--tls` 重连（**固件引导段本身仍走 4420 明文**）
+  - 测试：`tests/nvmet_host/test_nvmet_host_service.py`（TLS 端口创建/挂载、Keyring 注入与摘除、`.nvme` 限定查找回归）、`tests/agent/*`（`tls_psk` 透传与吊销）、`tests/control_plane/test_credentials.py`（派生 + 推送携带 + `/boot-vars` 三例：TLS 就绪下发 / 端口未就绪不下发 / 非 nvmet 后端不下发）；全量 pytest **369 passed**
+  - 已实测（2026-10-05）：1.3a 目标端供给（R1 容器写 `.nvme` 需两处放行、R5 同子系统挂两口）、1.3b 控制面派生→agent→目标端 PSK（含 1.3b′ 内核发起端 `nvme connect --tls` 全自动供给、1.3b″ 对账周期重放不产生重复 key、1.3b‴ 负对照：无 key 必挂）
+  - **待验收**：1.3c 冷启动端到端（用户 root 执行）——判据为到 `login:`、`:4421` pcap 零明文 NVMe/TCP PDU、`TlsTxSw`/`TlsRxSw` 非零、`:4420` 段无回归；initramfs 侧 R2/R3/R4（tlshd / keyctl / `nvme-keyring` 等模块在 initramfs 中可用）在固件仓
+  - 文档：`api/control-plane-api.{zh-CN,en}.md`（5 节 `nbft_tls_psk`/`nbft_tls_port` 两行、7.7 推送体与静态口径「三处」改「四处」、能力清单）、`about/{en,zh}/ARCHITECTURE.md`（数据面双端口、交接给 OS 带 TLS 参数、「认证 ≠ 加密」改写为两层独立）、`storager/nvmeof/nvmet-host/README.md`（新增「传输加密」节 + 环境变量/端点表/安全边界/宿主前置含 tlshd）、`cli/README.md`、`blueprint/nvmeof-credential-design.md`（§6 端口行、§8 核对项、§9 静态加密条目）
+  - 设计依据：`blueprint/nvme-tcp-tls-in-kernel.md`（机制、实测证据、验收判据）与 `blueprint/nvme-tcp-tls-kurrent-changes.md`（主仓改动清单）
 
 - **CLI 管理凭据用户级快照（`kurrent credentials install|show|remove`，脱离仓库可用）**——CLI 凭据发现此前只服务仓库内：二进制安装到 PATH 或在仓库外调用时静默回退无凭据通道（401 难以归因），而把 admin.conf 写成绝对路径又会在仓库迁移/凭据轮换后静默不同步。凭据按「获取一份快照」处理——复制而非跟随，过期靠重新获取（重跑 install）：
   - `cli/credentials.go`：发现链尾追用户级快照——`--credentials` ＞ `KURRENT_CREDENTIALS` ＞ 仓库内（cwd 逐级上溯 → 可执行文件旁）＞ `~/.kurrent/admin.conf`（仓库源在场时优先实时源，脱离仓库才吃快照）；`credentialsFile` 增 `installed-from`/`installed-at` 溯源键（仅快照写入）；`authHint` 修法首推 `kurrent credentials install`

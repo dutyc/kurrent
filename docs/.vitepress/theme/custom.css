@@ -1,32 +1,73 @@
-/* Kurrent 站黑白主题：品牌色 = 中性灰阶（light：黑；dark：白），无彩色强调 */
+/* Kurrent 站纸面主题：黑白墨色，正文默认主题只换色板与标题字体。 */
 
 :root {
-  /* 品牌主色（链接 / 激活态 / hero 文字渐变） */
-  --vp-c-brand-1: #111111;
-  --vp-c-brand-2: #4a4a4a;
-  --vp-c-brand-3: #000000;
-  --vp-c-brand-soft: rgba(0, 0, 0, 0.08);
+  --k-serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", "SimSun", serif;
 
-  /* 主按钮（brand）：黑底白字 */
-  --vp-button-brand-bg: #000000;
-  --vp-button-brand-hover-bg: #2f2f2f;
-  --vp-button-brand-active-bg: #2f2f2f;
-  --vp-button-brand-text: #ffffff;
-  --vp-button-brand-hover-text: #ffffff;
-  --vp-button-brand-active-text: #ffffff;
+  /* 纸面与墨色 */
+  --vp-c-bg: #f4f1ea;
+  --vp-c-bg-alt: #ece8df;
+  --vp-c-bg-elv: #f8f6f1;
+  --vp-c-bg-soft: #e9e5dc;
+  --vp-c-text-1: #151412;
+  --vp-c-text-2: #4c4842;
+  --vp-c-text-3: #8a847a;
+  --vp-c-divider: rgba(21, 20, 18, 0.14);
+  --vp-c-gutter: #ece8df;
+
+  /* 品牌色 = 墨色（无彩色强调） */
+  --vp-c-brand-1: #151412;
+  --vp-c-brand-2: #4c4842;
+  --vp-c-brand-3: #151412;
+  --vp-c-brand-soft: rgba(21, 20, 18, 0.08);
+
+  /* 主按钮：黑底白字 */
+  --vp-button-brand-bg: #151412;
+  --vp-button-brand-hover-bg: #3a3630;
+  --vp-button-brand-active-bg: #3a3630;
+  --vp-button-brand-text: #f4f1ea;
+  --vp-button-brand-hover-text: #f4f1ea;
+  --vp-button-brand-active-text: #f4f1ea;
+
+  --vp-code-block-bg: #ece8df;
 }
 
 .dark {
-  --vp-c-brand-1: #f2f2f2;
-  --vp-c-brand-2: #b5b5b5;
-  --vp-c-brand-3: #ffffff;
-  --vp-c-brand-soft: rgba(255, 255, 255, 0.14);
+  --vp-c-bg: #12110f;
+  --vp-c-bg-alt: #191714;
+  --vp-c-bg-elv: #1e1b17;
+  --vp-c-bg-soft: #1a1815;
+  --vp-c-text-1: #ece8df;
+  --vp-c-text-2: #bdb7ab;
+  --vp-c-text-3: #857f73;
+  --vp-c-divider: rgba(236, 232, 223, 0.14);
+  --vp-c-gutter: #191714;
 
-  /* 主按钮：白底黑字 */
-  --vp-button-brand-bg: #ffffff;
-  --vp-button-brand-hover-bg: #c8c8c8;
-  --vp-button-brand-active-bg: #c8c8c8;
-  --vp-button-brand-text: #000000;
-  --vp-button-brand-hover-text: #000000;
-  --vp-button-brand-active-text: #000000;
+  --vp-c-brand-1: #ece8df;
+  --vp-c-brand-2: #bdb7ab;
+  --vp-c-brand-3: #ece8df;
+  --vp-c-brand-soft: rgba(236, 232, 223, 0.14);
+
+  --vp-button-brand-bg: #ece8df;
+  --vp-button-brand-hover-bg: #cfc9bc;
+  --vp-button-brand-active-bg: #cfc9bc;
+  --vp-button-brand-text: #12110f;
+  --vp-button-brand-hover-text: #12110f;
+  --vp-button-brand-active-text: #12110f;
+
+  --vp-code-block-bg: #191714;
+}
+
+/* 文档标题沿用首页的宋体骨架 */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+  font-family: var(--k-serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.VPNavBarTitle .title {
+  font-family: var(--k-serif);
+  letter-spacing: 0.04em;
 }

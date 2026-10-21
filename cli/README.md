@@ -98,7 +98,7 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
                                               随机密钥，不打印明文；固件经 /boot-vars
                                               注入）。nvmet 建盘已自动签发，此处只用于
                                               显式轮换
-  workers credential revoke <id>              吊销认证密钥（回落明文连接；未送达由
+  workers credential revoke <id>              吊销认证密钥（下次引导被拒绝；未送达由
                                               控制面对账自动重试）
   ops list [--limit N] [-o table|json]        操作审计日志（只读）
   version                                     输出版本号（发版构建 -ldflags 注入，如 v0.3.0）
@@ -148,7 +148,7 @@ $EDITOR control_plane/kurrent.yaml
 - bootstrap token 为集群级通用引导凭据（`<6位>.<16位>`，TTL 默认 7 天，控制面只存 sha256 摘要）；**不绑节点**——节点身份（`metadata.name`）由 join 自动生成随机短标识（12 位 hex，与盘 os_tag 同构；人工输入归属 `metadata.remark` 备注）+ enroll 自动登记；控制面地址由 join 命令携带（同步进声明 `spec.controlPlane.url`）
 - token TTL 内可被**多次 enroll 复用**（不限制使用次数）；每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
 - `nvmet-host` 组件凭据**不手工签发**：agent enroll 上报 `backend=nvmet` 时控制面派生随响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）
-- nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4420 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）与 configfs 挂载——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`；`--check` 只读诊断）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
+- nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）与 configfs 挂载——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`；`--check` 只读诊断）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
 - enroll 自动登记时携带 `base_url`（声明 `spec.agent.advertiseUrl`，默认推导 `https://<cp-host>:4840`）、`remark`（声明 `metadata.remark`，备注/人类识别用）与能力标签；特殊场景（NAT 等）编辑声明覆盖
 
 ## NVMe-oF 认证凭据
@@ -170,9 +170,13 @@ kurrent workers credential revoke worker-01  # 吊销（轮换 = 再 set 一次�
   轮换失败不会出现「boot-vars 新钥、configfs 旧钥」的引导失配，吊销失败不会旧钥滞留
 - 凭据 opt-in 已随「建盘即签发」收窄：nvmet 建盘必已签发密钥，无密钥不推送的分支实际只剩
   非 nvmet 后端的盘（DHHC-1 不适用，推送只会得 `n/a`）——Agent 离线时不出现虚假「同步失败」
-- 静态存储口径（2026-10-05 裁定）：三处明文（控制面 `credentials.yml`、Agent 缓存（0600）、
-  存储节点 configfs `dhchap_key`）不引入应用层加密，边界责任在部署方
+- 静态存储口径（2026-10-05 裁定）：四处明文（控制面 `credentials.yml`、Agent 缓存（含派生的 TLS PSK，均 0600）、
+  存储节点 configfs `dhchap_key`、存储节点内核 `.nvme` keyring）不引入应用层加密，边界责任在部署方
   （磁盘/宿主持久化加密、root 访问边界）
+- 数据面加密默认开启（NVMe/TCP TLS 1.3，存储节点单口 `4421`）：PSK 由认证密钥派生、随 `/boot-vars`
+  下发（`nbft_tls_psk`/`nbft_tls_port`），iPXE 固件引导段与内核段共用本口、全程加密；
+  `nbft-tls-*` 不满足条件（未绑定 / 无密钥 / 非 nvmet / 数据面端口未就绪）时整个引导变量不下发，
+  控制面拒绝引导并记审计——无明文回退
 
 ## 输出
 

@@ -6,7 +6,7 @@
 
 - NVMe-oF 成为主引导路径，iSCSI 收窄为回退通道；NBFT 接力与 TLS 加密主线
 - 设备、控制面、存储节点间的认证与传输加密全链路落实，密钥生命周期管理
-- 主流发行版 NVMe-oF 无盘引导支持：Linux 系、Windows、ESXi
+- 主流发行版的 NVMe-oF 整机网络引导：Linux 系、Windows、ESXi
 
 ## 方向二：IPv6 与高性能数据库
 

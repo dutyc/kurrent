@@ -17,9 +17,9 @@ __pycache__/
 # 第三方参考源码（如 open-iscsi）
 thirdparty/
 
-# docs/ 文档站整体排除（旧文档，冻结待重写，2026-08-24 裁定；重写时重新引入）
+# 旧文档站副本（已由 docs/ 重写取代，不入库）
 docs_copy/
-# VitePress 构建产物（docs 站重新引入后补充）
+# VitePress 构建产物
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 webui/app/node_modules
@@ -75,6 +75,9 @@ control_plane/state/settings.json
 
 # 内部架构规划（不入版本库）
 blueprint/
+
+# 设计稿与视觉原型（不入版本库）
+design/
 
 # 运行时状态、日志与租约（容器/Agent 运行生成，不入库）
 control_plane/state/operations.jsonl

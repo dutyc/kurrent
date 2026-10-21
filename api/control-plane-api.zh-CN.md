@@ -195,11 +195,11 @@ curl -s "$BASE_URL/healthz"
 
 Control Plane 按以下顺序识别设备并投影启动变量：
 
-1. `hostname` → `state/workers.yml`（hostname 或 worker_id）
-2. `mac` → `state/devices.yml`（设备台账）→ `bound_worker_id` → `state/workers.yml`
+1. `mac` → `state/devices.yml`（设备台账）→ `bound_worker_id` → `state/workers.yml`
+2. `hostname` → `state/workers.yml`（hostname 或 worker_id；未传 MAC 或台账未命中时的兜底）
 3. `config/agents.yml`（默认启动盘的 Agent 数据面地址）
 
-然后返回该 Worker 对应的 iSCSI Server、默认菜单项和菜单超时。
+然后返回该 Worker 的数据面地址、启动盘 NQN、默认菜单项和菜单超时。
 
 默认返回 iPXE 脚本片段，兼容性最好，可以直接被 iPXE `chain` 执行。加 `format=json` 时返回 JSON，方便人工调试。
 
@@ -209,23 +209,25 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 
 | 返回字段 | 来源 |
 |---|---|
-| `base_nqn` | 默认启动盘（同选盘规则）的盘 NQN 前缀（C3 拼接：盘 NQN 由控制面按统一模板 `base:worker_id.os.<os_tag>` 生成，固件侧 `sanboot nvme://<ip>:4420/${base-nqn}:<worker>.<os>.<os-tag>` 拼装消费 = 盘记录权威值）；盘记录缺 `nqn` 时不返回（不兼容遗留、不派生）；Worker 无系统盘时不返回 |
+| `disk_nqn` | 默认启动盘（同选盘规则）的完整盘 NQN（盘记录 `nqn`，数据面唯一标识，控制面权威值）——固件原样拼进 `sanboot nvme://<ip>:<数据面端口>/${disk-nqn}`，不再用 hostname/os/os-tag 重拼；盘记录缺 `nqn` 或 Worker 无系统盘时不返回 |
 | `base_iqn` | `workers.yml` 中该 Worker 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 `iqn` 去掉最后一个 `:` 后的前缀——盘标识权威 = NQN，IQN 由盘 NQN 派生；Worker 无系统盘时**不返回**（iPXE 沿用 `boot.ipxe.cfg` 静态默认值） |
 | `storager_ip` | 默认启动盘（同上选盘规则）的 `agent` -> `agents.yml` 中该 Agent 的 `storager_ip`（数据面地址，NVMe-oF 引导与 iSCSI 安装器共用）；无系统盘时不返回 |
 | `iscsi_sep` | iSCSI root **连接符**（`${storager-ip}` 与 `${base-iqn}` 之间的分隔字段，安装器 iSCSI 拼装消费），root-path 拼装由 iPXE 侧完成。**仅 stgt / LIO 后端返回**：stgt 后端为 `:::1:`（lun 占位 1），LIO 后端为 `::::`（空占位）；后端类型**实时查询 Agent `/capabilities` 的 `backend` 字段**（节点自报，能力即真相），未登记 / 查询失败 / 取值非法则默认 stgt 格式；**不由 `agents.yml` 的 `tags` 推导**（tags 只作人工标签，否则标签与实况漂移时会按过期值拼出错连接符）；**nvmet 后端不下发**（menu 安装器项 `isset ${iscsi-sep}` 守卫跳过）；无系统盘时不返回 |
-| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker 且密钥库有条目时注入**，无密钥 / 未绑定 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（C3 已启用：secret 条件化拼装，无密钥走明文连接） |
-| `hostnqn` | 该 Worker 的发起端 Host NQN（`KURRENT_CP_NQN_BASE` + `:host.<worker_id>`，与 nvmet-host 登记的 host 条目一致）；**已绑定 Worker 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件 0011 补丁支持 `hostnqn` 设置） |
-| `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），固件用本变量拼 `nvme://...:${hostname}.${os}`，支持新系统无需改脚本；与盘 NQN 后缀同源。Worker 无系统盘时不返回（reboot 循环等待建盘） |
+| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker 且密钥库有条目时注入**，无密钥 / 未绑定 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（nvmet 后端下无密钥即 `/boot-vars` 整体不下发，menu 因缺变量而拒绝引导） |
+| `nbft_tls_psk` | NVMe/TCP TLS 的预共享密钥：**认证密钥的纯函数**（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex，见 7.7，无独立存储字段——轮换/吊销认证密钥即原子轮换/吊销 PSK）。**须同时满足「已绑定且有密钥」「后端为 nvmet」「该 Agent 上报的数据面端口就绪」才下发**，任一不满足即整个引导变量不下发（拒绝引导并记审计）——加密是默认行为，无明文回退。固件用它在该端口完成自身握手，并随 NBCT 表交给 initramfs，由其在同一端口以 `--tls` 重连 |
+| `nbft_tls_port` | 数据面端口（固件段与内核段共用；实时取 Agent `/capabilities.port.trsvcid`——能力即真相，同 `iscsi_sep`/`backend` 的实时判定口径）；与 `nbft_tls_psk` 同条件下发。menu 在 sanboot URI 上拼 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` |
+| `hostnqn` | 该 Worker 的发起端 Host NQN（盘 NQN 前缀 + `:host.<worker_id>`，与盘 NQN 同域、与 nvmet-host 登记的 host 条目一致）；**默认盘带 NQN 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件补丁 `0005` 支持 `hostnqn` 设置） |
+| `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
 | `os_version` | 默认启动盘的版本备注（盘记录 `os_version`，`''` = 无版本）——空值不下发，menu.ipxe 的 `os-label` 拼接自适应（有版本显示 `os version`）。Worker 无系统盘时不返回 |
-| `os_tag` | 默认启动盘的随机标识（盘记录 `os_tag`，12 位 hex，数据面唯一键）——固件拼盘 NQN 后缀 `${hostname}.${os}.${os-tag}`（与盘 NQN 同源同值）；Worker 无系统盘时不返回 |
 | `menu_default` | 推导链：`workers.yml` 的 `default_disk`（建盘后单独设置，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。2026-08-30 动态化：菜单 OS 项已收敛为唯一通用项 `boot-os`，OS 语义的默认值（`default_disk`，或 `boot.menu_default` 中的旧系统名）统一归一到 `boot-os`；非 OS 导航值（`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`）原样返回 |
-| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `IPXE_CP_BOOT_MENU_TIMEOUT`（默认 5000）；处于 `reboot` 循环时：固定用 `IPXE_CP_AUTO_BOOT_TIMEOUT`（默认 1）。单位均为毫秒 |
+| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutSec`（默认 1，按毫秒消费）。单位均为毫秒 |
 
-查找 Worker 的规则（**hostname 优先**）：
+查找 Worker 的规则（**绑定权威优先**）：
 
 ```text
-hostname -> workers.yml（hostname 或 worker_id）
-hostname 未命中或未传 -> mac -> devices.yml（设备台账）-> bound_worker_id -> workers.yml
+mac -> devices.yml（设备台账）-> bound_worker_id -> workers.yml
+mac 未传或未命中 -> hostname -> workers.yml（hostname 或 worker_id）
+mac 未命中且 hostname 也未命中 -> dnsmasq 投影（仅存量/无台账兜底）
 未识别且 mac 已传 ->
   - 设备在池中（pooled）-> reboot 循环（menu-default=reboot + 短超时），等待绑定
   - 设备已吊销（revoked）-> 空脚本（菜单停留）
@@ -244,10 +246,10 @@ default_disk（建盘后单独设置，见 7.3）-> boot.menu_default（显式�
 - 推荐做法：创建系统盘后调用 `PUT /workers/{worker_id}/default-disk` 设置默认启动盘（os_tag 引用具体盘）：
 
 ```text
-disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_version（如有）>, os-tag=<该盘 os_tag>
+disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_version（如有）>, disk_nqn=<该盘 nqn>
 ```
 
-- 2026-08-30 起 MAIN MENU 只保留一个通用 OS 项：`menu_default` 归一到 `boot-os`（`boot.menu_default` 里的旧系统名同样归一），`os` / `os-version` / `os-tag` 字段承载通用项消费的盘标识
+- 2026-08-30 起 MAIN MENU 只保留一个通用 OS 项：`menu_default` 归一到 `boot-os`（`boot.menu_default` 里的旧系统名同样归一），`os` / `os-version` 仅作菜单展示，启动身份由 `disk_nqn` 承载
 
 - 也可以不设置 `default_disk`，改用 `boot.menu_default` 指定 iPXE 菜单默认项（如安装期 `menu-install`、退出 `exit`）
 - 两者都没有时，`menu_default` 返回 `reboot`（短超时循环重启，等待管理员建盘 / 设置默认盘；`exit` 仅出现在显式设置时）
@@ -269,13 +271,13 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 | 注册窗口 | 关闭 | 部署期用 `POST /settings/registration-window` 开启（TTL 1-60 分钟硬上限，到期自动关闭），见 5.1 |
 | 放行额度 | 不限 | 开窗时可选 `max_devices`（1-1000 台），窗口期内自动入池设备数达到上限即停止放行，见 5.1 |
 | 验签强制 | 关闭 | `GET/PUT /settings/enforcement`：开启后 `/boot-vars` 只向验签通过的已绑定设备下发，见 5.1 |
-| `IPXE_CP_AUTO_BOOT_TIMEOUT` | `1` | reboot 循环的菜单超时（毫秒） |
+| `spec.boot.autoBootTimeoutSec` | `1` | reboot 循环的菜单超时（毫秒） |
 
 注册全程有操作日志（`device.register` / `device.claim`），失败回滚台账并返回空脚本，下次请求重试，不影响 iPXE 引导。
 
 ### 防冒领（绑定即认证）
 
-请求带 `mac` 时，Control Plane 会校验该设备**绑定到了 hostname 命中的 Worker**（`bound_worker_id`）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份，保持兼容放行。这使设备↔Worker 绑定成为开机时的认证边界：只有绑定的设备才能拿到该 Worker 的启动配置（如 `base_nqn` / `storager_ip`）。
+请求带 `mac` 时，Control Plane 按设备台账校验该设备**绑定到的 Worker**（`bound_worker_id`，绑定权威）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份，保持兼容放行。这使设备↔Worker 绑定成为开机时的认证边界：只有绑定的设备才能拿到该 Worker 的启动配置（如 `disk_nqn` / `storager_ip`）。
 
 ### Query 参数
 
@@ -285,7 +287,7 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 | `hostname` | 否 | 无 | 主机名，如 `worker-01` |
 | `format` | 否 | `ipxe` | `ipxe` 或 `json` |
 | `nonce` | 否 | 无 | 挑战-响应一次性 nonce（`/devices/challenge` 签发，见 5.2）；验签强制开启时缺失 → `missing_sig` 拒绝 |
-| `sig` | 否 | 无 | ECDSA P-256 签名 base64(DER)，签名数据 `nonce‖mac‖hostname` 无分隔拼接（见 5.2）；验签强制开启时缺失 → `missing_sig` 拒绝。**兼容还原**：iPXE 拼 URL 不做百分号编码，base64 的 `+` 原样进入 query 后被按 form-urlencoded 解码为空格，服务端将空格还原为 `+` 再验签 |
+| `sig` | 否 | 无 | ECDSA P-256 签名 base64(DER)，签名数据 `nonce‖mac` 无分隔拼接（见 5.2）；验签强制开启时缺失 → `missing_sig` 拒绝。**兼容还原**：iPXE 拼 URL 不做百分号编码，base64 的 `+` 原样进入 query 后被按 form-urlencoded 解码为空格，服务端将空格还原为 `+` 再验签 |
 
 `mac` 和 `hostname` 至少建议传一个。iPXE 端推荐两个都传：
 
@@ -306,15 +308,16 @@ curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01"
 ```ipxe
 #!ipxe
 # boot vars for worker-01
-set base-nqn nqn.2026-07.com.kurrent
+set disk-nqn nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89
 set base-iqn iqn.2026-07.com.kurrent
 set storager-ip 192.168.80.3
-set iscsi-sep :::1:
+set nbft-secret DHHC-1:01:<base64>   # 仅 NVMe-oF 认证启用时返回（见 7.7）
+set nbft-tls-psk <64 hex>            # 认证密钥派生，TLS 1.3 预共享密钥
+set nbft-tls-port 4421
+set hostnqn nqn.2026-07.com.kurrent:host.worker-01
+set os ubuntu
 set menu-default boot-os
 set menu-timeout 5000
-set os ubuntu
-set nbft-secret DHHC-1:01:<base64>   # 仅 NVMe-oF 认证启用时返回（见 7.7）
-set hostnqn nqn.2026-07.com.kurrent:host.worker-01
 ```
 
 已注册但未配置默认启动（无系统盘 / 未设 `default_disk` / 未显式设 `boot.menu_default`）时返回：
@@ -343,15 +346,16 @@ curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01&format=json"
 
 ```json
 {
-  "base_nqn": "nqn.2026-07.com.kurrent",
+  "disk_nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
   "base_iqn": "iqn.2026-07.com.kurrent",
   "storager_ip": "192.168.80.3",
-  "iscsi_sep": ":::1:",
-  "menu_default": "boot-os",
-  "menu_timeout": 5000,
-  "os": "ubuntu",
   "nbft_secret": "DHHC-1:01:<base64>",
-  "hostnqn": "nqn.2026-07.com.kurrent:host.worker-01"
+  "nbft_tls_psk": "<64 hex>",
+  "nbft_tls_port": "4421",
+  "hostnqn": "nqn.2026-07.com.kurrent:host.worker-01",
+  "os": "ubuntu",
+  "menu_default": "boot-os",
+  "menu_timeout": 5000
 }
 ```
 
@@ -380,7 +384,7 @@ curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01&format=json"
 chain --autofree ${https-url}devices/challenge?mac=${mac} && goto signed || goto bootvars
 
 :signed
-sign ${nonce}${mac}${hostname} || goto bootvars
+sign ${nonce}${mac} || goto bootvars
 chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname}&nonce=${nonce}&sig=${sig} || goto vars-done
 goto vars-done
 
@@ -394,9 +398,9 @@ isset ${iscsi-sep} || set iscsi-sep :::1:
 isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-iqn ${base-iqn}:${mac}
 ```
 
-成功后返回的 `base-nqn` / `storager-ip` 可能覆盖静态默认值，派生变量在 `:vars-done` 重建；`isset` 守卫保留 `/boot-vars` 按后端下发的连接符（stgt `:::1:` / LIO `::::`）。
+成功后返回的 `disk-nqn` / `storager-ip` 可能覆盖静态默认值，派生变量在 `:vars-done` 重建；`isset` 守卫保留 `/boot-vars` 按后端下发的连接符（stgt `:::1:` / LIO `::::`）。
 
-`menu.ipxe` 主引导项用 NVMe-oF 拼装：`set root-path nvme://${storager-ip}:4420/${base-nqn}:${hostname}.<os>`，已注入 `nbft-secret` 时附加 `?secret=`（`isset` 条件化）；安装项保持 iSCSI 拼装（`set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.<os>`），`iscsi:` 协议头与拼装结构保持静态，仅连接符由后端投影。
+`menu.ipxe` 主引导项用 NVMe-oF 拼装：`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`，已注入 `nbft-secret` 时附加 `?secret=`，再附上 `&tls_psk=…&tls_trsvcid=…`；`nbft-tls-port` / `nbft-tls-psk` 为必需项——缺失即目标端加密未就绪，该项直接 `goto failed`，不再拼明文 URI；安装项保持 iSCSI 拼装（`set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.<os>`），`iscsi:` 协议头与拼装结构保持静态，仅连接符由后端投影。
 
 ### Agent 数据面地址
 
@@ -517,7 +521,7 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 **挑战-响应链路（与 `/boot-vars` 配合，设备身份验签）**：
 
 1. `GET /devices/challenge?mac=<mac>` → 执行响应脚本后取得 `${nonce}`
-2. iPXE 用设备密钥对 `nonce‖mac‖hostname`（UTF-8 无分隔拼接，mac 小写冒号格式）做 ECDSA P-256 签名 → `sig`（base64(DER)）
+2. iPXE 用设备密钥对 `nonce‖mac`（UTF-8 无分隔拼接，mac 小写冒号格式）做 ECDSA P-256 签名 → `sig`（base64(DER)）；hostname 不参与签名（由 MAC → 设备台账绑定保证身份）
 3. `GET /boot-vars?mac=&hostname=&nonce=&sig=` → 验签通过才下发凭据（注入四条件第 4 条，见 5.1）；验签失败 → 空脚本（拒绝下发，审计 `boot_vars.credential`，reason 见 5.1）
 
 ---
@@ -991,7 +995,7 @@ docker exec ipxe-dnsmasq killall -HUP dnsmasq
 不传 `boot` 时：
 
 - `menu_default` 默认使用 `default_disk`（建盘后单独设置，见 7.3）；未设置时默认 `reboot`（循环重启等待配置，见 5 节）；
-- `menu_timeout` 已配置默认启动时默认使用 `IPXE_CP_BOOT_MENU_TIMEOUT`（当前 `5000`）；处于 `reboot` 循环时固定用 `IPXE_CP_AUTO_BOOT_TIMEOUT`（当前 `1` 毫秒，见 5 节）。
+- `menu_timeout` 已配置默认启动时默认使用 `spec.boot.menuTimeoutMs`（当前 `5000`）；处于 `reboot` 循环时固定用 `spec.boot.autoBootTimeoutSec`（当前 `1`，见 5 节）。
 
 因此大多数 Worker 不需要传 `boot`。例如：
 
@@ -1357,7 +1361,7 @@ curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
 
 ### 说明
 
-**「默认启动盘」是干什么的**：一台 Worker 可以挂多块系统盘（同一系统同一版本至多一块，如 `ubuntu 22.04` + `windows`，同系统不同版本可并存）。每次开机，iPXE 菜单在超时后会自动选中某一项启动——本端点配置的默认启动盘决定自动选中哪一项，同时决定 `/boot-vars` 投影哪块盘的连接信息（`base_nqn` / `storager_ip` 取默认启动盘，见 5 节）。不设置时菜单自动选 `reboot`，配合 1 毫秒超时循环重启，等待管理员完成配置，避免静默进错系统。
+**「默认启动盘」是干什么的**：一台 Worker 可以挂多块系统盘（同一系统同一版本至多一块，如 `ubuntu 22.04` + `windows`，同系统不同版本可并存）。每次开机，iPXE 菜单在超时后会自动选中某一项启动——本端点配置的默认启动盘决定自动选中哪一项，同时决定 `/boot-vars` 投影哪块盘的连接信息（`disk_nqn` / `storager_ip` 取默认启动盘，见 5 节）。不设置时菜单自动选 `reboot`，配合 1 毫秒超时循环重启，等待管理员完成配置，避免静默进错系统。
 
 **注意**：`disk` 不是系统名，而是盘级随机标识 `os_tag`（建盘 7.1 时生成，12 位 hex，数据面唯一键）——同系统多版本共存时，只有 os_tag 能精确定位要默认启动的**具体盘**。
 
@@ -1373,7 +1377,7 @@ default_disk（本端点 disk 字段，优先）-> boot.menu_default（本端点
 
 - 设置 `disk`：Worker 必须已有该 `os_tag` 对应的系统盘（`POST /workers/{worker_id}/luns/disk` 创建的某块盘），否则返回 `400` 并列出当前系统盘；多盘模型下用 `os_tag` 精确匹配要默认启动的盘
 - 设置 `menu_default`：值必须为 `menu.ipxe` 主菜单的 item ID（严格校验，防止 iPXE `choose --default` 落空）；OS 语义值（旧系统名）统一归一到通用 OS 项 `boot-os`
-- 设置 `menu_timeout`：非负整数；清除后恢复默认 `IPXE_CP_BOOT_MENU_TIMEOUT`
+- 设置 `menu_timeout`：非负整数；清除后恢复默认 `spec.boot.menuTimeoutMs`
 
 ### Path 参数
 
@@ -1387,7 +1391,7 @@ default_disk（本端点 disk 字段，优先）-> boot.menu_default（本端点
 |---|---:|---|
 | `disk` | 否 | 默认启动盘的 `os_tag`（12 位 hex，精确引用具体盘），须与该 Worker 已挂盘一致；传 `null` 清除 |
 | `menu_default` | 否 | iPXE 主菜单默认项（菜单超时后自动选中），见下方合法值表；不区分大小写（自动转小写）；传 `null` 清除 |
-| `menu_timeout` | 否 | 菜单超时毫秒数，非负整数；传 `0` 表示菜单无限等待、永不自动选择（等人工按键）；传 `null` 清除，恢复默认 `IPXE_CP_BOOT_MENU_TIMEOUT`（当前 `5000`） |
+| `menu_timeout` | 否 | 菜单超时毫秒数，非负整数；传 `0` 表示菜单无限等待、永不自动选择（等人工按键）；传 `null` 清除，恢复默认 `spec.boot.menuTimeoutMs`（当前 `5000`） |
 
 ### `menu_default` 合法值（menu.ipxe 主菜单 item ID）
 
@@ -1621,7 +1625,8 @@ Worker 的设备共享同一密钥（换绑即换钥）。密钥为 **DHHC-1** �
 因此本节的手工端点用途收窄为**显式轮换 / 吊销**（吊销即明确「不用认证」，其条目被删，不会被后续建盘复活）。
 
 凭据写入后控制面会**推送期望状态给持有该 Worker 系统盘的 Agent**（审计 `credential.push`，不记密钥本体）：
-推送体含明文密钥。
+推送体含明文密钥与**由它派生的 `tls_psk`**（Agent 除登记 hosts 外，还转调宿主服务
+`PUT /subsystems/{nqn}/tls` 把 PSK 注入内核全局 `.nvme` keyring；吊销时一并摘除）。
 Agent 转调存储节点 nvmet 宿主服务登记 hosts（子系统 NQN = 盘 NQN——盘标识权威 = NQN，IQN 由 NQN 派生
 （`iqn.` + nqn[4:]），不作子系统 NQN 使用；NVMe Base Spec §7.9 要求 `nqn.` 前缀。**Host NQN =
 worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点侧 `spec.agent.nqnBase`），
@@ -1641,10 +1646,18 @@ worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点�
 
 触发推送的操作：**建盘即签发**（nvmet 后端，见上）、设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、删盘（含批量）、删除 Worker。
 
-静态存储边界（2026-10-05 裁定）：密钥明文按链路必要范围落盘三处——控制面 `state/credentials.yml`、
-Agent 容器凭据缓存（0600）、存储节点 configfs（内核 hosts 矩阵 `dhchap_key`）——**不引入应用层加密**，
+静态存储边界（2026-10-05 裁定）：密钥明文按链路必要范围落盘四处——控制面 `state/credentials.yml`、
+Agent 容器凭据缓存（含派生的 TLS PSK，均 0600）、存储节点 configfs（内核 hosts 矩阵 `dhchap_key`）、
+存储节点内核全局 `.nvme` keyring（TLS PSK，运行态）——**不引入应用层加密**，
 边界责任归部署方（磁盘/宿主持久化加密、root 访问边界）；密钥经 mTLS 组件通道传输，不进入浏览器
-存储与服务端日志。
+存储与服务端日志。数据面加密（NVMe/TCP TLS 1.3，固件段与内核段共用端口 `4421`）的设计与验收判据见本地蓝图层
+（`blueprint/nvme-tcp-tls-in-kernel.md`，不入版本库）。
+
+**凭据边界（谁下发、谁自持）**：无盘引导链下发的凭据只有两类——DHHC-1 认证密钥，与由它派生的
+TLS-PSK；外加**非秘密**的一次性 nonce（`GET /devices/challenge`，防重放）。设备身份私钥
+（ECDSA P-256）**不下发**：设备侧生成、留在 NVRAM，控制面只回收公钥（`key_hash`/`pubkey_hash`）。
+固件对控制面 HTTPS 的 TOFU 指纹是首次连接自行固定，不是下发。组件自举用的 bootstrap token 与
+mTLS 证书走 `/enroll`（管理面），与本节引导链凭据不共用通道。iSCSI/stgt 后端认证走 CHAP，不在本链路。
 
 ### PUT /workers/{worker_id}/credential
 
@@ -1682,7 +1695,7 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
 
 ### DELETE /workers/{worker_id}/credential
 
-删除密钥（吊销该 Worker 名下全部绑定设备的认证资格，下次启动回落明文连接）：
+删除密钥（吊销该 Worker 名下全部绑定设备的认证资格与传输加密 PSK，下次启动拒绝引导）：
 
 ```bash
 curl -X DELETE "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKEN"
@@ -2615,7 +2628,8 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
 - 多系统盘（一个 Worker 可挂载多个系统盘：同一 (os, os_version) 至多一块、不同版本可并存，盘级 `os_tag` 区分，`default_disk` 决定默认启动）
 - 母盘标签登记（os / os_version 备注，`PUT/DELETE /agents/{agent_id}/masters/{master_name}/tag`，6.4 节；`/masters` 聚合合并展示）
 - NVMe-oF 认证凭据库（DHHC-1，按 Worker 跟盘，7.7 节；/boot-vars 注入 `nbft_secret`，5 节）
-- 凭据签发与推送驱动（nvmet 节点建盘即自动签发密钥、凭据设置/吊销、绑定/解绑/换绑、删盘、删 Worker 时推送 Agent，Agent 转调 nvmet 宿主服务同步 hosts 矩阵）+ 推送对账（状态台账 + 周期幂等重放未送达项，push 投影可见，7.7 节）
+- 凭据签发与推送驱动（nvmet 节点建盘即自动签发密钥、凭据设置/吊销、绑定/解绑/换绑、删盘、删 Worker 时推送 Agent，Agent 转调 nvmet 宿主服务同步 hosts 矩阵与内核 `.nvme` keyring 中的 TLS PSK）+ 推送对账（状态台账 + 周期幂等重放未送达项，push 投影可见，7.7 节）
+- 数据面默认传输加密：存储在节点上的唯一数据面端口（`4421`）跑 NVMe/TCP TLS 1.3，固件段与内核段共用；PSK 由认证密钥派生、随 `/boot-vars` 下发 `nbft_tls_psk`/`nbft_tls_port`，端口或密钥缺失即拒绝引导而非回落明文
 
 当前版本还没有做：
 
@@ -2636,5 +2650,5 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
 #### 存储节点
 - Agent: `4840`（mTLS，控制面调用）
 - nvmet-host: `4841`（mTLS，Agent 经 `host.docker.internal:4841` 调用）
-- NVMe-oF 数据面: `4420`（nvmet 端口，无 TLS；认证走 DH-HMAC-CHAP）
+- NVMe-oF 数据面: `4421`（nvmet 端口，强制 TLS 1.3 `tsas`；认证走 DH-HMAC-CHAP）
 - LIO / stgt（iSCSI 数据面）: `3260`

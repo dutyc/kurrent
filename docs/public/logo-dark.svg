@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!-- Kurrent · 六虚（单色，深色模式） -->
+  <g fill="#ece8df">
+    <rect x="20" y="18" width="200" height="24"/>
+    <rect x="20" y="54" width="40" height="24"/>
+    <rect x="96" y="54" width="124" height="24"/>
+    <rect x="20" y="90" width="200" height="24"/>
+    <rect x="20" y="126" width="82" height="24"/>
+    <rect x="138" y="126" width="82" height="24"/>
+    <rect x="20" y="162" width="200" height="24"/>
+    <rect x="20" y="198" width="124" height="24"/>
+    <rect x="180" y="198" width="40" height="24"/>
+  </g>
+</svg>

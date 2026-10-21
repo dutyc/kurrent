@@ -1,50 +1,42 @@
 # Kurrent
 
-![Cloud Native](https://img.shields.io/badge/Cloud%20Native-True%20Cloud%20Native-18181b) [![NVMe-oF](https://img.shields.io/badge/Data%20Plane-NVMe--oF%20First-00D4FF)](https://dutyc.github.io/kurrent/guide/deployment.html) [![Stars](https://img.shields.io/github/stars/dutyc/kurrent)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent)](LICENSE) [![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-2563eb)](https://dutyc.github.io/kurrent/)
+[![Stars](https://img.shields.io/github/stars/dutyc/kurrent?style=flat-square&color=555)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent?style=flat-square&color=555)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent?style=flat-square&color=555)](LICENSE) [![Docs](https://img.shields.io/badge/docs-online-555?style=flat-square)](https://dutyc.github.io/kurrent/)
 
 [中文版](./README.zh-CN.md) | [English](./README.md)
 
 **Make bare metal flow.**
 
-*周流六虚，上下无常。* — from the *I Ching*: currents flow through the six voids, above and below, without constancy.
+*The six lines flow, above and below without constancy.* — the I Ching
 
-K8s made applications cloud-native. Kurrent makes compute cloud-native — *K8s orchestrates containers; Kurrent orchestrates compute.*
+K8s made applications cloud-native; Kurrent makes compute cloud-native.
 
-**Kurrent** is a cloud-native stateless bare-metal delivery platform: compute nodes hold no persistent state — identity (Worker), OS and data are granted by the network and the control plane. Plug in a cable and a node comes alive; compute flows across bare metal like current itself.
-
-Read our manifesto: **[about/en/Manifesto.md](./about/en/Manifesto.md)** — *Our Definition of Cloud Native* (中文: [about/zh/Manifesto.md](./about/zh/Manifesto.md)).
-
+Kurrent is a cloud-native stateless bare-metal delivery platform. A compute node holds no persistent state: identity, system and data are granted by the network and the control plane, and the machine only provides location. See the [manifesto](./about/en/Manifesto.md).
 
 ## NVMe-oF: The Primary Data Plane
 
-Storage is NVMe-oF-first: nodes join with `backend=nvmet` (default) and serve disks through the in-kernel NVMe-oF target (NVMe over TCP, port 4420). One NQN namespace (`nqn.2026-07.com.kurrent`), DHHC-1 authentication per worker — the key is issued automatically when a system disk is created, and the storage node's host-service credential is derived at enroll — and a boot chain wired for `nvme://` root paths; iSCSI (`stgt`/`lio`) stays as the compatibility backend.
+Storage is NVMe-oF-first: an in-kernel NVMe/TCP target exports system disks, with TLS 1.3 on a single port `4421` shared by the firmware and kernel boot stages. DHHC-1 credentials follow the Worker and are issued at disk creation on nvmet backends; the root path uses the full NQN from the disk record. iSCSI (stgt/lio) remains as a compatibility backend.
 
 ## Getting Started
 
-Deploy a control plane and join storage nodes in minutes — [deployment guide (zh)](https://dutyc.github.io/kurrent/guide/deployment.html) / [en](https://dutyc.github.io/kurrent/en/guide/deployment.html). The `kurrent` CLI ships as prebuilt binaries on the [Releases](https://github.com/dutyc/kurrent/releases) page (Linux amd64/arm64, Windows amd64) — no local build needed.
+Deploy a control plane and join storage nodes in minutes — see the deployment guide on the [docs site](https://dutyc.github.io/kurrent/en/). The `kurrent` CLI ships prebuilt binaries on [Releases](https://github.com/dutyc/kurrent/releases) for Linux amd64/arm64 and Windows amd64.
 
-- **Docs site (bilingual)** — https://dutyc.github.io/kurrent/
-- **CLI reference** — [cli/README.md](./cli/README.md)
-- **Control-plane API reference** — [api/control-plane-api.en.md](./api/control-plane-api.en.md) / [api/control-plane-api.zh-CN.md](./api/control-plane-api.zh-CN.md)
-- **Architecture** — [about/en/ARCHITECTURE.md](./about/en/ARCHITECTURE.md) (中文: [about/zh/ARCHITECTURE.md](./about/zh/ARCHITECTURE.md))
+[CLI](./cli/README.md), [control-plane API](./api/control-plane-api.en.md) and [architecture](./about/en/ARCHITECTURE.md) documentation live in the repository.
 
-## Key Features: Compute That Flows, Plug-and-Play
+## Delivery Flow
 
-A stateless bare-metal delivery flow: machines join the device pool on first boot, then a few clicks in the Web UI bind them to a Worker with a system disk and a default OS. One Worker can carry multiple system disks and switch between them online. Diskless cold boot over NVMe-oF is verified end to end on **Debian 12/13, Ubuntu 24.04/26.04 and Fedora 44**.
+A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04 and Fedora 44; the verification set does not limit which distributions can boot.
 
 ## Firmware Repo
 
-*The firmware engine for Kurrent. Make bare metal flow at the boot layer.*
-
-The firmware at the bottom of the boot chain is built by our companion repo **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)** — two sides of the same philosophy: this repo makes compute stateless, the firmware repo makes boot firmware stateless.
+The boot-chain firmware is built by the companion repository **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)**: Kurrent makes compute stateless, the firmware repository makes boot firmware stateless.
 
 ## Roadmap
 
-A cross-platform, cross-architecture cloud-native meta-protocol: one stateless semantics, self-similarly nested across bare metal and hypervisors — that vision lives in the **[Manifesto](./about/en/Manifesto.md)**. The concrete directions we are working on: **[about/en/ROADMAP.md](./about/en/ROADMAP.md)** (中文: [about/zh/ROADMAP.md](./about/zh/ROADMAP.md)).
+The direction is a cross-platform, cross-architecture cloud-native meta-protocol: one stateless semantics across bare metal and hypervisors. The vision lives in the **[Manifesto](./about/en/Manifesto.md)**; concrete directions are in the **[ROADMAP](./about/en/ROADMAP.md)** (中文: [about/zh/ROADMAP.md](./about/zh/ROADMAP.md)).
 
 ## Community & Contributing
 
-Star / Watch / Discussions / PRs are all welcome. This project embraces AI-assisted development, with one hard requirement: **the AI can write the syntax, but architecture understanding must come from a human brain.** Please read [AI_POLICY.md](./about/en/AI_POLICY.md) before submitting a PR.
+Issues, Discussions and pull requests are welcome. AI may write the syntax, but architecture must be understood by a human; read [AI_POLICY.md](./about/en/AI_POLICY.md) before submitting.
 
 ## License
 

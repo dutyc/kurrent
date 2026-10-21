@@ -23,7 +23,7 @@ export default defineConfig({
       label: '简体中文',
       lang: 'zh-CN',
       themeConfig: {
-        logo: '/logo.svg',
+        logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: '首页', link: '/' },
           { text: '指南', link: '/guide/deployment' },
@@ -34,6 +34,7 @@ export default defineConfig({
               text: '部署与使用',
               items: [
                 { text: '部署指南', link: '/guide/deployment' },
+                { text: '使用流程', link: '/guide/usage' },
               ],
             },
           ],
@@ -57,7 +58,7 @@ export default defineConfig({
       label: 'English',
       lang: 'en',
       themeConfig: {
-        logo: '/logo.svg',
+        logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: 'Home', link: '/en/' },
           { text: 'Guide', link: '/en/guide/deployment' },
@@ -68,6 +69,7 @@ export default defineConfig({
               text: 'Deployment & Usage',
               items: [
                 { text: 'Deployment Guide', link: '/en/guide/deployment' },
+                { text: 'Usage Guide', link: '/en/guide/usage' },
               ],
             },
           ],

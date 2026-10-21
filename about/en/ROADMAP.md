@@ -6,7 +6,7 @@
 
 - NVMe-oF becomes the primary boot path, with iSCSI narrowed to a fallback channel; NBFT handover and TLS encryption become the mainline
 - Implement authentication and transport encryption across the entire chain among devices, the control plane, and storage nodes, with key lifecycle management
-- Diskless boot support over NVMe-oF for mainstream distributions: Linux family, Windows, ESXi
+- Whole-machine network boot over NVMe-oF for mainstream distributions: Linux family, Windows, ESXi
 
 ## Direction 2: IPv6 and High-Performance Database
 
