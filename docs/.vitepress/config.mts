@@ -13,6 +13,12 @@ export default defineConfig({
   description: 'Make bare metal flow — 云原生无状态裸金属交付',
   base,
   cleanUrls: process.env.VITEPRESS_NO_CLEAN !== '1',
+  // 首页自绘组件需要自行拼文档页链接；与 cleanUrls 同源，避免 Pages 构建下漏 .html
+  vite: {
+    define: {
+      __KURRENT_DOCS_CLEAN__: JSON.stringify(process.env.VITEPRESS_NO_CLEAN !== '1'),
+    },
+  },
   head: [
     ['link', { rel: 'icon', href: `${base}favicon.ico`, sizes: '32x32' }],
     ['link', { rel: 'icon', type: 'image/svg+xml', href: `${base}logo.svg` }],
@@ -27,6 +33,9 @@ export default defineConfig({
         nav: [
           { text: '首页', link: '/' },
           { text: '指南', link: '/guide/deployment' },
+          { text: '架构', link: 'https://github.com/dutyc/kurrent/blob/main/about/zh/ARCHITECTURE.md' },
+          { text: 'API', link: 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.zh-CN.md' },
+          { text: 'CLI', link: 'https://github.com/dutyc/kurrent/blob/main/cli/README.md' },
         ],
         sidebar: {
           '/guide/': [
@@ -62,6 +71,9 @@ export default defineConfig({
         nav: [
           { text: 'Home', link: '/en/' },
           { text: 'Guide', link: '/en/guide/deployment' },
+          { text: 'Architecture', link: 'https://github.com/dutyc/kurrent/blob/main/about/en/ARCHITECTURE.md' },
+          { text: 'API', link: 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.en.md' },
+          { text: 'CLI', link: 'https://github.com/dutyc/kurrent/blob/main/cli/README.md' },
         ],
         sidebar: {
           '/en/guide/': [

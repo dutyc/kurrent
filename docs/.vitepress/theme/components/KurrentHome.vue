@@ -1,12 +1,21 @@
 <script setup>
 import { computed } from 'vue'
+import { useData } from 'vitepress'
 
 const props = defineProps({
   lang: { type: String, default: 'zh' },
 })
 
+const { site } = useData()
+// 自定义首页的链接须自行拼 base 与 .html（Pages 构建关闭 cleanUrls）
+const docHref = (path) => `${site.value.base}${path}${__KURRENT_DOCS_CLEAN__ ? '' : '.html'}`
+const homeHref = computed(() => (props.lang === 'en' ? `${site.value.base}en/` : site.value.base))
+const linkHref = (href) => (href.startsWith('http') ? href : docHref(href.replace(/^\//, '')))
+const langHref = computed(() => (props.lang === 'en' ? site.value.base : `${site.value.base}en/`))
+const langLabel = props.lang === 'en' ? '中文' : 'English'
+const langHreflang = props.lang === 'en' ? 'zh-CN' : 'en'
+
 const zh = {
-  homeHref: '/',
   nav: { proposition: '命题', unit: '单元', state: '状态', docs: '文档', github: 'GitHub ↗' },
   meta: 'Stateless compute · System as the unit',
   quote: '周流六虚，上下无常<br>刚柔相易，唯变所适<br><span>——《周易·系辞下》</span>',
@@ -70,6 +79,7 @@ const zh = {
       ['02', '使用流程', '入池、绑定、建盘、默认系统与凭据。', '/guide/usage'],
       ['03', '架构', '控制面、数据面与交付链的边界。', 'https://github.com/dutyc/kurrent/blob/main/about/zh/ARCHITECTURE.md'],
       ['04', 'API 参考', '控制面接口与引导变量的权威定义。', 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.zh-CN.md'],
+      ['05', 'CLI 参考', '命令行接口、凭据与日常操作。', 'https://github.com/dutyc/kurrent/blob/main/cli/README.md'],
     ],
   },
   footer: {
@@ -80,7 +90,6 @@ const zh = {
 }
 
 const en = {
-  homeHref: '/en/',
   nav: { proposition: 'Proposition', unit: 'Unit', state: 'State', docs: 'Docs', github: 'GitHub ↗' },
   meta: 'Stateless compute · System as the unit',
   quote: 'The six lines flow, above and below without constancy; the firm and the yielding interchange — it adapts to whatever change may come. — the I Ching · Great Commentary',
@@ -144,6 +153,7 @@ const en = {
       ['02', 'Usage Guide', 'Enrollment, binding, disks, default system and credentials.', '/en/guide/usage'],
       ['03', 'Architecture', 'The boundaries of control plane, data plane and delivery chain.', 'https://github.com/dutyc/kurrent/blob/main/about/en/ARCHITECTURE.md'],
       ['04', 'API Reference', 'Authoritative definitions of control-plane APIs and boot variables.', 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.en.md'],
+      ['05', 'CLI Reference', 'Command surface, credentials and day-to-day operations.', 'https://github.com/dutyc/kurrent/blob/main/cli/README.md'],
     ],
   },
   footer: {
@@ -160,7 +170,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
   <div class="k-home" :lang="lang === 'en' ? 'en' : 'zh-CN'">
     <div class="masthead">
       <div class="wrap">
-        <a class="wordmark" :href="c.homeHref">
+        <a class="wordmark" :href="homeHref">
           <svg viewBox="0 0 240 240" fill="currentColor" aria-hidden="true">
             <rect x="20" y="18" width="200" height="24" />
             <rect x="20" y="54" width="40" height="24" /><rect x="96" y="54" width="124" height="24" />
@@ -178,6 +188,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <a href="#state">{{ c.nav.state }}</a>
           <a href="#docs">{{ c.nav.docs }}</a>
           <a href="https://github.com/dutyc/kurrent" target="_blank" rel="noopener">{{ c.nav.github }}</a>
+          <a class="lang" :href="langHref" :hreflang="langHreflang">{{ langLabel }}</a>
         </nav>
       </div>
     </div>
@@ -191,7 +202,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <h1>{{ c.h1[0] }}<br>{{ c.h1[1] }}</h1>
           <p class="lede" v-html="c.lede"></p>
           <div class="links">
-            <a class="link" :href="lang === 'en' ? '/en/guide/deployment' : '/guide/deployment'">{{ c.cta[0] }} <span>→</span></a>
+            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/deployment' : 'guide/deployment')">{{ c.cta[0] }} <span>→</span></a>
             <a class="link" href="#unit">{{ c.cta[1] }} <span>↓</span></a>
           </div>
         </div>
@@ -307,7 +318,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <div class="side"><b>04</b>{{ c.s4.side }}</div>
           <div>
             <div class="doc-list">
-              <a v-for="doc in c.s4.items" :key="doc[0]" class="doc" :href="doc[3]">
+              <a v-for="doc in c.s4.items" :key="doc[0]" class="doc" :href="linkHref(doc[3])">
                 <span class="num">{{ doc[0] }}</span>
                 <span><span class="t">{{ doc[1] }}</span><span class="d">{{ doc[2] }}</span></span>
                 <span class="arrow">→</span>
@@ -430,6 +441,12 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
 }
 .k-home .mast-nav a:hover {
   border-color: var(--ink);
+}
+.k-home .mast-nav a.lang {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--ink);
 }
 
 /* hero */
