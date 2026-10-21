@@ -16,6 +16,8 @@ IQN_UBUNTU = "iqn." + NQN_UBUNTU[4:]
 IQN_WINDOWS = "iqn." + NQN_WINDOWS[4:]
 HOST_NQN = "nqn.2026-07.com.kurrent:host.worker-01"
 SECRET = "DHHC-1:01:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo="
+# 控制面从认证密钥派生的 TLS-PSK（64 位十六进制，见 control_plane _derive_tls_psk）
+TLS_PSK = "ab" * 32
 
 
 # ============================ NvmetHostClient（mock urllib） ============================
@@ -375,3 +377,60 @@ def test_push_credential_host_unreachable(agent_client, fake_host):
     assert backend.cache.reconcile()["applied"] == 1
 
 
+# ============================ 目标端 TLS-PSK（控制面派生，随认证密钥同步） ============================
+
+
+def test_cache_apply_pushes_tls_psk(backend, fake_host):
+    """apply(..., tls_psk)：认证登记之外同时把 PSK 注入宿主服务（sub × host 全组合）+ 缓存落盘。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    assert ("set_host", NQN_UBUNTU, HOST_NQN, SECRET) in calls
+    assert ("set_tls_key", NQN_UBUNTU, HOST_NQN, TLS_PSK) in calls
+    with open(cache.path, encoding="utf-8") as f:
+        assert json.load(f)["worker-01"]["tls_psk"] == TLS_PSK
+
+
+def test_cache_reconcile_replays_tls_psk(backend, fake_host):
+    """reconcile 重放含 TLS-PSK 的条目：宿主不可达窗口后认证与 PSK 一并补上。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    host, _ = fake_host
+    host.unreachable = True
+    with pytest.raises(Exception):
+        cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    host.unreachable = False
+    assert cache.reconcile() == {"applied": 1, "failed": 0}
+    assert ("set_host", NQN_UBUNTU, HOST_NQN, SECRET) in calls
+    assert ("set_tls_key", NQN_UBUNTU, HOST_NQN, TLS_PSK) in calls
+
+
+def test_cache_revoke_deletes_tls_psk(backend, fake_host):
+    """apply(None)：认证吊销的同时吊销目标端 PSK（解密资格与认证资格同生命周期）。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    cache.apply("worker-01", None, [NQN_UBUNTU], [HOST_NQN])
+    assert ("delete_host", NQN_UBUNTU, HOST_NQN) in calls
+    assert ("delete_tls_key", NQN_UBUNTU, HOST_NQN) in calls
+
+
+def test_cache_secret_without_psk_keeps_existing(backend, fake_host):
+    """密钥在但未带 PSK（旧控制面）：不动已有 PSK，避免误清（删除须由吊销显式触发）。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    before = len(calls)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN])  # tls_psk 缺省 = None
+    assert [c for c in calls[before:] if c[0] in ("set_tls_key", "delete_tls_key")] == []
+
+
+def test_cache_tls_409_is_non_fatal(backend, fake_host):
+    """宿主无 TLS 端口（PUT /tls → 409）：认证照常同步、PSK 记警告跳过（降级而非故障）。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    host, _ = fake_host
+    host.tls_ready = False
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    assert ("set_host", NQN_UBUNTU, HOST_NQN, SECRET) in calls
+    assert [c for c in calls if c[0] == "set_tls_key"] == []

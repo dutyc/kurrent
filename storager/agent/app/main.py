@@ -624,11 +624,13 @@ class CdReq(BaseModel):
 
 class CredentialPushReq(BaseModel):
     """NVMe-oF 凭据推送（控制面驱动，仅 nvmet 后端）：
-    secret=null 吊销该 worker；sub_nqns = 该 worker 在本节点的盘子系统 NQN，host_nqns = 绑定设备派生 NQN。"""
+    secret=null 吊销该 worker；sub_nqns = 该 worker 在本节点的盘子系统 NQN，host_nqns = 绑定设备派生 NQN。
+    tls_psk = 目标端 TLS-PSK（由控制面从认证密钥派生，十六进制）；随 secret 一并同步/吊销。"""
     worker_id: str
     secret: Optional[str] = None
     sub_nqns: list = []
     host_nqns: list = []
+    tls_psk: Optional[str] = None
 
 
 # ── 后端就绪度探针（healthz 投影，仅 nvmet 后端）──
@@ -683,10 +685,12 @@ def push_credential(req: CredentialPushReq, request: Request):
     if not isinstance(backend, NvmetBackend):
         raise HTTPException(400, "credential push requires backend=nvmet")
     req_dict = {"worker_id": req.worker_id, "secret": bool(req.secret),
-                "sub_nqns": req.sub_nqns, "host_nqns": req.host_nqns}
+                "sub_nqns": req.sub_nqns, "host_nqns": req.host_nqns,
+                "tls": bool(req.tls_psk)}
     with logged("credential", req_dict, request.client.host):
         try:
-            return backend.cache.apply(req.worker_id, req.secret, req.sub_nqns, req.host_nqns)
+            return backend.cache.apply(req.worker_id, req.secret, req.sub_nqns,
+                                       req.host_nqns, req.tls_psk)
         except NvmetHostError as exc:
             raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
 

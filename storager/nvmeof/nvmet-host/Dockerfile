@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir \
 
 COPY app ./app
 
-# 仅供文档提示；实际经 compose 端口映射（127.0.0.1:4841）与内部网络访问
+# 仅供文档提示；实际为 host 网络模式，服务直接监听宿主 4841
 EXPOSE 4841
 
-# 监听地址由 compose 注入 NVMET_HOST_ADDR（容器内 0.0.0.0，对外仅 loopback 映射）
+# 监听地址为模块常量（0.0.0.0:4841，host 网络即宿主栈），compose 不注入
 CMD ["python", "-m", "app.main"]

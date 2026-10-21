@@ -40,7 +40,7 @@ services:
   # 内核 nvmet target 在宿主（模块/configfs 由 host-prepare.sh 就位，见 nvmet-host README）；
   # 本容器只承载配置面管理进程：bind mount configfs 后普通 root 即可写入，无需 privileged。
   # host 网络模式：nvmet 监听 socket 由写 configfs 的进程（本容器）创建，绑定到该进程所在
-  # 网络命名空间；host 模式下即宿主 netns，客户端（iPXE/QEMU）可直接访问 4420，容器重建不丢监听。
+  # 网络命名空间；host 模式下即宿主 netns，客户端（iPXE/QEMU）可直达数据面端口 4421，容器重建不丢监听。
   # Agent 经 https://host.docker.internal:4841 访问本服务（mTLS）；该地址是部署事实常量
   # （storager/agent/app/config.py DEFAULT_NVMET_HOST_URL），不在节点声明里——声明出现
   # spec.agent.nvmetHostUrl 会被拒（分层职责：容器内路径/内部通讯归 compose）。
@@ -69,6 +69,13 @@ services:
     # 生产环境建议改用自定义 profile 仅放行 configfs（见 nvmet-host/README.md）。
     security_opt:
       - apparmor:unconfined
+      # TLS-PSK 目标端供给（内核段加密，见 blueprint/nvme-tcp-tls-in-kernel.md）：
+      # 本服务需把 psk key 注入内核全局 .nvme keyring —— 默认策略下两处被挡，
+      # 缺任何一条都会静默失败（详见 nvmet-host/app/main.py 的 NvmePskKeyring）：
+      #   seccomp：默认策略拒 add_key/keyctl 内核 syscall（EPERM）
+      #   systempaths：/proc/keys 被默认 MaskedPaths 屏蔽成 /dev/null（拿不到 keyring serial）
+      - seccomp=unconfined
+      - systempaths=unconfined
     volumes:
       - /sys/kernel/config:/sys/kernel/config
       # 磁盘镜像目录：configfs device_path 由写入进程（本容器）所在挂载命名空间解析，

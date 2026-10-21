@@ -278,7 +278,7 @@ type hostEnv struct {
 var hostEnvPaths = hostEnv{procMounts: "/proc/mounts", sysModuleRoot: "/sys/module"}
 
 // hostPreflightNvmet 检查宿主 nvmet 数据面前置：nvmet/nvmet-tcp 模块已加载、configfs 已挂载。
-// 内核 nvmet target 无法容器化（4420 数据面在宿主），这是 nvmet 后端节点唯一的手工步骤——
+// 内核 nvmet target 无法容器化（4421 数据面在宿主），这是 nvmet 后端节点唯一的手工步骤——
 // 已由 nvmeof/host-prepare.sh 工具化；未就绪时 fail fast 并指路该脚本。
 func hostPreflightNvmet(storagerDir string) error {
 	var missing []string

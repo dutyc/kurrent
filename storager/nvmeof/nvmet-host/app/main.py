@@ -5,6 +5,10 @@
 bootstrap token 引导 + 证书轮换 + 客户端证书鉴权；token TTL 内可复用、不消耗）；因 Ubuntu
 docker-default AppArmor 会拒绝 configfs 写入，容器需豁免 AppArmor（见 nvmet-host README）。
 直接操作内核 configfs（/sys/kernel/config/nvmet）——subsystem/namespace/port/hosts(dhchap_key)。
+数据面单端口：NVMe/TCP TLS 1.3（默认 4421，`addr_tsas=tls1.3`，内核同时把 `treq` 置
+required）——默认全链路加密，固件段（iPXE sanboot）与内核段（GRUB 之后）共用本口；
+历史明文口（4420）已撤除，升级时由启动清理收敛。
+TLS 端不需要 configfs 侧密钥配置，只需把 psk key 注入内核全局 `.nvme` keyring（见 NvmePskKeyring）。
 Agent 是唯一调用方（持有内部 CA 签发的 client cert，经 https://host.docker.internal:4841）。
 盘文件的创建/管理归 Agent（本服务不建盘、不删盘），但**必须能看见同一份盘目录**——
 configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，故 compose 把宿主盘目录
@@ -22,9 +26,13 @@ configfs 语义要点（Linux v7.x nvmet）：
   回收仅在无引用者时执行（_gc_host）——多盘同 worker 逐个摘链接的中间态须保留条目
 """
 
+import ctypes
+import errno
 import logging
 import os
+import re
 import shutil
+import struct
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -42,11 +50,143 @@ ensure_pki()
 log = logging.getLogger("nvmet-host")
 
 CONFIGFS_NVMET = os.getenv("NVMET_CONFIGFS", "/sys/kernel/config/nvmet")
-PORT_ID = os.getenv("NVMET_PORT_ID", "1")
+# 数据面端口（唯一）：NVMe/TCP TLS 1.3。默认全链路加密——固件段与内核段共用本口，
+# 不再有独立的明文口。空字符串 = 关闭数据面（联调用；控制面会因端口未就绪拒绝引导）。
+TLS_PORT_ID = os.getenv("NVMET_TLS_PORT_ID", "2")
+TLS_TRSVCID = os.getenv("NVMET_TLS_TRSVCID", "4421")
+# 历史明文口（4420）：不再创建、不再挂载；启动时清理残留（拆除挂载并删口），
+# 使升级后的宿主收敛到单口。仅作迁移用，无运行时作用。
+LEGACY_PLAIN_PORT_ID = os.getenv("NVMET_PLAIN_PORT_ID", "1")
+LEGACY_PLAIN_TRSVCID = os.getenv("NVMET_PLAIN_TRSVCID", "4420")
+KEYS_FILE = os.getenv("NVMET_KEYS_FILE", "/proc/keys")
 # 容器内磁盘目录：configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，
 # 必须指向本容器可见路径；Agent 传入的 backing 是其容器内路径（如 /home/iscsi_img/xxx.img），
 # 本服务按 basename 重拼到 DEFAULT_HOST_DISK_DIR（compose 挂载目标，部署清单职责）。
 HOST_DISK_DIR = DEFAULT_HOST_DISK_DIR
+
+
+# ===================== TLS-PSK 目标端供给（内核全局 .nvme keyring） =====================
+
+
+class NvmePskKeyring:
+    """把 TLS-PSK 注入内核全局 `.nvme` keyring（目标端供给）。
+
+    机制（v7.0 内核 + ktls-utils 1.3.0 实测，见 blueprint/nvme-tcp-tls-in-kernel.md §5）：
+    - nvmet 建 port 时即取该 keyring（`port->keyring`），所以目标端**无需任何 configfs 配置**，
+      只要把 psk key 放进去；tlshd 握手时用 ClientHello 里的 identity 在 keyring 里搜同名 key。
+    - 一条 psk key：**description == PSK identity**，**payload == PSK 字节**（两端共用同一条）。
+    - identity = `NVMe0R01 <hostnqn> <subsysnqn>`：ver 0 不带 digest，内核按**前缀**匹配，
+      省掉 digest 计算（发起端用同一条，见 initramfs-nbft）。
+    - `.nvme` 是**独立 keyring、不挂任何 session**（按名字搜不到），只能读 /proc/keys 取 serial；
+      `add_key`/`keyctl` 无 libkeyutils 也可，直接内核 syscall。
+
+    容器前置（compose 的 `security_opt`，缺一即静默失败，故列明）：
+    - `seccomp=unconfined`：Docker 默认 seccomp 拒 `add_key`/`keyctl`（EPERM）。
+    - `systempaths=unconfined`：`/proc/keys` 被默认 MaskedPaths 屏蔽成 /dev/null（0 字节省略报错）。
+    """
+
+    _SYS_ADD_KEY = 248  # x86_64
+    _SYS_KEYCTL = 250
+    _KEYCTL_UNLINK = 9
+    _KEYCTL_READ = 11
+    _KEY_TYPE = "psk"
+
+    def __init__(self, keys_file: str = KEYS_FILE, keyring_name: str = ".nvme"):
+        self.keys_file = keys_file
+        self.keyring_name = keyring_name
+        self._libc = ctypes.CDLL(None, use_errno=True)
+
+    @staticmethod
+    def identity(hostnqn: str, subsysnqn: str) -> str:
+        return f"NVMe0R01 {hostnqn} {subsysnqn}"
+
+    def _entries(self) -> list[tuple[int, str, str]]:
+        """解析 /proc/keys → [(serial, type, description)]。
+
+        行格式：`<serial> <flags> <usage> perm <perms> <uid> <gid> <type> <desc>[: <n>]`；
+        description 可含空格（NQN），故前 8 列用正则切，尾部 `: <n>`（keyring 为 key 数、
+        其他类型为 datalen）单独剥离。
+
+        空 keyring 的尾部是 `: empty` 而非数字（如 `.nvme: empty`）——必须一并剥离，
+        否则 host 重启后 `.nvme` 被 nvme-keyring 重建为空时 keyring_serial() 会找不到它，
+        `PUT /subsystems/{nqn}/tls` 恒定 500，reconcile 再也无法把 PSK 注回去。"""
+        out: list[tuple[int, str, str]] = []
+        with open(self.keys_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.match(
+                    r"^([0-9a-f]+)\s+\S+\s+\d+\s+perm\s+\S+\s+\d+\s+\d+\s+(\S+)\s+(.*)$",
+                    line.rstrip("\n"),
+                )
+                if m:
+                    out.append((int(m.group(1), 16), m.group(2),
+                                re.sub(r": (?:\d+|empty)$", "", m.group(3))))
+        return out
+
+    def keyring_serial(self) -> int:
+        for serial, ktype, desc in self._entries():
+            if ktype == "keyring" and desc == self.keyring_name:
+                return serial
+        raise RuntimeError(
+            f"kernel keyring '{self.keyring_name}' not found in {self.keys_file}"
+            "（宿主需 nvme-keyring 模块——随 nvmet-tcp 自动加载；"
+            "容器需 security_opt systempaths=unconfined 才能读 /proc/keys）")
+
+    def _linked_serials(self, keyring: int) -> list[int]:
+        """KEYCTL_READ 一个 keyring → 其中挂载的 key serial（每项 4 字节小端）。
+
+        判定「key 是否真在 .nvme 里」只能靠它：/proc/keys 列出的是**进程可见的所有
+        key**（含其它 keyring 里的同名条目），按它找 key 会命中不在 .nvme 的条目，
+        UNLINK 得 ENOENT（实测）；而 TLS 查找只认 .nvme，故淘汰也必须只认 .nvme。"""
+        buf = ctypes.create_string_buffer(4096)
+        ctypes.set_errno(0)
+        n = self._libc.syscall(self._SYS_KEYCTL, self._KEYCTL_READ, keyring, buf, len(buf))
+        if n < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, f"keyctl(READ keyring) failed: {os.strerror(err)}")
+        return [struct.unpack("<i", buf.raw[i:i + 4])[0] for i in range(0, n, 4)]
+
+    def _key_serials(self, identity: str) -> list[int]:
+        """.nvme 里 description == identity 的全部 key serial（历史重复可能不止一条）。"""
+        desc = {s: d for s, ktype, d in self._entries() if ktype == self._KEY_TYPE}
+        return [s for s in self._linked_serials(self.keyring_serial())
+                if desc.get(s) == identity]
+
+    def set_key(self, hostnqn: str, subsysnqn: str, psk: bytes) -> int:
+        """写入/更新 psk key（幂等），返回 key serial。
+
+        psk key 的 possessor 权限不含 Write，`add_key` 无法就地更新同名 key（实测每次
+        都新建一条），故须先摘除 .nvme 里同 identity 的旧 key 再新增——一条 identity
+        只留一条，否则内核查找结果不确定。"""
+        if not psk:
+            raise ValueError("empty PSK")
+        identity = self.identity(hostnqn, subsysnqn)
+        kr = self.keyring_serial()
+        for old in self._key_serials(identity):
+            self._unlink(old, kr)
+        ctypes.set_errno(0)
+        serial = self._libc.syscall(self._SYS_ADD_KEY, self._KEY_TYPE.encode(),
+                                    identity.encode(), psk, len(psk), kr)
+        if serial < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, f"add_key({self._KEY_TYPE}) failed: {os.strerror(err)}")
+        return int(serial)
+
+    def delete_key(self, hostnqn: str, subsysnqn: str) -> bool:
+        """删除 .nvme 里该 identity 的 psk key；无则返回 False。"""
+        identity = self.identity(hostnqn, subsysnqn)
+        kr = self.keyring_serial()
+        serials = self._key_serials(identity)
+        for serial in serials:
+            self._unlink(serial, kr)
+        return bool(serials)
+
+    def _unlink(self, serial: int, keyring: int) -> None:
+        ctypes.set_errno(0)
+        if self._libc.syscall(self._SYS_KEYCTL, self._KEYCTL_UNLINK, serial, keyring) < 0:
+            err = ctypes.get_errno()
+            if err in (errno.ENOENT, errno.ENOKEY):
+                return  # 并发下已被摘除：语义即「确保不在」，视为成功
+            raise OSError(err, f"keyctl(UNLINK) failed: {os.strerror(err)}")
 
 
 # ============================ configfs 操作封装 ============================
@@ -56,9 +196,22 @@ class NvmetManager:
     """configfs nvmet 操作：全部路径基于 self.root（默认 /sys/kernel/config/nvmet），
     测试可注入临时目录模拟 configfs 布局。"""
 
-    def __init__(self, root: str = CONFIGFS_NVMET, port_id: str = PORT_ID):
+    def __init__(self, root: str = CONFIGFS_NVMET, tls_port_id: str = TLS_PORT_ID,
+                 tls_trsvcid: str = TLS_TRSVCID,
+                 legacy_plain_port_id: str = LEGACY_PLAIN_PORT_ID,
+                 keyring: "NvmePskKeyring | None" = None):
         self.root = root
-        self.port_id = port_id
+        self.tls_port_id = tls_port_id
+        self.tls_trsvcid = tls_trsvcid
+        self.legacy_plain_port_id = legacy_plain_port_id
+        self.keyring = keyring if keyring is not None else NvmePskKeyring()
+        # 数据面端口是否就绪：由 ensure_tls_port() 置位（失败则不置位，
+        # /capabilities 如实报 false，控制面据此拒绝引导）
+        self.tls_ready = False
+
+    @property
+    def tls_enabled(self) -> bool:
+        return bool(self.tls_port_id)
 
     def ready(self) -> bool:
         return os.path.isdir(os.path.join(self.root, "subsystems"))
@@ -87,13 +240,11 @@ class NvmetManager:
             raise
 
     def delete_subsystem(self, nqn: str) -> None:
-        """删除子系统：先摘除 port 挂载，再逐个禁用/删除 namespace，最后移除 hosts 与本体。"""
+        """删除子系统：先摘除各端口挂载，再逐个禁用/删除 namespace，最后移除 hosts 与本体。"""
         sub = self._sub_path(nqn)
         if not os.path.isdir(sub):
             raise ValueError(f"subsystem not found: {nqn}")
-        link = os.path.join(self.root, "ports", self.port_id, "subsystems", nqn)
-        if os.path.islink(link):
-            os.unlink(link)
+        self.detach_port(nqn)
         ns_base = os.path.join(sub, "namespaces")
         if os.path.isdir(ns_base):
             for name in sorted(os.listdir(ns_base)):
@@ -192,33 +343,94 @@ class NvmetManager:
         return False
 
     def ensure_port(self, trtype: str = "tcp", adrfam: str = "ipv4", traddr: str = "0.0.0.0",
-                    trsvcid: str = "4420") -> dict[str, str]:
-        """幂等创建/更新 NVMe/TCP 端口（默认 4420，无 TLS）。
+                    trsvcid: str | None = None, tsas: str | None = None,
+                    port_id: str | None = None) -> dict[str, Any]:
+        """幂等创建/更新 NVMe/TCP 端口。
+
+        `tsas="tls1.3"` 即声明 TLS 端口（内核同时把 `treq` 置 required）；`tsas=None`
+        表示不写 `addr_tsas`。trsvcid/port_id 缺省取数据面（TLS）端口值。
 
         写入顺序敏感：nvmet 在第一个子系统挂载（allow_link）时才启用端口并监听，
         addr_* 属性只在端口未启用时可写（启用后 store 返回 -EACCES），故端口已配置
-        （addr_trtype 非空）时直接跳过写入。注意：addr_tsas 属性仅接受 tls1.3，不写即无 TLS。"""
-        port = os.path.join(self.root, "ports", self.port_id)
+        （addr_trtype 非空）时直接跳过写入。注意：addr_tsas 属性仅接受 tls1.3，不写即无 TLS；
+        写 tsas 的前置是 `port->keyring != NULL`（nvme-keyring 模块已加载），否则内核返回 EINVAL。"""
+        port_id = port_id or self.tls_port_id
+        trsvcid = trsvcid or self.tls_trsvcid
+        port = os.path.join(self.root, "ports", port_id)
         os.makedirs(port, exist_ok=True)
         if self._read(os.path.join(port, "addr_trtype")):
-            return {"port": self.port_id, "trtype": trtype, "traddr": traddr,
-                    "trsvcid": trsvcid, "already_configured": True}
+            return {"port": port_id, "trtype": trtype, "traddr": traddr,
+                    "trsvcid": self._read(os.path.join(port, "addr_trsvcid")) or trsvcid,
+                    "tsas": self._read(os.path.join(port, "addr_tsas")) or "none",
+                    "already_configured": True}
         self._write(port, "addr_trsvcid", trsvcid)
         self._write(port, "addr_traddr", traddr)
         self._write(port, "addr_adrfam", adrfam)
         self._write(port, "addr_trtype", trtype)
-        return {"port": self.port_id, "trtype": trtype, "traddr": traddr,
-                "trsvcid": trsvcid}
+        if tsas:
+            self._write(port, "addr_tsas", tsas)
+        return {"port": port_id, "trtype": trtype, "traddr": traddr,
+                "trsvcid": trsvcid, "tsas": tsas or "none"}
 
-    def attach_port(self, nqn: str) -> None:
-        """把子系统挂到端口（symlink），幂等；创建子系统后必须挂载才对外可见。
+    def ensure_tls_port(self) -> dict[str, Any]:
+        """创建/确认数据面端口（NVMe/TCP TLS 1.3）并置位 tls_ready。
+
+        未配置（空 port id）时为 no-op 且不置位——控制面据此拒绝引导。"""
+        if not self.tls_enabled:
+            return {"enabled": False, "reason": "NVMET_TLS_PORT_ID 为空"}
+        info = self.ensure_port(tsas="tls1.3", port_id=self.tls_port_id,
+                                trsvcid=self.tls_trsvcid)
+        self.tls_ready = True
+        return {"enabled": True, **info}
+
+    def remove_legacy_plain_port(self) -> str | None:
+        """拆除历史明文口（4420）：先摘子系统挂载再删口，幂等。
+
+        返回被删除的端口 id，未存在则返回 None。升级后的宿主由启动流程调用一次，
+        使残留的明文数据面收敛掉；纯明文访问随之消失。"""
+        pid = self.legacy_plain_port_id
+        if not pid:
+            return None
+        port = os.path.join(self.root, "ports", pid)
+        if not os.path.isdir(port):
+            return None
+        subs = os.path.join(port, "subsystems")
+        if os.path.isdir(subs):
+            for nqn in os.listdir(subs):
+                link = os.path.join(subs, nqn)
+                if os.path.islink(link):
+                    os.unlink(link)
+        os.rmdir(port)
+        return pid
+
+    def attach_port(self, nqn: str, port_id: str | None = None) -> None:
+        """把子系统挂到数据面端口（symlink），幂等；创建子系统后必须挂载才对外可见。
 
         configfs 的 symlink 目标由内核 kern_path 按进程 cwd 解析，必须用绝对路径
         （相对路径会相对 uvicorn 的 cwd 解析而 ENOENT）。"""
-        link = os.path.join(self.root, "ports", self.port_id, "subsystems", nqn)
+        pid = port_id or self.tls_port_id
+        link = os.path.join(self.root, "ports", pid, "subsystems", nqn)
         os.makedirs(os.path.dirname(link), exist_ok=True)
         if not os.path.islink(link):
             os.symlink(os.path.join(self.root, "subsystems", nqn), link)
+
+    def detach_port(self, nqn: str, port_id: str | None = None) -> None:
+        """从数据面端口摘除子系统挂载（幂等）。"""
+        pid = port_id or self.tls_port_id
+        if not pid:
+            return
+        link = os.path.join(self.root, "ports", pid, "subsystems", nqn)
+        if os.path.islink(link):
+            os.unlink(link)
+
+    def set_tls_key(self, hostnqn: str, nqn: str, psk: bytes) -> int:
+        """登记目标端 PSK（= 该 hostnqn 连该子系统的凭据），返回 key serial。"""
+        if not self.tls_enabled:
+            raise ValueError("TLS port disabled (NVMET_TLS_PORT_ID 为空)")
+        return self.keyring.set_key(hostnqn, nqn, psk)
+
+    def delete_tls_key(self, hostnqn: str, nqn: str) -> bool:
+        return self.keyring.delete_key(hostnqn, nqn)
 
     def _sub_path(self, nqn: str) -> str:
         return os.path.join(self.root, "subsystems", nqn)
@@ -253,6 +465,12 @@ class HostSet(BaseModel):
     secret: str
 
 
+class TlsKeySet(BaseModel):
+    """目标端 TLS-PSK 供给：psk 为 32 字节的十六进制（64 字符）。"""
+    hostnqn: str
+    psk: str
+
+
 def verify_client_cert(request: Request) -> None:
     """mTLS 客户端证书鉴权（内部 CA 信任模型）。
 
@@ -282,13 +500,18 @@ def capabilities():
         "cd": False,
         "persistent": "host-native configfs (nvmet-host service)",
         "configfs": manager.root,
-        "port": {"trtype": "tcp", "trsvcid": "4420", "tsas": "none"},
+        "port": ({
+            "port_id": manager.tls_port_id, "trtype": "tcp",
+            "trsvcid": manager.tls_trsvcid, "tsas": "tls1.3",
+            "ready": manager.tls_ready,
+        } if manager.tls_enabled else None),
     }
 
 
 @app.post("/port", dependencies=[Depends(verify_client_cert)])
-def ensure_port(trsvcid: str = "4420"):
-    return manager.ensure_port(trsvcid=trsvcid)
+def ensure_port():
+    """幂等确认数据面端口（NVMe/TCP TLS 1.3）。"""
+    return manager.ensure_tls_port()
 
 
 @app.get("/subsystems", dependencies=[Depends(verify_client_cert)])
@@ -303,10 +526,14 @@ def create_subsystem(req: SubsystemCreate):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     try:
-        manager.attach_port(req.nqn)
+        # 数据面端口未就绪时暂不挂载（挂载会指向未配置的端口）；PSK 供给
+        # （PUT /subsystems/{nqn}/tls）时会补挂，且此时端口必然已就绪。
+        if manager.tls_ready:
+            manager.attach_port(req.nqn)
     except Exception as exc:
         raise HTTPException(500, f"attach port failed: {exc}") from exc
-    return {"nqn": req.nqn, "backing": req.backing, "port": PORT_ID}
+    return {"nqn": req.nqn, "backing": req.backing,
+            "tls_port": manager.tls_port_id if manager.tls_ready else None}
 
 
 @app.delete("/subsystems/{nqn}", dependencies=[Depends(verify_client_cert)])
@@ -334,20 +561,66 @@ def delete_host(nqn: str, hostnqn: str):
     return {"nqn": nqn, "hostnqn": hostnqn, "deleted": True}
 
 
+@app.put("/subsystems/{nqn}/tls", dependencies=[Depends(verify_client_cert)])
+def set_tls_key(nqn: str, req: TlsKeySet):
+    """登记目标端 TLS-PSK（psk key 注入内核全局 `.nvme`），并把子系统挂到 TLS 端口。
+    Agent 按 worker 凭据同步调用；identity = `NVMe0R01 <hostnqn> <nqn>`。"""
+    if not manager.exists(nqn):
+        raise HTTPException(404, f"subsystem not found: {nqn}")
+    try:
+        psk = bytes.fromhex(req.psk)
+    except ValueError as exc:
+        raise HTTPException(400, f"psk must be hex: {exc}") from exc
+    if len(psk) != 32:
+        raise HTTPException(400, f"psk must be 32 bytes (64 hex chars): got {len(psk)}")
+    try:
+        serial = manager.set_tls_key(req.hostnqn, nqn, psk)
+        manager.attach_port(nqn)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, f"keyring inject failed: {exc}") from exc
+    return {"nqn": nqn, "hostnqn": req.hostnqn, "key_serial": serial,
+            "tls_port": manager.tls_port_id}
+
+
+@app.delete("/subsystems/{nqn}/tls/{hostnqn}", dependencies=[Depends(verify_client_cert)])
+def delete_tls_key(nqn: str, hostnqn: str):
+    try:
+        removed = manager.delete_tls_key(hostnqn, nqn)
+    except OSError as exc:
+        raise HTTPException(500, f"keyring delete failed: {exc}") from exc
+    return {"nqn": nqn, "hostnqn": hostnqn, "deleted": removed}
+
+
 if __name__ == "__main__":
     import uvicorn
 
     # 监听地址/端口为部署细节（host 网络，同机固定拓扑；agent 经 DEFAULT_NVMET_HOST_URL 访问）
     host = DEFAULT_HOST_ADDR
     port = DEFAULT_HOST_PORT
-    # 启动即配置 NVMe/TCP 端口（幂等）：裸端口不允许挂子系统，须先写全 addr_* 属性。
+    # 启动即配置数据面端口（幂等）：裸端口不允许挂子系统，须先写全 addr_* 属性。
     # 宿主前置未满足（nvmet 模块/configfs 挂载）时给出可操作报错——宿主侧由
     # nvmeof/host-prepare.sh 就位（见 README）
     try:
-        manager.ensure_port()
+        info = manager.ensure_tls_port()
+        if info.get("enabled"):
+            log.info("数据面端口就绪: %s (tsas=tls1.3)", info)
     except OSError as exc:
-        log.error("宿主前置未满足（nvmet 模块 + configfs 挂载）: %s——宿主侧修复: sudo bash storager/nvmeof/host-prepare.sh", exc)
-        raise
+        # 创建失败不阻断管理面：tls_ready 保持 false，/capabilities 如实上报，
+        # 控制面据此拒绝引导（默认全链路加密，不做明文降级）
+        manager.tls_ready = False
+        log.error("数据面端口创建失败，控制面将拒绝引导本节点的盘: %s"
+                  "（宿主需 nvmet 模块 + nvme-keyring，后者随 nvmet-tcp 自动加载）", exc)
+    # 迁移：拆除历史明文口（4420），使升级后的宿主收敛到单口
+    try:
+        removed = manager.remove_legacy_plain_port()
+        if removed:
+            log.warning("已拆除历史明文数据面端口 ports/%s (trsvcid=%s)",
+                        removed, LEGACY_PLAIN_TRSVCID)
+    except OSError as exc:
+        log.error("历史明文口拆除失败（手工处理: 摘 ports/%s/subsystems/* 后 rmdir）: %s",
+                  LEGACY_PLAIN_PORT_ID, exc)
     # mTLS：serving cert + 内部 CA 校验客户端证书链（CERT_REQUIRED），
     # 与 storager-agent 的 uvicorn 参数一致；host 网络直连（无 docker-proxy），协议版本不限
     pki_dir = DEFAULT_PKI_DIR

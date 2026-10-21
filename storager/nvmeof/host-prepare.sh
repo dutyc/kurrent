@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # kurrent 存储节点宿主前置：nvmet 数据面（内核模块加载 + configfs 挂载 + 重启持久化）。
 #
-# 内核 nvmet target 无法容器化：4420 数据面由宿主内核提供，节点部署前须加载
+# 内核 nvmet target 无法容器化：4421 数据面由宿主内核提供，节点部署前须加载
 # nvmet / nvmet-tcp 并挂载 configfs，且跨重启持久化（否则重启后节点静默失效）。
 # 幂等，可重复执行；就位操作需 root。
 #

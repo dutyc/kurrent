@@ -109,13 +109,24 @@ class NvmetHostClient:
     def delete_host(self, nqn: str, hostnqn: str) -> dict:
         return self._request("DELETE", f"/subsystems/{_quote(nqn)}/hosts/{_quote(hostnqn)}") or {}
 
+    def set_tls_key(self, nqn: str, hostnqn: str, psk: str) -> dict:
+        """登记目标端 TLS-PSK（宿主服务把 psk key 注入内核全局 .nvme keyring；psk 为十六进制）。"""
+        return self._request("PUT", f"/subsystems/{_quote(nqn)}/tls",
+                             {"hostnqn": hostnqn, "psk": psk}) or {}
+
+    def delete_tls_key(self, nqn: str, hostnqn: str) -> dict:
+        return self._request("DELETE", f"/subsystems/{_quote(nqn)}/tls/{_quote(hostnqn)}") or {}
+
+
 class NvmetCredentialCache:
     """按 Worker 跟盘的凭据缓存（控制面推送驱动）。
 
-    期望状态 {worker_id: {secret, sub_nqns, host_nqns}} 由控制面推送（POST /credential），
-    本缓存先落盘（0600 JSON，明文 DHHC-1——与控制面 credentials.yml 同等密级）再转调宿主服务；
+    期望状态 {worker_id: {secret, tls_psk, sub_nqns, host_nqns}} 由控制面推送（POST /credential），
+    本缓存先落盘（0600 JSON，明文 DHHC-1 + TLS-PSK——与控制面 credentials.yml 同等密级）再转调宿主服务；
     宿主服务不可达时同步失败但缓存已更新，reconcile() 周期重放补上。
     reconcile 遇子系统 404（盘已删且未收到清理推送）→ 移除过期条目，避免死重试。
+    目标端 TLS-PSK（宿主服务写入内核 .nvme keyring）与 hosts 矩阵同批同步；宿主服务无 TLS
+    端口时返回 409 → 记警告跳过（明文端口仍可用，属降级而非故障，见 nvmet-host main.py）。
     """
 
     def __init__(self, host: NvmetHostClient, path: str, interval: float = 60.0):
@@ -148,16 +159,17 @@ class NvmetCredentialCache:
         except OSError:
             pass
 
-    def apply(self, worker_id: str, secret: str | None, sub_nqns: list[str], host_nqns: list[str]) -> dict:
+    def apply(self, worker_id: str, secret: str | None, sub_nqns: list[str],
+              host_nqns: list[str], tls_psk: str | None = None) -> dict:
         """应用控制面推送的期望状态：更新缓存（secret=None 移除条目）→ 落盘 → 同步宿主服务。"""
         with self.lock:
             if secret:
-                self._entries[worker_id] = {"secret": secret,
+                self._entries[worker_id] = {"secret": secret, "tls_psk": tls_psk,
                                             "sub_nqns": list(sub_nqns), "host_nqns": list(host_nqns)}
             else:
                 self._entries.pop(worker_id, None)
             self._save()
-            return self._sync(worker_id, secret, sub_nqns, host_nqns)
+            return self._sync(worker_id, secret, sub_nqns, host_nqns, tls_psk)
 
     def reconcile(self) -> dict:
         """幂等重放全部缓存条目（Agent 启动 scan 后 + 周期线程）。"""
@@ -166,7 +178,8 @@ class NvmetCredentialCache:
             for worker_id, entry in list(self._entries.items()):
                 try:
                     self._sync(worker_id, entry.get("secret"),
-                               entry.get("sub_nqns", []), entry.get("host_nqns", []))
+                               entry.get("sub_nqns", []), entry.get("host_nqns", []),
+                               entry.get("tls_psk"))
                     applied += 1
                 except NvmetHostError as exc:
                     if exc.status == 404:
@@ -179,8 +192,11 @@ class NvmetCredentialCache:
                         failed += 1
             return {"applied": applied, "failed": failed}
 
-    def _sync(self, worker_id: str, secret: str | None, sub_nqns: list[str], host_nqns: list[str]) -> dict:
-        """同步单个 worker 的 hosts 矩阵：secret 非空 → set_host；空 → delete_host（404 幂等视为成功）。"""
+    def _sync(self, worker_id: str, secret: str | None, sub_nqns: list[str],
+              host_nqns: list[str], tls_psk: str | None = None) -> dict:
+        """同步单个 worker 的 hosts 矩阵 + 目标端 TLS-PSK：
+        secret 非空 → set_host + set_tls_key；空 → delete_host + delete_tls_key（404 幂等视为成功）。"""
+        tls_ok = 0
         for sub in sub_nqns:
             for host in host_nqns:
                 if secret:
@@ -191,7 +207,26 @@ class NvmetCredentialCache:
                     except NvmetHostError as exc:
                         if exc.status != 404:
                             raise
+                if tls_psk:
+                    try:
+                        self.host.set_tls_key(sub, host, tls_psk)
+                        tls_ok += 1
+                    except NvmetHostError as exc:
+                        # 409 = 宿主服务未启用 TLS 端口（降级为明文）；404 = 子系统已删（由
+                        # reconcile 的 404 分支回收条目）。两者都不该让认证凭据同步失败。
+                        if exc.status not in (404, 409):
+                            raise
+                        log.warning(f"tls psk not applied: worker={worker_id} sub={sub}: {exc.detail}")
+                elif not secret:
+                    # 吊销（secret=None）→ 同步吊销目标端 PSK；密钥在但未带 PSK（旧控制面）
+                    # → 保持不动，避免误清已有 PSK
+                    try:
+                        self.host.delete_tls_key(sub, host)
+                    except NvmetHostError as exc:
+                        if exc.status != 404:
+                            raise
         return {"worker_id": worker_id, "secret": bool(secret),
+                "tls": bool(tls_psk), "tls_applied": tls_ok,
                 "sub_count": len(sub_nqns), "host_count": len(host_nqns)}
 
 
