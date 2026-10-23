@@ -404,7 +404,7 @@ webui/
 │           └── global.css       # CSS 变量 + Reset + 字体
 │
 └── deploy/
-    ├── Dockerfile               # nginx:1.27-alpine
+    ├── Dockerfile               # nginx:1.31-alpine
     ├── nginx/
     │   ├── nginx.conf           # location 块 + upstream（编排在仓库根 docker-compose.yml）
     │   └── snippets/            # 身份头断言片段
@@ -424,5 +424,5 @@ webui/
 | 样式 | 纯 CSS（CSS 变量驱动，零第三方 UI 库） |
 | i18n | 自研 React Context（零依赖） |
 | API | 原生 fetch（零 HTTP 库） |
-| 部署 | nginx:1.27-alpine（静态文件 + API 代理，无脚本执行面） |
+| 部署 | nginx:1.31-alpine（静态文件 + API 代理，无脚本执行面） |
 | 构建产物 | 纯静态文件（HTML + JS + CSS）：JS 302.8 KB（gzip 93.6 KB）／CSS 37.9 KB（gzip 6.5 KB） |

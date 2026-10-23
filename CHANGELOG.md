@@ -52,6 +52,14 @@
   - WebUI「加入节点」弹窗采集节点 ID（默认随机生成）并展示绑定关系；API 参考（中英）、架构文档、CLI README 同步
   - 新增 `tests/control_plane/test_pki_split.py`（三分根 / 遗留提升 / CSR 拒绝 / 信任包 / token 绑定）与路由矩阵用例；`tests/deploy/probe_edge.sh` 增加跨类拒绝与信任包断言
 
+- **基础镜像与依赖收口（CVE 排查批次）**：
+  - 基础镜像与 APK 包按 digest / 版本钉死（`python:3.11-slim@sha256:b7a9…`、`nginx:1.31-alpine@sha256:a355…`、`alpine:3.24@sha256:be26…`、`dnsmasq=2.92_p2-r0`）：标签漂移不再改变已提交的 CVE 基线
+  - dnsmasq 改由本地镜像构建：`alpine:3.24` 官方包 `2.92_p2-r0`（上游 `2.92rel2`），修复 DHCPv6 use-after-free、DHCPv6 CLID 溢出与 EDNS 报文大小三处可达漏洞；compose 不再使用 2018 年的 `jpillora/dnsmasq` digest 镜像。构建阶段的 `network: host` 仅用于访问 Alpine 仓库
+  - nginx 基座 `1.27-alpine` → `1.31-alpine`（nginx 1.31.8、njs 0.10.2、OpenSSL 3.5.9）；代理与静态配置未改，`nginx -t` 与部署探针全部通过
+  - 控制面、Agent、nvmet-host 三个镜像统一为 Python 3.11.17 + OpenSSL 3.5.7；`requirements.txt` 由裸名改为直接依赖与传递依赖全钉死，带入 `urllib3 2.8.0`、`certifi 2026.10.19`、`opentelemetry-api 1.45.1`；安装后移除运行时 `pip`/`setuptools`/`wheel`
+  - CLI 改由 Go 1.27.3 构建（`toolchain` 钉在 `go.mod`），govulncheck 无已调用漏洞
+  - WebUI 路由补丁升级 `react-router-dom 6.30.6`；`npm audit fix` 将 `nanoid`、`source-map-js` 升到已修复版本
+
 ### 修复
 
 - **`enroll` scope 的自动化 token 越权读管理面**：此前该 scope 只拦写操作，token 仍可 `GET` 设备 / Worker / 凭据台账 / 组件证书 / 操作审计，甚至可换一个继承 scope 的浏览器会话；现仅放行 `POST /pki/tokens`（签发 bootstrap token），其余读写接口与 `POST /session` 一律 `403`。`readonly` 行为不变

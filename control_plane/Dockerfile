@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # apt 走阿里云源（国内网络环境更新更快）。bookworm 源在 deb822 格式的
 # debian.sources（URIs 字段），老镜像才在 sources.list；只替换域名，
@@ -18,13 +18,14 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 COPY requirements.txt .
+# 运行期不需要 pip/setuptools/wheel：它们内置的依赖同样构成漏洞面
 RUN pip install --no-cache-dir \
         -i https://mirrors.aliyun.com/pypi/simple/ \
         --trusted-host mirrors.aliyun.com \
-        -r requirements.txt
+        -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel
 
 COPY app ./app
-
 COPY healthcheck.py /app/healthcheck.py
 
 # 管理面只暴露 unix socket（与 nginx 共享卷），容器内不监听 TCP：

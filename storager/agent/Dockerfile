@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 # apt 走阿里云源（国内网络环境更新更快）。bookworm 源在 deb822 格式的
 # debian.sources（URIs 字段），老镜像才在 sources.list；只替换域名，
@@ -18,11 +18,12 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 COPY requirements.txt .
-# pip 走阿里云镜像加速（国内网络环境安装依赖更快）
+# pip 走阿里云镜像加速（国内网络环境安装依赖更快）；运行期移除构建工具
 RUN pip install --no-cache-dir \
         -i https://mirrors.aliyun.com/pypi/simple/ \
         --trusted-host mirrors.aliyun.com \
-        -r requirements.txt
+        -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel
 
 COPY app ./app
 

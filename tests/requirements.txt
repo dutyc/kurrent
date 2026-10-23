@@ -1,3 +1,3 @@
 # 开发/测试依赖（集中管理单测执行环境）：控制面运行时依赖 + pytest
 -r ../control_plane/requirements.txt
-pytest
+pytest==9.1.1

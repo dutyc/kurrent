@@ -3,14 +3,16 @@ services:
   # ── DHCP / TFTP / 引导文件服务 ──
   # 全链路 host 网络直通：DHCP 应答、iPXE 脚本（tftp/ 挂载）、TFTP 引导文件
   kurrent-dnsmasq:
-    image: jpillora/dnsmasq@sha256:98b69ad825942089fb7c4b9153e3c5af0205eda3a103c691e30b1a13fd912830
+    build:
+      context: ./dnsmasq
+      dockerfile: Dockerfile
+      # BuildKit 默认桥接网络取不到 Alpine 仓库；host 网络只用于构建阶段
+      network: host
+    image: kurrent-dnsmasq
     container_name: kurrent-dnsmasq
-    network_mode: host          
+    network_mode: host
     cap_add:
-      - NET_ADMIN              
-    # 直接运行 dnsmasq 二进制，绕过镜像默认的 webproc 包装器：
-    # jpillora/dnsmasq 默认 ENTRYPOINT=webproc，会在 8080 起 web 管理面板（host 网络下占用宿主 8080），本项目不需要
-    entrypoint: ["/usr/sbin/dnsmasq"]
+      - NET_ADMIN
     volumes:
       - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf
       - ./dnsmasq/dhcp-hosts.conf:/etc/dnsmasq.d/dhcp-hosts.conf
