@@ -281,7 +281,7 @@ def _worker_boot_payload(
     menu_default = _menu_default_for(record_)
     if menu_default == "reboot":
         # 未配置默认启动：短超时快速重启，等待管理员建盘/设默认系统
-        menu_timeout = settings.auto_boot_timeout
+        menu_timeout = settings.auto_boot_timeout_ms
     else:
         menu_timeout = boot.get("menu_timeout") or boot.get("menu-timeout") or settings.boot_menu_timeout
     payload: dict[str, Any] = {
@@ -352,7 +352,7 @@ def _worker_boot_payload(
 
 def _reboot_boot_payload() -> dict[str, Any]:
     """池中未绑定/已注册未配置：reboot 循环（短超时），等待绑定或配置完成。"""
-    return {"menu_default": "reboot", "menu_timeout": settings.auto_boot_timeout}
+    return {"menu_default": "reboot", "menu_timeout": settings.auto_boot_timeout_ms}
 
 
 def _backend_for(agent_id: str) -> str:

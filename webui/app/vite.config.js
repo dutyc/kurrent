@@ -12,6 +12,12 @@ export default defineConfig({
         target: process.env.VITE_CP_PROXY || 'https://127.0.0.1',
         changeOrigin: true,
         secure: false
+      },
+      // 引导链状态页对 /tftp/ 做 HEAD 探测：确认脚本确实能经 HTTPS 取回，而不只是落在盘上。
+      '/tftp': {
+        target: process.env.VITE_CP_PROXY || 'https://127.0.0.1',
+        changeOrigin: true,
+        secure: false
       }
     }
   },

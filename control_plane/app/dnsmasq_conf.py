@@ -31,14 +31,12 @@ dhcp-option=6,{dns}
 enable-tftp
 tftp-root=/var/tftp
 
-# 架构识别（PXE Client Architecture Option 93）
-dhcp-match=set:bios,option:client-arch,0        # Legacy BIOS
+# 架构识别（PXE Client Architecture Option 93）：仅 UEFI x64
 dhcp-match=set:efi64,option:client-arch,7       # UEFI x64 (EFI BC)
 dhcp-match=set:efi64,option:client-arch,9       # UEFI x64 (EFI x86_64)
 
 # 引导文件分发（带标签的规则必须放在默认规则之前）
 dhcp-boot=tag:efi64,snponly.efi                    # UEFI → snponly.efi
-dhcp-boot=tag:bios,undionly.kpxe                # Legacy → undionly.kpxe
 
 # 识别UEFI iPXE 二次请求，下发下一跳引导文件 boot.ipxe
 dhcp-userclass=set:ipxe,iPXE

@@ -59,7 +59,7 @@ spec:
   boot:
     defaultArch: x86_64
     menuTimeoutMs: 5000
-    autoBootTimeoutSec: 1
+    autoBootTimeoutMs: 1
   # 调用存储 Agent 超时（秒）
   agentTimeoutSec: 10
 `

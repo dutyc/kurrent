@@ -14,8 +14,8 @@ from fastapi.routing import APIRoute
 from . import (audit, audit_middleware, cert_bootstrap, config, dnsmasq_conf,
                maintenance, pki, users)
 from .principal import enforce_principal
-from .routers import (agents, boot, certs, devices, enroll, operations, session,
-                      settings, tokens, workers)
+from .routers import (agents, boot, boot_assets, certs, devices, enroll,
+                      operations, session, settings, tokens, workers)
 
 log = logging.getLogger("control-plane")
 
@@ -47,6 +47,7 @@ audit_middleware.install(app)
 
 # boot 域最先挂载：/devices/report、/devices/challenge 必须先于 devices 域 /devices/{mac} 匹配
 app.include_router(boot.router)
+app.include_router(boot_assets.router)
 app.include_router(devices.router)
 app.include_router(settings.router)
 app.include_router(agents.router)

@@ -31,6 +31,7 @@ DEFAULT_OPERATIONS_FILE = "/app/state/operations.jsonl"
 DEFAULT_SETTINGS_FILE = "/app/state/settings.json"
 DEFAULT_DNSMASQ_HOSTS_FILE = "/app/dnsmasq/dhcp-hosts.conf"
 DEFAULT_DNSMASQ_CONF = "/app/dnsmasq/dnsmasq.conf"      # 由控制面启动时按 spec.networking 生成（yml 权威）
+DEFAULT_TFTP_DIR = "/var/tftp"                          # 与 dnsmasq 容器 tftp-root 同一宿主目录（只读）
 DEFAULT_CERT_DIR = "/app/state/certs"                   # TOFU 自签服务器证书（nginx 只读挂载）
 DEFAULT_CREDENTIALS_FILE = "/app/state/credentials.yml"
 DEFAULT_PKI_DIR = "/app/state/pki"                      # 三分根 PKI（nginx 只读挂载 nginx/ 信任包）
@@ -118,7 +119,7 @@ class BootSpec(BaseModel):
 
     default_arch: str = Field("x86_64", alias="defaultArch")
     menu_timeout_ms: int = Field(5000, alias="menuTimeoutMs", ge=0)
-    auto_boot_timeout_sec: int = Field(1, alias="autoBootTimeoutSec", ge=0)
+    auto_boot_timeout_ms: int = Field(1, alias="autoBootTimeoutMs", ge=0)
 
 
 class Spec(BaseModel):
@@ -180,6 +181,8 @@ _PATH_FIELDS = {
     "operations_file": "DEFAULT_OPERATIONS_FILE",
     "settings_file": "DEFAULT_SETTINGS_FILE",
     "dnsmasq_hosts_file": "DEFAULT_DNSMASQ_HOSTS_FILE",
+    "dnsmasq_conf": "DEFAULT_DNSMASQ_CONF",
+    "tftp_dir": "DEFAULT_TFTP_DIR",
     "cert_dir": "DEFAULT_CERT_DIR",
     "credentials_file": "DEFAULT_CREDENTIALS_FILE",
     "credential_push_file": "DEFAULT_CREDENTIAL_PUSH_FILE",
@@ -198,7 +201,7 @@ _STR_FIELDS = {
 _SPEC_FIELDS = {
     "default_arch": ("boot", "default_arch"),
     "boot_menu_timeout": ("boot", "menu_timeout_ms"),
-    "auto_boot_timeout": ("boot", "auto_boot_timeout_sec"),
+    "auto_boot_timeout_ms": ("boot", "auto_boot_timeout_ms"),
     "agent_timeout": ("agent_timeout_sec",),
     "cert_san": ("server_cert", "san"),
     "cert_days": ("server_cert", "days"),

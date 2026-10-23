@@ -212,6 +212,22 @@ if docker inspect storager-agent >/dev/null 2>&1; then
     fi
 fi
 
+# ── 引导链状态与静态文件 ──
+check_code 401 "引导链状态需认证" "$(code "$BASE/api/cp/boot-assets")"
+BOOT_ASSETS=$(curl -sk --max-time 5 --cert "$CERT" --key "$KEY" "$BASE/api/cp/boot-assets")
+if printf '%s' "$BOOT_ASSETS" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+assert data["firmware"], "no firmware"
+assert data["stage2"], "no boot chain"
+assert data["menu"]["status"] in ("ok", "unavailable")
+' 2>/dev/null; then
+    pass "引导链状态可读（固件 + 脚本链 + 菜单）"
+else
+    fail "引导链状态不可读或结构不符"
+fi
+check_code 200 "iPXE 菜单可下载" "$(code "$BASE/tftp/boot.ipxe.cfg")"
+
 # ── 静态根不跟随符号链接：public/ 或 tftp/ 里的链接不得读到容器内其它路径 ──
 PUB_LINK="$ROOT/webui/deploy/public/.probe-symlink"
 TFTP_LINK="$ROOT/tftp/.probe-symlink"

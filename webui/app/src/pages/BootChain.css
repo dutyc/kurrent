@@ -1,0 +1,262 @@
+.boot-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 26px;
+}
+
+.boot-overall {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: -8px 0 0;
+  font-size: 13px;
+  color: var(--gray-500);
+}
+
+.boot-overall-label {
+  color: var(--black);
+  font-weight: 600;
+}
+
+.boot-overall-label::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  background: var(--black);
+  transform: translateY(-1px);
+}
+
+.boot-overall-degraded .boot-overall-label::before {
+  background: transparent;
+  border: 1px solid var(--black);
+}
+
+.boot-overall-blocked .boot-overall-label::before {
+  width: 3px;
+  height: 12px;
+  transform: translateY(1px);
+}
+
+.boot-overall-unknown .boot-overall-label::before {
+  background: transparent;
+  border: 1px solid var(--gray-400);
+}
+
+.boot-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.boot-checked {
+  font-size: 11px;
+  color: var(--gray-400);
+}
+
+.boot-refresh {
+  border: 1px solid var(--gray-300);
+  background: var(--white);
+  color: var(--gray-600);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.boot-refresh:hover {
+  border-color: var(--black);
+  color: var(--black);
+}
+
+.boot-board-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+}
+
+.boot-board-count {
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--gray-400);
+}
+
+.boot-item {
+  border-bottom: 1px solid var(--border-light);
+}
+
+.boot-row {
+  display: grid;
+  grid-template-columns: 74px 132px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 16px;
+  padding: 14px 0;
+  font-size: 13px;
+}
+
+.boot-state {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--gray-500);
+  white-space: nowrap;
+}
+
+.boot-state::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  background: var(--gray-400);
+  transform: translateY(-1px);
+}
+
+.boot-state-degraded,
+.boot-state-blocked {
+  color: var(--black);
+  font-weight: 600;
+}
+
+.boot-state-degraded::before {
+  background: transparent;
+  border: 1px solid var(--black);
+}
+
+.boot-state-blocked::before {
+  background: var(--black);
+}
+
+.boot-state-unknown::before {
+  background: transparent;
+  border: 1px solid var(--gray-400);
+}
+
+.boot-stage {
+  color: var(--black);
+}
+
+.boot-evidence {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--gray-500);
+}
+
+.boot-evidence code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--gray-600);
+}
+
+.boot-sep {
+  margin: 0 6px;
+  color: var(--gray-300);
+}
+
+.boot-detail {
+  padding: 0 0 14px 236px;
+}
+
+.boot-cause {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--gray-700);
+}
+
+.boot-fix {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--gray-500);
+}
+
+.boot-fix-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gray-400);
+}
+
+.boot-issue-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boot-issue-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.boot-issue-list code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--gray-700);
+}
+
+.boot-file-state {
+  font-size: 11px;
+  color: var(--gray-500);
+}
+
+.boot-file-state::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  background: transparent;
+  border: 1px solid var(--black);
+  transform: translateY(-1px);
+}
+
+.boot-issue-path {
+  font-size: 11.5px;
+  color: var(--gray-400);
+}
+
+.boot-foot {
+  margin: 26px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light);
+  font-size: 11.5px;
+  color: var(--gray-400);
+}
+
+.boot-foot code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .boot-head {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .boot-row {
+    grid-template-columns: 66px 108px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .boot-detail {
+    padding-left: 0;
+  }
+}

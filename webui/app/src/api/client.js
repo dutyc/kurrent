@@ -126,6 +126,11 @@ export function bootVars(params) {
   return request('/boot-vars', { params });
 }
 
+// 引导链状态：UEFI 固件能力、脚本链与菜单可用性（控制面解析 dnsmasq 与 iPXE 脚本后返回）
+export function getBootAssets() {
+  return request('/boot-assets');
+}
+
 // ===== Settings =====
 export function getRegistrationWindow() {
   // 注册窗口状态: { open, opened_at, ttl_minutes, closes_at, remaining_seconds,
@@ -191,11 +196,6 @@ export function issueAdminToken() {
   return request('/pki/tokens', { method: 'POST', body: { usage: 'admin' } });
 }
 
-// ===== Agent LUNs =====
-export function getAgentLuns(agentId) {
-  return request(`/agents/${agentId}/luns`);
-}
-
 // ===== Sessions（服务端会话登记） =====
 export function getSessions() {
   // {session_id, user, groups, created_at, last_seen, expires_at, cert_fp}
@@ -210,6 +210,11 @@ export function revokeSession(sessionId) {
 export function revokeAllSessions() {
   // 全部踢下线：清空登记并递增 epoch
   return request('/sessions', { method: 'DELETE' });
+}
+
+// ===== Agent LUNs =====
+export function getAgentLuns(agentId) {
+  return request(`/agents/${agentId}/luns`);
 }
 
 export function createAgentDiskLun(agentId, data) {

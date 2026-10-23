@@ -159,6 +159,7 @@ Notes:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/healthz` | Health check |
+| `GET` | `/boot-assets` | Boot-chain status: whether the UEFI firmware, script chain, and menu are usable (see 4.1) |
 | `GET` | `/whoami` | Current request identity (authenticator chain result, see 1.3) |
 | `POST` | `/session` | Exchange credentials for a session cookie (registry-backed sign-in) |
 | `DELETE` | `/session` | Sign out (delete the session registry entry and clear the cookie) |
@@ -239,6 +240,30 @@ curl -s "$BASE_URL/healthz"
 
 ---
 
+## 4.1 GET /boot-assets
+
+### Description
+
+Boot-chain status (requires management authentication: `human` or `automation`). The control plane parses `dhcp-boot` in `dnsmasq.conf` and the `boot.ipxe → boot.ipxe.cfg → menu.ipxe` chain to answer three questions: whether the UEFI firmware is present with the capabilities the scripts require, whether the script chain is complete, and whether the menu is parsable. It reports status only: no menu entries are expanded and no directory browsing is performed. Tool menus (Memtest/WinPE) and iSCSI installers are outside the NVMe-oF main path and are not checked. The control plane must have `./tftp` mounted read-only (`404` when `dnsmasq.conf` is missing).
+
+### Response Fields
+
+| Field | Description |
+|---|---|
+| `firmware[]` | UEFI firmware declared by `dhcp-boot=tag:efi64`: `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
+| `stage2[]` | Script-chain files (`boot.ipxe`, `boot.ipxe.cfg`, `menu.ipxe`): `file`, `path`, `host_path`, `status`, `size`, `mtime` |
+| `menu` | `status` (ok/unavailable) and `items` (selectable item count, skipping `--gap` lines) |
+
+`status=incomplete` means the firmware file exists but lacks any of `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` — stock iPXE cannot complete device authentication either. `status=empty` is a zero-byte file, `missing` means the file does not exist, and `rejected` means the path escapes the tftp root (the control plane refuses it and never reads it). `host_path` is the host path relative to the deployment root (`tftp/...`), used when adding a missing file. `menu.status=ok` requires at least one `menu` section and one non-`--gap` `item`.
+
+### curl
+
+```bash
+curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
+```
+
+---
+
 ## 5. GET /boot-vars
 
 ### Description
@@ -276,7 +301,7 @@ The response of `/boot-vars` is a projection of the inventory:
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — 2026-08-30 MAIN MENU dynamicization: the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
 | `os_version` | Version annotation of the default boot disk (disk record `os_version`; `''` = no version) — omitted when empty; the `os-label` assembly in menu.ipxe adapts (shows `os version` when present). Not returned when the Worker has no system disk. |
 | `menu_default` | Derived chain: `workers.yml` `default_disk` (set separately after disk creation; os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). 2026-08-30 dynamicization: since the menu OS item has converged to the single generic item `boot-os`, any OS-semantics default (`default_disk`, or legacy OS names in `boot.menu_default`) is normalized to `boot-os`; non-OS navigation values (`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`) are returned as-is |
-| `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutSec` (default 1). Units are milliseconds. |
+| `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutMs` (default 1). Units are milliseconds. |
 
 Worker lookup rules (**binding authority first**):
 
@@ -324,7 +349,7 @@ Controls:
 | Registration window | Closed | Open it with `POST /settings/registration-window` during deployment (TTL hard cap 1-60 min, auto-closes on expiry), see 5.1 |
 | Admission quota | Unlimited | Optional `max_devices` when opening (1-1000 devices); once that many devices have auto-joined within the window, admission stops, see 5.1 |
 | Signature enforcement | Off | `GET/PUT /settings/enforcement`: when on, `/boot-vars` is only served to bound devices that pass signature verification, see 5.1 |
-| `spec.boot.autoBootTimeoutSec` | `1` | Menu timeout in milliseconds during the reboot loop. |
+| `spec.boot.autoBootTimeoutMs` | `1` | Menu timeout in milliseconds during the reboot loop. |
 
 The entire enrollment process is logged as operations (`device.register` / `device.claim`). On failure, the inventory is rolled back and an empty script is returned, so the next request will retry without affecting the iPXE boot process.
 
@@ -1249,7 +1274,7 @@ docker exec ipxe-dnsmasq killall -HUP dnsmasq
 When `boot` is omitted:
 
 - `menu_default` defaults to `default_disk` (set separately after disk creation, see 7.3); if not set, defaults to `reboot` (loop reboot waiting for configuration, see section 5).
-- `menu_timeout` defaults to `spec.boot.menuTimeoutMs` (currently `5000`) when a default boot is configured; in the `reboot` loop it is fixed to `spec.boot.autoBootTimeoutSec` (currently `1`, see section 5).
+- `menu_timeout` defaults to `spec.boot.menuTimeoutMs` (currently `5000`) when a default boot is configured; in the `reboot` loop it is fixed to `spec.boot.autoBootTimeoutMs` (currently `1`, see section 5).
 
 Therefore, most Workers do not need to pass `boot`. For example:
 

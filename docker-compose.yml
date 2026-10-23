@@ -50,6 +50,8 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # dnsmasq 目录（可写）：dnsmasq.conf 由控制面启动时按 spec.networking 生成，dnsmasq 容器挂载同文件
       - ./dnsmasq:/app/dnsmasq
+      # 引导链状态（只读）：固件与引导脚本
+      - ./tftp:/var/tftp:ro
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 10s

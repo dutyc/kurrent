@@ -146,6 +146,7 @@ curl -s "$BASE_URL/workers" \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
+| `GET` | `/boot-assets` | 引导链状态：UEFI 固件、脚本链与菜单是否可用（见 4.1） |
 | `GET` | `/whoami` | 当前请求身份（认证器链结果，见 1.3） |
 | `POST` | `/session` | 凭据换会话 Cookie（登录，登记在服务端） |
 | `DELETE` | `/session` | 登出（删除会话登记并清除 Cookie） |
@@ -227,6 +228,30 @@ curl -s "$BASE_URL/healthz"
 
 ---
 
+## 4.1 GET /boot-assets
+
+### 说明
+
+引导链状态（需管理面认证：`human` 或 `automation`）。控制面解析 `dnsmasq.conf` 的 `dhcp-boot`、`boot.ipxe → boot.ipxe.cfg → menu.ipxe` 脚本链，回答三件事：UEFI 固件是否就位且具备引导脚本依赖的能力、脚本链是否齐全、菜单是否可解析。只做状态判定，不展开菜单项，也不做目录浏览；工具菜单（Memtest/WinPE）与 iSCSI 安装器不属于 NVMe-oF 主路径，不检查。控制面只读挂载 `./tftp`（`dnsmasq.conf` 缺失时返回 `404`）。
+
+### 返回字段
+
+| 字段 | 说明 |
+|---|---|
+| `firmware[]` | `dhcp-boot=tag:efi64` 声明的 UEFI 固件：`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
+| `stage2[]` | 脚本链文件（`boot.ipxe`、`boot.ipxe.cfg`、`menu.ipxe`）：`file`、`path`、`host_path`、`status`、`size`、`mtime` |
+| `menu` | `status`（ok/unavailable）与 `items`（可选项计数，跳过 `--gap` 行） |
+
+`status=incomplete` 表示固件文件存在但缺少 `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` 中的任一项——stock iPXE 同样无法完成设备认证。`status=empty` 是零字节文件，`missing` 是文件不存在，`rejected` 表示路径越出 tftp 根（控制面拒绝且不会读取该路径）。`host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。
+
+### curl
+
+```bash
+curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
+```
+
+---
+
 ## 5. GET /boot-vars
 
 ### 说明
@@ -264,7 +289,7 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
 | `os_version` | 默认启动盘的版本备注（盘记录 `os_version`，`''` = 无版本）——空值不下发，menu.ipxe 的 `os-label` 拼接自适应（有版本显示 `os version`）。Worker 无系统盘时不返回 |
 | `menu_default` | 推导链：`workers.yml` 的 `default_disk`（建盘后单独设置，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。2026-08-30 动态化：菜单 OS 项已收敛为唯一通用项 `boot-os`，OS 语义的默认值（`default_disk`，或 `boot.menu_default` 中的旧系统名）统一归一到 `boot-os`；非 OS 导航值（`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`）原样返回 |
-| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutSec`（默认 1）。单位均为毫秒 |
+| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutMs`（默认 1）。单位均为毫秒 |
 
 查找 Worker 的规则（**绑定权威优先**）：
 
@@ -315,7 +340,7 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 | 注册窗口 | 关闭 | 部署期用 `POST /settings/registration-window` 开启（TTL 1-60 分钟硬上限，到期自动关闭），见 5.1 |
 | 放行额度 | 不限 | 开窗时可选 `max_devices`（1-1000 台），窗口期内自动入池设备数达到上限即停止放行，见 5.1 |
 | 验签强制 | 关闭 | `GET/PUT /settings/enforcement`：开启后 `/boot-vars` 只向验签通过的已绑定设备下发，见 5.1 |
-| `spec.boot.autoBootTimeoutSec` | `1` | reboot 循环的菜单超时（毫秒） |
+| `spec.boot.autoBootTimeoutMs` | `1` | reboot 循环的菜单超时（毫秒） |
 
 注册全程有操作日志（`device.register` / `device.claim`），失败回滚台账并返回空脚本，下次请求重试，不影响 iPXE 引导。
 
@@ -1221,7 +1246,7 @@ docker exec ipxe-dnsmasq killall -HUP dnsmasq
 不传 `boot` 时：
 
 - `menu_default` 默认使用 `default_disk`（建盘后单独设置，见 7.3）；未设置时默认 `reboot`（循环重启等待配置，见 5 节）；
-- `menu_timeout` 已配置默认启动时默认使用 `spec.boot.menuTimeoutMs`（当前 `5000`）；处于 `reboot` 循环时固定用 `spec.boot.autoBootTimeoutSec`（当前 `1`，见 5 节）。
+- `menu_timeout` 已配置默认启动时默认使用 `spec.boot.menuTimeoutMs`（当前 `5000`）；处于 `reboot` 循环时固定用 `spec.boot.autoBootTimeoutMs`（当前 `1`，见 5 节）。
 
 因此大多数 Worker 不需要传 `boot`。例如：
 

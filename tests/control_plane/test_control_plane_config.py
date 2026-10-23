@@ -46,7 +46,7 @@ def test_minimal_accepts_and_injects_defaults(tmp_path):
     assert cfg.spec.server_cert.days == 3650
     assert cfg.spec.boot.default_arch == "x86_64"
     assert cfg.spec.boot.menu_timeout_ms == 5000
-    assert cfg.spec.boot.auto_boot_timeout_sec == 1
+    assert cfg.spec.boot.auto_boot_timeout_ms == 1
     assert cfg.spec.agent_timeout_sec == 10
 
 

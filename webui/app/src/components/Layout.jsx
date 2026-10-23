@@ -26,6 +26,12 @@ const ICON_DEVICES = (
     <path d="M5.5 14.5h5M8 11.5v3" />
   </>
 )
+const ICON_FILES = (
+  <>
+    <rect x="3" y="3" width="10" height="10" />
+    <path d="M6 1v2M10 1v2M6 13v2M10 13v2M1 6h2M1 10h2M13 6h2M13 10h2" />
+  </>
+)
 const ICON_AGENTS = (
   <>
     <circle cx="3.5" cy="8" r="1.5" />
@@ -72,6 +78,7 @@ export default function Layout() {
     { to: '/', label: t('nav.dashboard'), exact: true, icon: ICON_DASHBOARD },
     { to: '/workers', label: t('nav.workers'), icon: ICON_WORKERS },
     { to: '/devices', label: t('nav.devices'), icon: ICON_DEVICES },
+    { to: '/boot', label: t('nav.assets'), icon: ICON_FILES },
     { to: '/agents', label: t('nav.agents'), icon: ICON_AGENTS },
     { to: '/credentials', label: t('nav.credentials'), icon: ICON_CREDENTIALS },
     { to: '/operations', label: t('nav.operations'), icon: ICON_OPERATIONS },

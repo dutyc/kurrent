@@ -15,10 +15,16 @@
 
 ## 2026-10-23
 
+### 新增
+
+- **WebUI 引导链状态板**：侧边栏新增「引导链」，路由 `#/boot`。页头给出整体结论（正常 / 降级 / 阻塞 / 无法判定）与检查时间，下面固定五项检查：UEFI 固件（版本串和六项能力计数，缺项降级，文件缺失 / 为空 / 路径越界阻塞）、引导服务（脚本链齐全、菜单可解析，并对脚本做浏览器 HEAD 探测确认能经 HTTPS 取回）、数据面（启用的 nvmet 节点端口就绪比例与 TLS 版本 / 端口）、Worker 就绪（绑定设备且有系统盘的比例）、最近上报（最新 `last_seen`、MAC、绑定 Worker 与相对时间，不判过期）。只有异常项就地展开原因与处理位置；不展开菜单项、不做目录浏览，工具菜单与 iSCSI 安装器不检查。新增控制面 `GET /boot-assets`（`boot_assets.py`；控制面只读挂载 `./tftp`），返回 `firmware` / `stage2` / `menu`；并移除 njs 目录列表 API（`/api/browse/`、`webui/deploy/nginx/njs/`）与通用文件浏览页面；`/file/` 下载保留
+
 ### 变更
 
+- **dnsmasq 引导规则收窄为 UEFI x64**：删除 `tag:bios` 匹配与 `undionly.kpxe` 下发；项目早已以 UEFI-only 为基线，该规则只会把引导文件交给不支持的固件
 - **管理面边缘加固**：443 由仅 TLS 1.2 改为 `TLSv1.2 TLSv1.3`（iPXE mbedTLS 只支持 1.2，按上限协商，不受影响）；`server_tokens off` 不再回显 nginx 版本；所有响应增加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy: no-referrer`
 - **`/boot-vars` 限速**：按来源 IP 默认 240 次/分钟（`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 覆盖、`<=0` 关闭），超限 `429` + `Retry-After` + `boot_rate_limited` 告警——该端点是无鉴权的 ECDSA 验签路径，此前未限速
+- **配置键更名**：`spec.boot.autoBootTimeoutSec` → `spec.boot.autoBootTimeoutMs`（值本来按毫秒消费，字段名与单位此前不一致）；旧键按未知字段拒绝启动，配置模板（`kurrent config print init-defaults`、`kurrent.yaml.example`、`control_plane/kurrent.yaml`）与 API 文档同步
 - **认证体系 P4：CRL 长跑边界、用户证书签发与逐序列号吊销**：
   - 控制面每 12 小时重签 CRL 并 reload nginx（`CRL_REFRESH_HOURS`；`KURRENT_CP_CRL_REFRESH_INTERVAL` 以秒覆盖，`<=0` 关闭），避免 7 天 `nextUpdate` 在长跑中过期——过期 CRL 会让 nginx 拒绝**全部**客户端证书；reload 失败写 `crl_refresh_failed` 告警
   - 新增 `POST /pki/users/{cn}`：为 `state/users.yml` 中已登记用户签发证书（默认 365 天、上限 3650）；请求必须携带本地生成的 CSR（CN 必须与路径一致、除 CN 外不得带 subject 属性），私钥**永不上送**、控制面只回传证书；`kurrent init` 的 admin 证书仍本地自动生成；证书文件留在 `state/pki/users/<cn>/issued/` 供审计；签发写 `user_cert_issued` 告警

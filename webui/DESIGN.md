@@ -118,6 +118,7 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 /workers              Worker 列表 + 勾选浮出操作条（创建 Worker 走弹窗）
 /workers/:id          Worker 详情（Tab：Identity / Disks / Boot / CD / NVMe-oF 凭据（有盘时）/ Status）
 /devices              设备池（注册 / 导入 / 绑定向导 / 解绑 / 注册窗口）
+/boot                 引导链状态板（UEFI 固件 / 引导服务 / 数据面 / Worker / 上报）
 /agents               Agent 监控（自适应网格卡片）
 /agents/:id           Agent 详情（Tab：Targets / Masters）
 /credentials          凭据管理（token 台账列表 / 吊销 / 签发管理 token）
@@ -135,6 +136,7 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 │ 概览       │                          │
 │ Workers    │        <Outlet />        │
 │ Devices    │                          │
+│ 引导链     │                          │
 │ Agents     │                          │
 │ 凭据       │                          │
 │ Operations │                          │
@@ -143,8 +145,8 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 └────────────┴──────────────────────────┘
 ```
 
-侧边栏（`<aside class="sidebar">`，可折叠）：品牌标识 + 折叠按钮（`‹` / `›`）+ 6 个导航项
-（Dashboard / Workers / Devices / Agents / Credentials / Operations，各带内联 SVG 图标）+ 底部登出按钮
+侧边栏（`<aside class="sidebar">`，可折叠）：品牌标识 + 折叠按钮（`‹` / `›`）+ 7 个导航项
+（Dashboard / Workers / Devices / Boot chain / Agents / Credentials / Operations，各带内联 SVG 图标）+ 底部登出按钮
 与 中/EN 语言切换。
 
 ### Dashboard
@@ -213,6 +215,24 @@ Tab 切换：Identity / Disks / Boot / CD（条件展示）/ NVMe-oF Credential�
 - 工具栏：`+ 注册设备`（手工登记 MAC 与指纹字段）、`导入清单`（批量）、`绑定向导`、`解绑模式`
 - 绑定向导：图形化配对或粘贴清单两种模式，先预览（分配）再执行；支持导出
 - 注册窗口：开关 + TTL 选择 + 放行台数（留空 = 不限；决定未知 MAC 能否在上报时入池）；开启中显示剩余时间与「已放行 n/N」，额度用尽后 Badge 转为「额度已满」（密钥认领与手动登记不占额度）
+
+### Boot chain（引导链）
+
+状态板，不是配置查看器：页头给整体结论（正常 / 降级 / 阻塞 / 无法判定）与检查时间，下面固定五项检查，
+只有异常项就地展开原因与处理位置。
+
+- **UEFI 固件**：`dhcp-boot=tag:efi64` 声明的固件是否就位，附版本串与六项能力
+  （`HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU`）计数；缺任一项为降级，
+  文件缺失 / 为空 / 路径越界为阻塞（stock iPXE 会在这里被拦住）
+- **引导服务**：`boot.ipxe → boot.ipxe.cfg → menu.ipxe` 是否齐全、菜单是否可解析；再对脚本做
+  浏览器 HEAD 探测，确认它们确实能经 HTTPS 取回，而不只是落在盘上
+- **数据面**：启用且 `backend=nvmet` 的节点中，端口 `ready` 且健康为 ok 的比例，附 TLS 版本与端口
+- **Worker 就绪**：`readiness=ready`（已绑定设备且有系统盘）的比例
+- **最近上报**：设备台账中最新的 `last_seen`，附 MAC、绑定 Worker 与相对时间；只作信息，不判过期
+- **重新检查**：页头按钮重新取四份台账并重做 HEAD 探测
+- 不展开菜单项、不做目录浏览；工具菜单（Memtest/WinPE）与 iSCSI 安装器不属于 NVMe-oF 主路径
+- 数据来源：`GET /api/cp/boot-assets`（固件 / 脚本 / 菜单）＋ `/agents`、`/workers`、`/devices`；
+  控制面只读挂载 `./tftp`
 
 ### Agents
 
@@ -324,15 +344,18 @@ async function request(path, options) {
 WebUI 不再独立编排：`deploy/` 只提供 nginx 镜像，服务定义在**仓库根 `docker-compose.yml`** 的
 `kurrent-nginx` 服务中（与 dnsmasq / control-plane 同一 compose 网络与入口）。
 
-### 文件浏览器集成
+### 引导链与安装介质
 
-同一 nginx 容器还承载文件浏览器功能：
+同一 nginx 容器还提供引导链的数据面：
 
 | 端点 | 用途 |
 |---|---|
 | `/` | WebUI SPA（`try_files → index.html`） |
-| `/api/cp/*` | Control Plane API 代理 |
+| `/api/cp/*` | Control Plane API 代理（含 `GET /boot-assets` 引导链状态） |
 | `/file/*` | iPXE 文件下载（ISO、kernel、initrd） |
+| `/tftp/*` | 引导脚本与固件（HTTPS 取回，映射 tftp 根） |
+
+引导链状态由控制面解析 `dnsmasq.conf` 与 iPXE 脚本生成，nginx 只做代理与静态文件服务。
 
 ### Docker Compose（仓库根 `docker-compose.yml` 的 `kurrent-nginx`）
 
@@ -393,6 +416,7 @@ webui/
 │       │   ├── Workers.jsx/css
 │       │   ├── WorkerDetail.jsx/css
 │       │   ├── Devices.jsx/css
+│       │   ├── BootChain.jsx/css
 │       │   ├── Agents.jsx/css
 │       │   ├── AgentLuns.jsx/css
 │       │   └── Operations.jsx/css
@@ -425,4 +449,4 @@ webui/
 | i18n | 自研 React Context（零依赖） |
 | API | 原生 fetch（零 HTTP 库） |
 | 部署 | nginx:1.31-alpine（静态文件 + API 代理，无脚本执行面） |
-| 构建产物 | 纯静态文件（HTML + JS + CSS）：JS 302.8 KB（gzip 93.6 KB）／CSS 37.9 KB（gzip 6.5 KB） |
+| 构建产物 | 纯静态文件（HTML + JS + CSS）：JS 341.9 KB（gzip 107.0 KB）／CSS 45.9 KB（gzip 7.7 KB） |
