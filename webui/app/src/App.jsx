@@ -1,7 +1,8 @@
-import { Routes, Route } from 'react-router-dom'
+import { Navigate, Routes, Route } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth'
 import { useI18n } from './i18n'
 import Layout from './components/Layout'
+import ErrorBoundary from './components/ErrorBoundary'
 import Login from './components/Login'
 import Dashboard from './pages/Dashboard'
 import Workers from './pages/Workers'
@@ -40,6 +41,8 @@ function Gate() {
         <Route path="agents/:id" element={<AgentLuns />} />
         <Route path="credentials" element={<Credentials />} />
         <Route path="operations" element={<Operations />} />
+        {/* 旧书签 / 手改地址 / 已删除页面（如 #/files）不应留下空白树 */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
   )
@@ -48,7 +51,9 @@ function Gate() {
 export default function App() {
   return (
     <AuthProvider>
-      <Gate />
+      <ErrorBoundary>
+        <Gate />
+      </ErrorBoundary>
     </AuthProvider>
   )
 }

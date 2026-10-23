@@ -1,7 +1,8 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useState } from 'react'
 import { useAuth } from '../auth'
 import { useI18n } from '../i18n'
+import ErrorBoundary from './ErrorBoundary'
 import './Layout.css'
 
 /* 菜单图标（内联 SVG，stroke 线条风格，与 mono 极简调性一致） */
@@ -72,6 +73,7 @@ function NavIcon({ children }) {
 export default function Layout() {
   const { t, locale, setLocale } = useI18n()
   const { signOut } = useAuth()
+  const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
 
   const NAV_ITEMS = [
@@ -140,7 +142,10 @@ export default function Layout() {
         </div>
       </aside>
       <main className="main">
-        <Outlet />
+        {/* 路由切换即重挂载：某页崩溃后点侧边栏仍能恢复，不必整页刷新 */}
+        <ErrorBoundary key={location.key}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )

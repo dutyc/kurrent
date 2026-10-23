@@ -684,6 +684,8 @@ const zh = {
   common: {
     loading: '加载中...',
     error: '出错了',
+    pageCrash: '页面渲染失败',
+    backHome: '返回概览',
   },
 }
 

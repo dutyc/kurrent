@@ -684,6 +684,8 @@ const en = {
   common: {
     loading: 'Loading...',
     error: 'Error',
+    pageCrash: 'This page failed to render',
+    backHome: 'Back to overview',
   },
 }
 

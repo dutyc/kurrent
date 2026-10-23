@@ -1,0 +1,35 @@
+.page-crash {
+  max-width: 640px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  background: var(--gray-25);
+}
+
+.page-crash-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--black);
+}
+
+.page-crash-detail {
+  margin: 0 0 16px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--gray-500);
+  word-break: break-word;
+}
+
+.page-crash-action {
+  border: 1px solid var(--gray-300);
+  background: var(--white);
+  color: var(--gray-600);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.page-crash-action:hover {
+  border-color: var(--black);
+  color: var(--black);
+}

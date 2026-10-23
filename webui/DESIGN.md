@@ -123,7 +123,11 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 /agents/:id           Agent 详情（Tab：Targets / Masters）
 /credentials          凭据管理（token 台账列表 / 吊销 / 签发管理 token）
 /operations           操作审计日志（增量加载）
+*                     未匹配路由回退 `/`（旧书签、已删除页面不留空白树）
 ```
+
+启动前清理畸形百分号编码的 hash；路由内容由 `ErrorBoundary` 包住：单页渲染异常只替换内容区，
+侧边栏保持可点，路由切换即重挂载恢复。
 
 ### 布局（Layout）
 
