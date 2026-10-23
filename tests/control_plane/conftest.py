@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from control_plane.app import trust as trust_mod
+from control_plane.app import ratelimit, trust as trust_mod
 from control_plane.app.config import settings
 from control_plane.app.main import app
 
@@ -39,9 +39,11 @@ def client():
         settings.credentials_file,
         settings.credential_push_file,
         settings.masters_file,
+        settings.sessions_file,
     ):
         f.unlink(missing_ok=True)
     trust_mod._nonce_store.clear()
+    ratelimit.reset()
     with TestClient(app) as c:
         yield c
 
@@ -67,6 +69,22 @@ def ec_keypair():
         return base64.b64encode(priv.sign(data, ec.ECDSA(hashes.SHA256()))).decode()
 
     return {"pubkey_hex": pubkey_hex, "sign": sign}
+
+
+@pytest.fixture()
+def signed_boot_vars(client, ec_keypair):
+    """按真实引导链取 nonce → 私钥签名 → 请求 /boot-vars（凭据注入必须验签）。"""
+    def _get(mac: str, hostname: str | None = None, format_: str = "ipxe"):
+        res = client.get("/devices/challenge", params={"mac": mac})
+        assert res.status_code == 200, res.text
+        nonce = next(l[len("set nonce "):] for l in res.text.splitlines()
+                     if l.startswith("set nonce "))
+        sig = ec_keypair["sign"](mac, nonce)
+        params = {"mac": mac, "nonce": nonce, "sig": sig, "format": format_}
+        if hostname:
+            params["hostname"] = hostname
+        return client.get("/boot-vars", params=params)
+    return _get
 
 
 @pytest.fixture()

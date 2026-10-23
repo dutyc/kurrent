@@ -139,10 +139,10 @@ func authHint() string {
 	}
 	server := strings.TrimRight(flagServer, "/")
 	if server == "" {
-		server = "http://127.0.0.1:4839"
+		server = "（未指定 --server）"
 	}
 	return fmt.Sprintf("\n  未发现管理凭据（已查 control_plane/state/admin.conf（当前目录逐级上溯、可执行文件旁）与 ~/.kurrent/admin.conf），也未提供 --token，\n"+
-		"  本次以无凭据通道访问 %s。修法：kurrent credentials install（仓库内一次性安装，任意目录可用） ｜ --credentials <admin.conf 路径> ｜ --token <admin-token>",
+		"  本次以无凭据通道访问 %s。修法：kurrent credentials install（仓库内一次性安装，任意目录可用） ｜ --credentials <admin.conf 路径> ｜ --server + --token（管理面不监听本机回环端口）",
 		server)
 }
 

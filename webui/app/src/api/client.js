@@ -165,9 +165,9 @@ export function updateAgent(agentId, data) {
   return request(`/agents/${agentId}`, { method: 'PUT', body: data });
 }
 
-export function issueBootstrapToken() {
-  // 签发集群级通用 bootstrap token：不绑节点，每次新签
-  return request('/pki/tokens', { method: 'POST' });
+export function issueBootstrapToken(agentId) {
+  // 签发 bootstrap token：绑定节点身份（agent_id = 节点声明 metadata.name），每次新签
+  return request('/pki/tokens', { method: 'POST', body: { usage: 'bootstrap', agent_id: agentId } });
 }
 
 export function probeAgent(data) {
@@ -176,8 +176,8 @@ export function probeAgent(data) {
 
 // ===== Credentials（token 台账：列表 / 吊销 / 签发管理 token） =====
 export function getTokens() {
-  // 未过期 token 条目：{token_id, usage, groups, component, agent_id, name, created_at, expires_at}
-  // 不返回明文（不可恢复）与 hash；created_at 对旧条目为空串
+  // 未过期 token 条目：{token_id, usage, groups, scopes, uses, max_uses, component,
+  // agent_id, name, created_at, expires_at, last_used_at}；不返回明文与 hash
   return request('/pki/tokens');
 }
 
@@ -194,6 +194,22 @@ export function issueAdminToken() {
 // ===== Agent LUNs =====
 export function getAgentLuns(agentId) {
   return request(`/agents/${agentId}/luns`);
+}
+
+// ===== Sessions（服务端会话登记） =====
+export function getSessions() {
+  // {session_id, user, groups, created_at, last_seen, expires_at, cert_fp}
+  return request('/sessions');
+}
+
+export function revokeSession(sessionId) {
+  // 删除登记：下一请求 401
+  return request(`/sessions/${sessionId}`, { method: 'DELETE' });
+}
+
+export function revokeAllSessions() {
+  // 全部踢下线：清空登记并递增 epoch
+  return request('/sessions', { method: 'DELETE' });
 }
 
 export function createAgentDiskLun(agentId, data) {

@@ -96,6 +96,12 @@ control_plane/state/masters.yml
 # 管理凭据（admin.conf 扁平 YAML / 会话密钥，控制面启动自举，含私钥，不入库）
 control_plane/state/admin.conf
 control_plane/state/session.key
+# 管理面用户组映射（CN → groups，首次启动自举 admin，其后运维维护，不入库）
+control_plane/state/users.yml
+# 服务端会话登记（key = sha256(jti)，运行时生成，不入库）
+control_plane/state/sessions.yml
+# 认证审计与告警（运行时生成，含主体/证书证据，不入库）
+control_plane/state/audit.jsonl
 # 根级误落盘防再犯：未设 env 重定向的本地运行以仓库根为 cwd 时，control_plane 默认相对路径会在此落盘（测试产物）
 /state/
 /config/

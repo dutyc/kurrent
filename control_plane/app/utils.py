@@ -79,7 +79,17 @@ def normalize_boot_mac(value: str) -> str | None:
 
 
 def client_host(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    """管理操作客户端地址：控制面只经 nginx UDS 访问，socket 对端恒为 nginx，
+    因此以 nginx 覆盖写入的 X-Real-IP 为准；缺失时回落 socket 对端（测试/直连）。"""
+    return (request.headers.get("x-real-ip", "").strip()
+            or (request.client.host if request.client else "unknown"))
+
+
+def client_source(request: Request) -> str:
+    """来源 IP：控制面只接受 nginx 的 unix socket 连接，TCP 对端恒为 nginx，
+    因此以 nginx 覆盖写入的 X-Real-IP 为准；缺失时回落到 socket 对端（测试/直连）。"""
+    return (request.headers.get("x-real-ip", "").strip()
+            or (request.client.host if request.client else ""))
 
 
 def now_iso() -> str:

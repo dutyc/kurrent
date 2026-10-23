@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getTokens, revokeToken, issueAdminToken } from '../api/client'
+import {
+  getSessions, getTokens, issueAdminToken, revokeAllSessions, revokeSession, revokeToken,
+} from '../api/client'
 import { useI18n } from '../i18n'
 import Button from '../components/Button'
 import EmptyState from '../components/EmptyState'
@@ -11,6 +13,7 @@ import './Credentials.css'
 export default function Credentials() {
   const { t } = useI18n()
   const [tokens, setTokens] = useState([])
+  const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [actionError, setActionError] = useState(null)
@@ -23,6 +26,11 @@ export default function Credentials() {
     setError(null)
     try {
       setTokens(await getTokens())
+      try {
+        setSessions(await getSessions())
+      } catch {
+        setSessions([]) // 非管理员：会话台账不可见
+      }
     } catch (e) {
       setError(e.message)
     } finally {
@@ -53,6 +61,26 @@ export default function Credentials() {
     try {
       await revokeToken(tokenId)
       if (issued && issued.token.startsWith(`${tokenId}.`)) setIssued(null)
+      await load()
+    } catch (e) {
+      setActionError(e.message)
+    }
+  }
+
+  const handleRevokeSession = async (sessionId) => {
+    setActionError(null)
+    try {
+      await revokeSession(sessionId)
+      await load()
+    } catch (e) {
+      setActionError(e.message)
+    }
+  }
+
+  const handleRevokeAllSessions = async () => {
+    setActionError(null)
+    try {
+      await revokeAllSessions()
       await load()
     } catch (e) {
       setActionError(e.message)
@@ -120,9 +148,11 @@ export default function Credentials() {
           <div className="cred-row cred-row-head">
             <span>{t('credentials.colTokenId')}</span>
             <span>{t('credentials.colUsage')}</span>
+            <span>{t('credentials.colScopes')}</span>
             <span>{t('credentials.colOwner')}</span>
             <span>{t('credentials.colName')}</span>
             <span>{t('credentials.colExpires')}</span>
+            <span>{t('credentials.colLastUsed')}</span>
             <span>{t('credentials.colCreated')}</span>
             <span>{t('credentials.colActions')}</span>
           </div>
@@ -130,16 +160,67 @@ export default function Credentials() {
             <div key={tok.token_id} className="cred-row">
               <span className="td-mono">{tok.token_id}</span>
               <span>{(tok.usage || []).join(', ')}</span>
+              <span>{(tok.scopes || []).join(', ') || '—'}</span>
               <span className="td-mono">
                 {tok.component ? (tok.agent_id ? `${tok.component}/${tok.agent_id}` : tok.component) : '—'}
               </span>
               <span>{tok.name || '—'}</span>
               <span className="cred-ts">{formatTs(tok.expires_at)}</span>
+              <span className="cred-ts">{formatTs(tok.last_used_at)}</span>
               <span className="cred-ts">{formatTs(tok.created_at)}</span>
               <span>
                 <ConfirmAction
                   message={t('credentials.revokeConfirm', { id: tok.token_id })}
                   onConfirm={() => handleRevoke(tok.token_id)}
+                  trigger={
+                    <Button variant="danger">
+                      {t('credentials.revokeBtn')}
+                    </Button>
+                  }
+                />
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="cred-section-head">
+        <h3 className="cred-section-title">{t('credentials.sessionsTitle')}</h3>
+        <ConfirmAction
+          message={t('credentials.revokeAllSessionsConfirm', { count: sessions.length })}
+          onConfirm={handleRevokeAllSessions}
+          trigger={
+            <Button variant="ghost" disabled={sessions.length === 0}>
+              {t('credentials.revokeAllSessions')}
+            </Button>
+          }
+        />
+      </div>
+      <p className="cred-subtitle">{t('credentials.sessionsSubtitle')}</p>
+
+      {sessions.length === 0 ? (
+        <EmptyState message={t('credentials.sessionsEmpty')} />
+      ) : (
+        <div className="cred-table">
+          <div className="cred-row cred-session-row cred-row-head">
+            <span>{t('credentials.colSessionUser')}</span>
+            <span>{t('credentials.colSessionGroups')}</span>
+            <span>{t('credentials.colSessionCreated')}</span>
+            <span>{t('credentials.colSessionLastSeen')}</span>
+            <span>{t('credentials.colSessionExpires')}</span>
+            <span>{t('credentials.colActions')}</span>
+          </div>
+          {sessions.map((s) => (
+            <div key={s.session_id} className="cred-row cred-session-row">
+              <span className="td-mono" title={s.session_id}>{s.user}</span>
+              <span>{(s.groups || []).join(', ') || '—'}</span>
+              <span className="cred-ts">{formatTs(s.created_at)}</span>
+              <span className="cred-ts">{formatTs(s.last_seen)}</span>
+              <span className="cred-ts">{formatTs(s.expires_at)}</span>
+              <span>
+                <ConfirmAction
+                  message={t('credentials.revokeSessionConfirm', { user: s.user })}
+                  onConfirm={() => handleRevokeSession(s.session_id)}
                   trigger={
                     <Button variant="danger">
                       {t('credentials.revokeBtn')}

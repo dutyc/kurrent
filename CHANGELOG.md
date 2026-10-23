@@ -13,6 +13,78 @@
 
 ---
 
+## 2026-10-23
+
+### 变更
+
+- **管理面边缘加固**：443 由仅 TLS 1.2 改为 `TLSv1.2 TLSv1.3`（iPXE mbedTLS 只支持 1.2，按上限协商，不受影响）；`server_tokens off` 不再回显 nginx 版本；所有响应增加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy: no-referrer`
+- **`/boot-vars` 限速**：按来源 IP 默认 240 次/分钟（`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 覆盖、`<=0` 关闭），超限 `429` + `Retry-After` + `boot_rate_limited` 告警——该端点是无鉴权的 ECDSA 验签路径，此前未限速
+- **认证体系 P4：CRL 长跑边界、用户证书签发与逐序列号吊销**：
+  - 控制面每 12 小时重签 CRL 并 reload nginx（`CRL_REFRESH_HOURS`；`KURRENT_CP_CRL_REFRESH_INTERVAL` 以秒覆盖，`<=0` 关闭），避免 7 天 `nextUpdate` 在长跑中过期——过期 CRL 会让 nginx 拒绝**全部**客户端证书；reload 失败写 `crl_refresh_failed` 告警
+  - 新增 `POST /pki/users/{cn}`：为 `state/users.yml` 中已登记用户签发证书（默认 365 天、上限 3650）；请求必须携带本地生成的 CSR（CN 必须与路径一致、除 CN 外不得带 subject 属性），私钥**永不上送**、控制面只回传证书；`kurrent init` 的 admin 证书仍本地自动生成；证书文件留在 `state/pki/users/<cn>/issued/` 供审计；签发写 `user_cert_issued` 告警
+  - `DELETE /pki/users/{cn}` 增加 `serial` 参数：只吊销指定序列号，并只踢绑定该证书指纹的会话（省略仍为吊销该用户全部证书并清空其会话）
+  - CLI 新增 `kurrent cert keygen <cn> [--out DIR]`（本地 RSA-2048 私钥 0600 + CSR）与 `cert issue <cn> --csr FILE`（只写证书、已存在需显式覆盖），`cert revoke` 增加 `--serial`
+  - 两个不鉴权的引导端点 `/devices/report` 与 `/devices/challenge` 增加按来源 IP 的滑动窗口限速（默认 120 次/分钟，`KURRENT_CP_RATE_LIMIT_REPORT` / `_CHALLENGE` 可覆盖、`<=0` 关闭）：超限 `429` + `Retry-After` 并写 `boot_rate_limited` 告警
+  - 新增 `POST /devices/rotate`：设备用旧密钥签名 `rotate‖mac‖new_pubkey‖nonce` 轮换公钥（nonce 由 `/devices/challenge` 一次性签发、不透传注册窗口）；成功后 `key_hash` 更新并记 `key_rotated_at`，旧密钥在下一次 `/boot-vars` 验签即失败；重放 `401`、已吊销 `403`、未认领 `409`，限速 10 次/分钟/IP。nginx 增加 `/devices/rotate` 精确匹配的反代 location
+  - 控制面容器移除 `/var/run/docker.sock` 挂载与 `docker` Python 依赖：dnsmasq 自己监听 `dhcp-hostsfile`（删除控制面向容器发 SIGHUP 的路径与 `spec.dnsmasq.reload` 声明，旧配置带该键将按未知字段拒绝启动）；nginx 容器内 watcher 监听 CRL 变化与控制面哨兵自行 `nginx -s reload`，并以 `nginx.ack` 让控制面确认吊销已生效（超时仍返回 `500`）
+  - 新增 `control_plane/host-baseline.sh`（默认只读）：检查对外 TCP 监听、Docker TCP/发布端口/`docker.sock` 挂载、`DOCKER-USER` 收口与 CA 私钥/台账权限；`--fix-4841` 显式 opt-in，幂等安装三条 INPUT 规则（lo 与 `172.16.0.0/12` ACCEPT、其余 DROP）；部署指南（中英）新增「宿主基线」一节
+  - 组件证书可吊销：enroll / renew 签发时把 client + serving 两张证书按序列号登记进 `state/pki/components/issued.yml`；新增 `GET /pki/components`（含吊销/过期状态）与 `DELETE /pki/components/{agent_id}?serial=`（标记吊销、写 nodes CRL、reload nginx、删除该节点的 bootstrap token）；`/enroll/renew` 对已吊销序列号返回 `403`，堵住 CRL reload 窗口内换发新证书的路径。CLI 对应 `kurrent cert components` 与 `cert revoke-component`
+  - DHHC-1 定期轮换：凭据对账线程每周期检查密钥年龄（`rotated_at`，缺省回落 `updated_at` / `created_at`），超过 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS`（默认 90 天，`<=0` 关闭）即生成新密钥；先推送到该 Worker 的全部目标 Agent，**全部送达后才切换台账**，任一失败则把已送达目标回推旧密钥并在下个周期重试；审计 `credential.rotate`
+  - 告警外投（可选）：`KURRENT_CP_ALARM_WEBHOOK` 非空时把 `event=alarm` 审计事件以 JSON POST 出去；后台线程 + 有界队列（200）+ 重试 2 次（1s/4s，单次超时 5s），队列满丢弃并记日志——投递不进入请求路径
+  - 新增 `DELETE /devices/revoked`：清除已吊销设备（`dry_run` 预览；可重复 `mac` 限定范围），只动 `revoked` 状态，用于清理探测残留
+- **认证体系 P3：会话登记、证书 CRL、token scope 与审计告警**：
+  - 会话改为服务端登记（`state/sessions.yml`，key = `sha256(jti)`）：Cookie `__Host-kurrent_session` 只携带 `{jti, exp, epoch}`，身份与组以登记为准；登出删登记，管理员可列出 / 逐个吊销 / 全部下线（递增 epoch）；人类会话每次请求重查 `users.yml`，删用户立即 `401`；Cookie 写请求校验 `Origin` 与 `Host` 一致，会话 12 小时 TTL、剩余不足一半才滑动续期
+  - users CA 增加 CRL：`state/pki/users/issued.yml` 按序列号登记证书；`DELETE /pki/users/{cn}` 标记吊销、重签 `state/pki/nginx/clients.crl`（users + nodes 两张 CRL 拼接）并 reload nginx，被吊销证书下一次 TLS 握手即失败；同步删除该用户全部会话，不能吊销当前凭据自身
+  - 自动化 token scope 化：`admin` / `readonly` / `enroll`；`readonly` 只能读，`enroll` 只能签发 bootstrap token；TTL 默认 24 小时、上限 30 天；`last_used_at` 每分钟最多回写一次；台账新增 `scopes` / `uses` / `max_uses` / `last_used_at`，列表仍不返回明文与 hash
+  - bootstrap token 改为**一次性**（`max_uses` 默认 1，`--uses N` 可提高到 100），使用额度在签发前原子占用、签发失败退回；TTL 改为默认 60 分钟、上限 24 小时。声明字段 `spec.pki.bootstrapTokenTtlDays` 更名为 `spec.pki.bootstrapTokenTtlMinutes`（旧键按未知字段拒绝启动）
+  - 新增结构化认证审计 `state/audit.jsonl`（`event` / `principal_class` / `principal` / `issuer` / `serial` / `fingerprint_sha256` / `route` / `decision` / `reason` / `request_id` / `client_ip`），不含 secret、token 明文、私钥与 PSK；审计写入失败时请求返回 `503`（fail-closed）。实现八条告警：引导凭据 `injected && !verified`、component/control 进入管理路由、未知 issuer / CRL 命中、同源认证失败风暴、bootstrap 身份/CSR CN 不符、管理员证书签发 / CRL 更新 / CA 生成、`users.yml` 变更、审计写入失败
+  - nginx 透传 `X-Client-Cert-Verify` 与原始 issuer（仅审计取证，不参与身份判断）；`ssl_crl` 指向客户端 CRL 拼接文件
+  - CLI 新增 `kurrent sessions list|revoke|revoke-all` 与 `kurrent cert list|revoke`；`token create` 增加 `--scope` / `--ttl` / `--uses`；WebUI「凭据」页新增权限 / 最近使用列与会话台账
+  - 新增 `tests/control_plane/test_sessions.py`、`test_bootstrap_token.py`、`test_token_scopes.py`、`test_certs.py`、`test_audit.py`；部署探针增加 CRL、会话吊销、readonly scope 与审计字段断言
+- **认证体系 P2：三 CA 分根、主体类授权与 token 绑定节点**：
+  - PKI 拆为 `users` / `nodes` / `control` 三个独立根（`state/pki/ca/<kind>/`）；遗留单 CA 启动时原位提升为 `nodes`（CN 保持 `kurrent-ca`，nginx class map 兼容该 issuer），存量组件证书继续有效；admin 证书与控制面客户端证书按 issuer 检测后重签（users / control CA）
+  - 组件证书由 nodes CA 签发，**subject 重建为仅 CN**：CSR 自报的 O/OU 等属性一律拒绝；管理面组只来自 `state/users.yml`（CN → groups，首次启动自举 admin；未知 CN `403`，用户被删后既有会话下次请求 `401`）
+  - nginx 按证书 issuer 判定主体类并透传 `X-Client-Class`（users → `human`，nodes → `component`），信任包改为 `state/pki/nginx/ca-bundle.pem`（仅 users + nodes 公钥）；`/api/cp/` 拒绝 component（`403`），`/enroll/renew` 仅接受 component（人类证书 `403`）
+  - 控制面路由声明接受的主体类（`human` / `automation` / `component` / `anonymous`），未声明即启动失败（默认拒绝）；`Identity` 增加 `class` / `issuer` / `serial` / `fingerprint`
+  - bootstrap token **必须绑定 `component` + `agent_id`**（字符集 `[a-z0-9][a-z0-9.-]*`）：`POST /pki/tokens` 缺 `agent_id` 或非法字符返回 `400`，enroll 校验绑定匹配；不再签发「任意节点可用」的通用 token
+  - `kurrent token create` 省略 `--agent-id` 时生成随机 12 位 hex 节点身份，输出命令携带 `--agent-id`；`kurrent join` 将其写入声明 `metadata.name`，与已声明身份不一致时拒绝
+  - `POST /enroll` 响应改为下发 `ca_nodes_crt` + `ca_control_crt` 两个信任锚（不再返回 `ca_crt`）；节点侧引导要求两个锚齐备，agent → nvmet-host 与控制面 → agent 使用 nodes CA，节点校验控制面客户端使用 control CA
+  - WebUI「加入节点」弹窗采集节点 ID（默认随机生成）并展示绑定关系；API 参考（中英）、架构文档、CLI README 同步
+  - 新增 `tests/control_plane/test_pki_split.py`（三分根 / 遗留提升 / CSR 拒绝 / 信任包 / token 绑定）与路由矩阵用例；`tests/deploy/probe_edge.sh` 增加跨类拒绝与信任包断言
+
+### 修复
+
+- **`enroll` scope 的自动化 token 越权读管理面**：此前该 scope 只拦写操作，token 仍可 `GET` 设备 / Worker / 凭据台账 / 组件证书 / 操作审计，甚至可换一个继承 scope 的浏览器会话；现仅放行 `POST /pki/tokens`（签发 bootstrap token），其余读写接口与 `POST /session` 一律 `403`。`readonly` 行为不变
+- **`/devices/challenge` 对已吊销设备仍签发 nonce（200）**：吊销设备不再进入验签链路，统一返回 `404`，与 `/boot-vars` 的拒绝语义一致
+- **nvmet 部署的 `storager-agent` 不再挂载 `/var/run/docker.sock`**：nvmet 后端由 Agent 经 mTLS HTTP 驱动 `nvmet-host`，不需要 Docker；移除后容器逃逸面不再直接等于宿主 root。iscsi 编排（`storager/iscsi/docker-compose.yml`）保持挂载以 exec 后端容器
+- **文件浏览页存储/反射 XSS**：目录项文件名与 URL 路径段此前原样拼进 `innerHTML`（面包屑与文件列表），构造文件名或 `/browse/%3Cimg…%3E/` 链接即可在操作者浏览器执行脚本（同源会话可发起管理操作）；该页面与 njs 目录列表 API 已整体移除（引导链状态板取代目录浏览），`/file/` 只保留静态下载
+- **操作审计与凭据审计的来源恒为 `unknown`**：控制面只经 nginx UDS 访问，`request.client` 为空，`client_host()` 未回退到 nginx 覆盖写入的 `X-Real-IP`，导致 `operations.jsonl` 的 `client` 与 enroll/token 审计的 `client_ip` 全部失真；现统一取 `X-Real-IP`，并给 `/api/cp/enroll/renew` 反代补上该头
+- **`/file/` 与 `/tftp/` 跟随符号链接**：归档解包带入的链接可把 nginx 容器内其它路径（同容器挂载着 TOFU 服务端私钥 `/etc/nginx/certs/server.key`）读成静态文件；两个 location 均加 `disable_symlinks on from=/data|/tftp`，文件浏览 API 的 realpath 守卫保持
+- **管理面 API 响应可被缓存**：`/api/cp/` 响应（设备/会话/凭据台账）无缓存指令；现下发 `Cache-Control: no-store`，并因 location 级 `add_header` 会取消 server 级继承而重列三项安全头
+
+## 2026-10-22
+
+### 变更
+
+- **管理面收口为 unix socket（认证体系 P1）**：
+  - 控制面改用 `uvicorn --uds /run/kurrent/cp.sock`，容器不再监听 TCP；compose 移除 `127.0.0.1:4839:8080`，新增仅控制面与 nginx 挂载的共享卷 `kurrent-run`，健康检查改经同一 socket
+  - nginx upstream 改为 `unix:/run/kurrent/cp.sock`；443 server 级默认清空 `X-Client-Cert-DN/Issuer/Serial/Fingerprint`，每个反代 location 必须显式 include 对应片段；`/api/cp/` 与 renew 仅在 mTLS SUCCESS 时注入四条证据头
+  - nginx 只挂载 `ca.crt` 单文件，`ca.key` 与用户私钥不再出现在面向前端的容器文件系统
+  - CLI 移除 `127.0.0.1:4839` 回退：无管理凭据且未给 `--server` 时直接报错；`kurrent init` 改为等待容器健康状态
+  - WebUI 开发代理改指 nginx 443（`VITE_CP_PROXY` 可覆盖），保留 `/api/cp` 前缀，不再依赖控制面 TCP 端口
+  - 新增 `tests/deploy/probe_edge.sh` 与 nginx/compose 静态断言，覆盖无 TCP 管理口、伪造头拒绝、PEP 无私钥
+  - 文档：API 参考（中英）、架构文档、部署指南、CLI README 同步入口与健康检查方式
+
+### 修复
+
+- **应用层暴露面收口（LAN-PT-2026-10-22-01）**：
+  - `/boot-vars` 的 NVMe-oF 凭据改为只在设备身份验签通过后注入：`mac` + 一次性 `nonce` + 有效签名缺一不可；仅 hostname 的请求在验签强制开启时以 `missing_mac` 拒绝，过渡期只下发菜单/导航变量，不再返回 `nbft_secret` / `nbft_tls_psk`。`device_auth_blocked()` 由返回布尔值改为 `verify_boot_identity()` 返回 `(allowed, verified)`，nonce 仍只消费一次
+  - nginx 不再按 `/devices/` 前缀透传：仅精确反代 `/boot-vars`、`/devices/report`、`/devices/challenge`，其余 `/devices/*` 返回 404；三个引导端点显式清空 `X-Client-Cert-DN`，身份头只能来自 `/api/cp/` 的 mTLS 校验结果
+  - njs 目录浏览在二次解码后拒绝任何 `..` 段，并对 `/data` 拼接结果做 `realpath` 校验，修复双重编码路径穿越与符号链接逃逸
+  - `/devices/report` 对已有设备只允许补空 `uuid`，不再允许无鉴权上报覆盖绑定比对依据
+  - 控制面交互式 API 文档默认关闭（`/openapi.json`、`/docs`、`/redoc`），仅 `KURRENT_CP_OPENAPI=1` 时开启
+  - 文档：API 参考（中英）同步凭据验签条件、`missing_mac` 语义与 `uuid` 写入边界；部署指南补充 443 引导链端点白名单与 OpenAPI 默认关闭
+
 ## 2026-10-20
 
 ### 修复

@@ -60,12 +60,12 @@ class NvmetHostClient:
 
     本组件是宿主服务的唯一调用方：mTLS——
     用本组件的 client cert（pki_dir/client.{crt,key}）向 nvmet-host 认证，
-    服务端证书由内部 CA（pki_dir/ca.crt）校验链 + SAN 校验。"""
+    服务端证书由 nodes CA（pki_dir/ca-nodes.crt）校验链 + SAN 校验。"""
 
     def __init__(self, base_url: str, pki_dir: Path, timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        ctx = ssl.create_default_context(cafile=str(pki_dir / "ca.crt"))
+        ctx = ssl.create_default_context(cafile=str(pki_dir / "ca-nodes.crt"))
         ctx.load_cert_chain(str(pki_dir / "client.crt"), str(pki_dir / "client.key"))
         self.ctx = ctx
 

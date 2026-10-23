@@ -1,12 +1,17 @@
 """审计日志端点（Bearer 鉴权）：游标分页读取 + 按设备 MAC 过滤。"""
 
-from fastapi import APIRouter, Depends
+from fastapi import Depends
 
 from ..auth import authenticate, authorize_request
 from ..stores import operations
 from ..utils import canonical_mac
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 @router.get("/operations")

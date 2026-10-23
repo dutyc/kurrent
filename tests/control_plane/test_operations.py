@@ -30,6 +30,13 @@ class TestOperations:
         assert entry["id"] >= 1
         assert "ts" in entry
 
+    def test_operation_client_uses_nginx_real_ip(self, client, auth_headers):
+        """控制面在 UDS 后拿不到 TCP 对端，操作审计的来源取 nginx 覆盖写入的 X-Real-IP。"""
+        client.post("/devices", json={"mac": MAC_A},
+                    headers={**auth_headers, "X-Real-IP": "203.0.113.9"})
+        entry = client.get("/operations", headers=auth_headers).json()["entries"][0]
+        assert entry["client"] == "203.0.113.9"
+
     def test_pagination_since_limit(self, client, auth_headers):
         for mac in (MAC_A, MAC_B):
             client.post("/devices", json={"mac": mac}, headers=auth_headers)

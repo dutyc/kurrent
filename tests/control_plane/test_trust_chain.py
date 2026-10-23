@@ -112,6 +112,17 @@ class TestSignatureChain:
 class TestEnforcement:
     """强制开关：开启后无密钥/无签名设备一律拒绝（已绑定也不放行）；过渡期放行。"""
 
+    def test_enforcement_rejects_missing_mac(self, client, auth_headers):
+        """仅 hostname、无 mac：强制开启后不再放行（报告 F-01 的入口）。"""
+        client.post("/workers", json={"worker_id": "worker-09"}, headers=auth_headers)
+        client.put("/settings/enforcement", json={"enabled": True}, headers=auth_headers)
+        res = _boot_vars(client, hostname="worker-09")
+        assert res.status_code == 200
+        assert EMPTY_SCRIPT in res.text
+        ops = client.get("/operations", params={"worker_id": "worker-09"}, headers=auth_headers).json()["entries"]
+        assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
+                   and e.get("reason") == "missing_mac" for e in ops)
+
     def test_enforcement_rejects_no_key_even_bound(self, client, auth_headers):
         _bind_without_key(client, auth_headers)
         client.put("/settings/enforcement", json={"enabled": True}, headers=auth_headers)
@@ -191,7 +202,7 @@ class TestBootVarsProjection:
         assert EMPTY_SCRIPT in res.text
 
     def test_hostname_only_request_allowed(self, client, auth_headers):
-        # 无 mac（仅 hostname）：无法校验绑定关系，保持兼容放行
+        # 无 mac（仅 hostname）：过渡期放行菜单变量，但不注入凭据（凭据只认验签）
         client.post("/workers", json={"worker_id": "worker-09"}, headers=auth_headers)
         res = _boot_vars(client, hostname="worker-09")
         assert res.status_code == 200

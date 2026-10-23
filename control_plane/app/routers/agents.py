@@ -6,7 +6,7 @@ nvmet-host 组件凭据由 enroll 按能力派生，均不在本模块。"""
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 
 from ..agent_client import AgentAPIError, AgentClient, AgentConfig
 from ..auth import authenticate, authorize_request
@@ -21,7 +21,12 @@ from ..models import (
 from ..stores import agents, master_tags, record, store
 from ..utils import WORKER_ID_RE, canonical_os, canonical_os_version, client_host, worker_disks
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 @router.get("/agents")

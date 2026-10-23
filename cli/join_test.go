@@ -17,6 +17,7 @@ var nodeIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 const fakeDocker = `#!/usr/bin/env bash
 echo "FAKE-DOCKER $(pwd) $*" >> "${FAKE_DOCKER_LOG}"
+if [ "$1" = "inspect" ]; then echo healthy; fi
 `
 
 // stubHostReady 注入「宿主前置已就绪」的假环境（假 /proc/mounts + /sys/module）：
@@ -193,7 +194,7 @@ func TestJoinBasic(t *testing.T) {
 			t.Errorf("kurrent.yaml %v = %q, want 空（部署细节不在 yml 声明）", p, got)
 		}
 	}
-	// 引导凭据在独立文件：join 只写通用 token 到 agent.token；
+	// 引导凭据在独立文件：join 只写绑节点身份的 token 到 agent.token；
 	// nvmet-host.token 是派生凭据（agent enroll 按能力签发），join 不写也不产生
 	tokenFile := filepath.Join(storager, "bootstrap", "agent.token")
 	data, err := os.ReadFile(tokenFile)
@@ -256,14 +257,14 @@ func TestJoinFillsDefaults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(minimalNodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t", agentID: "fill-01"}); err != nil {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	// 声明留空 → 自动生成随机机器身份（12 位 hex，与盘 os_tag 同构）
+	// 声明留空 → --agent-id 写入（token 绑定的节点身份）
 	name := yamlValue(t, configFile, "metadata", "name")
-	if !nodeIDRe.MatchString(name) {
-		t.Errorf("metadata/name = %q, want 12 位 hex 随机标识", name)
+	if name != "fill-01" {
+		t.Errorf("metadata/name = %q, want fill-01", name)
 	}
 	for path, want := range map[string]string{
 		"spec/agent/backend":      "nvmet",
@@ -288,13 +289,13 @@ func TestJoinFillsDefaults(t *testing.T) {
 func TestJoinGeneratesConfig(t *testing.T) {
 	// 声明缺失 → 按模板自动生成（无预置文件时用缺省模板；地址来自命令）
 	repo, _, storager, _ := newFakeRepo(t)
-	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t", agentID: "gen-01"}); err != nil {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
 	name := yamlValue(t, configFile, "metadata", "name")
-	if !nodeIDRe.MatchString(name) {
-		t.Errorf("metadata/name = %q, want 12 位 hex 随机标识", name)
+	if name != "gen-01" {
+		t.Errorf("metadata/name = %q, want gen-01", name)
 	}
 	for path, want := range map[string]string{
 		"metadata/remark":         "",                     // 人工输入的唯一字段：生成时留空（备注）
@@ -312,9 +313,32 @@ func TestJoinGeneratesConfig(t *testing.T) {
 }
 
 func TestJoinGeneratesStableID(t *testing.T) {
-	// 声明缺失 → 生成随机身份；重跑 join 身份保留（持久化在声明里，幂等稳定）
+	// bootstrap token 绑定身份：--agent-id 写入声明，重跑身份保留（幂等稳定）
 	_, _, storager, _ := newFakeRepo(t)
-	opts := joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}
+	opts := joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL: "https://192.168.1.10", token: "t", agentID: "stable-01"}
+	if err := joinRun(opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinRun(opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := yamlValue(t, opts.configFile, "metadata", "name"); got != "stable-01" {
+		t.Errorf("metadata/name = %q, want stable-01", got)
+	}
+}
+
+func TestJoinGeneratesIDWithoutToken(t *testing.T) {
+	// 无 --token（凭据文件已就位）且声明未给身份 → 自动生成随机短标识并持久化
+	_, _, storager, _ := newFakeRepo(t)
+	bootstrapDir := filepath.Join(storager, "bootstrap")
+	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bootstrapDir, "agent.token"), []byte("tok.111\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10"}
 	if err := joinRun(opts); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +351,29 @@ func TestJoinGeneratesStableID(t *testing.T) {
 	}
 	if second := yamlValue(t, opts.configFile, "metadata", "name"); second != first {
 		t.Errorf("重跑后 metadata/name = %q, want %q（身份持久化不变）", second, first)
+	}
+}
+
+func TestJoinTokenRequiresAgentID(t *testing.T) {
+	// 给了 --token 却无节点身份 → 提前拒绝（否则随机 id 必然与 token 绑定不符）
+	_, _, storager, _ := newFakeRepo(t)
+	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL: "https://192.168.1.10", token: "t"})
+	if err == nil || !strings.Contains(err.Error(), "--agent-id") {
+		t.Fatalf("err = %v, want --agent-id 提示", err)
+	}
+}
+
+func TestJoinAgentIDConflictsWithDeclaration(t *testing.T) {
+	// 声明身份已存在且与 --agent-id 不一致 → 拒绝（身份须稳定，勿中途改名）
+	_, _, storager, _ := newFakeRepo(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL: "https://192.168.1.10", token: "t", agentID: "other-01"})
+	if err == nil || !strings.Contains(err.Error(), "不一致") {
+		t.Fatalf("err = %v, want 身份不一致报错", err)
 	}
 }
 
@@ -424,7 +471,7 @@ func TestJoinAppliesExternalConfig(t *testing.T) {
 	}
 	// --config 指向其他路径：应用为 storager/kurrent.yaml（容器挂载权威位）；
 	// 命令地址覆盖声明 url（引导输入以命令为准）
-	if err := joinRun(joinOpts{dir: storager, configFile: external, cpURL: "https://cp2", token: "t"}); err != nil {
+	if err := joinRun(joinOpts{dir: storager, configFile: external, cpURL: "https://cp2", token: "t", agentID: "ext-01"}); err != nil {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
@@ -544,7 +591,7 @@ func TestJoinCreatesDiskDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(minimalNodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t", agentID: "disk-01"}); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(filepath.Join(repo, "storager_img")); err != nil || !fi.IsDir() {

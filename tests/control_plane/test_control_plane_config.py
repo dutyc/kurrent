@@ -39,7 +39,7 @@ def test_minimal_accepts_and_injects_defaults(tmp_path):
     assert cfg.spec.networking.gateway == "192.168.80.2"
     assert cfg.spec.networking.dns == "223.5.5.5"
     # 默认值注入（PKI 策略 / 服务器证书 / 引导行为 / 数据面参数）
-    assert cfg.spec.pki.bootstrap_token_ttl_days == 7
+    assert cfg.spec.pki.bootstrap_token_ttl_minutes == 60
     assert cfg.spec.pki.component_cert_days == 90
     assert cfg.spec.pki.renew_threshold == 0.2
     assert cfg.spec.server_cert.san == "IP:127.0.0.1,DNS:localhost"
@@ -48,7 +48,6 @@ def test_minimal_accepts_and_injects_defaults(tmp_path):
     assert cfg.spec.boot.menu_timeout_ms == 5000
     assert cfg.spec.boot.auto_boot_timeout_sec == 1
     assert cfg.spec.agent_timeout_sec == 10
-    assert cfg.spec.dnsmasq.reload is False
 
 
 def test_unknown_field_rejected(tmp_path):
@@ -63,7 +62,7 @@ metadata:
   name: test-cp
 spec:
   pki:
-    bootstrapTokenTtlDays: 7
+    bootstrapTokenTtlMinutes: 60
 """
     with pytest.raises(RuntimeError, match="invalid control plane configuration"):
         _load(tmp_path, body)

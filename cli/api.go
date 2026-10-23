@@ -47,14 +47,16 @@ func api(method, path string, body any) []byte {
 }
 
 // apiEndpoint 选择请求端点：管理凭据（admin 证书 mTLS，443 唯一入口）优先；
-// 无管理凭据时回退 --server/本机回环 + Bearer token。
+// 无管理凭据时必须显式给出 --server（配合 --token），不再有本机回环兜底——
+// 控制面管理面只监听 unix socket，不提供 TCP 端口。
 func apiEndpoint() (*http.Client, string) {
 	if cc := loadCredentials(); cc != nil {
 		return cc.client(), cc.serverURL()
 	}
 	server := strings.TrimRight(flagServer, "/")
 	if server == "" {
-		server = "http://127.0.0.1:4839"
+		fatal("未发现管理凭据：用 kurrent credentials install 安装快照，或 --credentials 指定；\n" +
+			"也可用 --server https://<host>/api/cp + --token 显式连接（管理面不再监听本机回环端口）")
 	}
 	return &http.Client{Timeout: 15 * time.Second}, server
 }

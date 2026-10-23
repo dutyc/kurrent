@@ -1,31 +1,32 @@
 """组件 PKI 引导/轮换接口。
 
 - POST /enroll：组件首次注册。凭据 = bootstrap token（Bearer 头，经 nginx TLS 传输）：
-  agent 用集群级通用 token（不绑节点、TTL 内可多次
-  enroll 复用、不消耗）；nvmet-host 用 agent enroll 时按能力派生下发的 token
-  （绑 agent_id，防串用）。token 校验通过后校验 CSR CN 与登记身份一致，
-  用内部 CA 签发 client + serving 证书。
-- POST /renew：证书轮换。凭据 = 组件现有 client cert（nginx 该路径强制 mTLS 校验，
-  通过后把客户端证书 DN 透传到 X-Client-Cert-DN）；校验 DN 的 CN == <prefix>-<agent_id>
-  后重签。**在册校验只对非 agent 组件成立**：nvmet-host 要求在册（否则 400），而 agent
+  token 必须绑定 component + agent_id（kurrent token create --agent-id 签发）；
+  nvmet-host 的 token 由 agent enroll 按能力派生（同样绑 agent_id）。
+  校验通过后用 nodes CA 签发 client + serving 证书，响应同时下发 nodes/control 两个
+  信任锚（节点用 control CA 校验控制面客户端，用 nodes CA 校验同伴组件）。
+- POST /renew：证书轮换。凭据 = 组件现有 client cert（nginx 该路径强制 mTLS，
+  issuer 必须是 ca-nodes，class=component）；校验 CN == <prefix>-<agent_id> 后重签。
+  **在册校验只对非 agent 组件成立**：nvmet-host 要求在册（否则 400），而 agent
   组件与 /enroll 同语义（_issue 内自动登记）——因此从 agents.yml 移除一个
-  agent 并不会拒绝它的 renew，它会在下次轮换时按节点声明（base_url / capabilities /
-  remark）重新登记；「移除即拒绝」只对 nvmet-host 成立。
+  agent 并不会拒绝它的 renew，它会在下次轮换时按节点声明重新登记。
 
 两个接口都不挂 verify_control_token（那是 webui 的鉴权；组件凭据是证书/token 本身）。
 """
 
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import config, pki, stores
+from .. import audit, config, pki, stores
 from ..auth import settings
+from ..principal import PrincipalRouter, principal
+from ..utils import client_host
 
 log = logging.getLogger("control-plane")
 
-router = APIRouter(prefix="/enroll", tags=["enroll"])
+router = PrincipalRouter(prefix="/enroll", tags=["enroll"])
 
 
 class EnrollReq(BaseModel):
@@ -83,17 +84,23 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
                 log.info("enroll: refreshed agent %s from node declaration "
                          "(base_url/remark/role.cd)", agent_id)
 
-    ca_cert, ca_key = pki.ensure_ca(config.settings.pki_dir)
+    ca_set = pki.ensure_ca_set(config.settings.pki_dir)
+    ca_cert, ca_key = ca_set["nodes"]
     try:
         certs = pki.sign_component_certs(
             ca_cert, ca_key, agent_id, component,
             req.csr_client.encode(), req.csr_serving.encode(), req.serving_sans,
+            pki_dir=config.settings.pki_dir,
         )
     except ValueError as exc:
+        audit.alarm("bootstrap_cn_mismatch", detail=str(exc),
+                    route="POST /enroll", principal=agent_id)
         raise HTTPException(400, str(exc)) from exc
     resp = {
         "certificates": {name: pem.decode() for name, pem in certs.items()},
-        "ca_crt": pki.ca_cert_pem(config.settings.pki_dir).decode(),
+        # 节点信任锚：control 用于校验控制面客户端；nodes 用于校验同伴组件
+        "ca_nodes_crt": pki.ca_cert_pem(config.settings.pki_dir, "nodes").decode(),
+        "ca_control_crt": pki.ca_cert_pem(config.settings.pki_dir, "control").decode(),
     }
     # nvmet-host 组件凭据派生（能力上报驱动，签发不预知后端）：agent 上报
     # backend=nvmet → 签发绑 agent_id 的派生 token 随响应下发（agent 落盘供
@@ -108,10 +115,11 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
 
 
 @router.post("", status_code=201)
+@principal("anonymous", "automation")
 def enroll(req: EnrollReq, request: Request, authorization: str = Header("", alias="Authorization")):
-    """首次引导：Bearer bootstrap token → 校验（TTL 内复用，不消耗）→ 签发。"""
+    """首次引导：Bearer bootstrap token → 原子占额度 → 签发；签发失败退回额度。"""
     token = authorization[len("Bearer "):].strip() if authorization.startswith("Bearer ") else ""
-    # nvmet-host 与 agent 共享 agent_id：agent 未在册时先拒绝（token 复用不消耗，
+    # nvmet-host 与 agent 共享 agent_id：agent 未在册时先拒绝（不消耗额度，
     # 部署序保证 agent 先引导；nvmet-host 容器 restart 重试即可）
     if req.component != "agent":
         try:
@@ -119,17 +127,49 @@ def enroll(req: EnrollReq, request: Request, authorization: str = Header("", ali
         except KeyError:
             raise HTTPException(400, f"agent not registered: {req.agent_id}") from None
     try:
-        pki.validate_bootstrap_token(config.settings.pki_dir, token, req.agent_id, req.component)
+        token_id = pki.reserve_bootstrap_token(
+            config.settings.pki_dir, token, req.agent_id, req.component)
     except ValueError as exc:
+        if "mismatch" in str(exc):
+            audit.alarm("bootstrap_identity_mismatch", detail=str(exc),
+                        route="POST /enroll", principal=req.agent_id)
+        audit.emit("credential", principal_class="anonymous", principal=req.agent_id,
+                   issuer="token", route="POST /enroll", decision="deny",
+                   reason=str(exc), request_id=getattr(request.state, "request_id", ""),
+                   client_ip=client_host(request))
         raise HTTPException(401, str(exc)) from exc
-    return _issue(req.agent_id, req.component, req)
+    audit.emit("credential", principal_class="anonymous", principal=req.agent_id,
+               issuer="token", route="POST /enroll", decision="allow",
+               reason="bootstrap_token", token_id=token_id,
+               request_id=getattr(request.state, "request_id", ""),
+               client_ip=client_host(request))
+    try:
+        return _issue(req.agent_id, req.component, req)
+    except Exception:
+        pki.release_bootstrap_token(config.settings.pki_dir, token_id)
+        raise
 
 
 @router.post("/renew")
-def renew(req: EnrollReq, x_client_cert_dn: str = Header("", alias=config.CLIENT_CERT_DN_HEADER)):
-    """证书轮换：nginx mTLS 校验 client cert 后透传 DN；CN 在册且匹配才重签。"""
+@principal("component")
+def renew(req: EnrollReq,
+          x_client_cert_dn: str = Header("", alias=config.CLIENT_CERT_DN_HEADER),
+          x_client_cert_serial: str = Header("", alias=config.CLIENT_CERT_SERIAL_HEADER),
+          x_client_class: str = Header("", alias=config.CLIENT_CLASS_HEADER)):
+    """证书轮换：nginx 按 issuer 判定 class=component 后透传 DN；CN 匹配才重签。
+
+    已吊销序列号一律拒绝（403）：nginx 的 CRL 校验在握手层，但 CRL reload 存在
+    窗口，应用侧按登记表兜底，避免吊销后的证书换出一张新的有效证书。
+    """
+    if x_client_class != "component":
+        raise HTTPException(403, f"renew requires a component certificate (class={x_client_class!r})")
     cn = pki.parse_dn_cn(x_client_cert_dn)
     prefix = pki.COMPONENT_PREFIX.get(req.component)
     if not prefix or cn != f"{prefix}-{req.agent_id}":
         raise HTTPException(401, f"client cert cn mismatch: {cn!r}")
+    if x_client_cert_serial and pki.component_cert_revoked(config.settings.pki_dir,
+                                                           x_client_cert_serial):
+        audit.alarm("unknown_issuer_or_crl", detail="renew with revoked serial",
+                    route="POST /enroll/renew", principal=req.agent_id)
+        raise HTTPException(403, f"certificate revoked: serial {x_client_cert_serial}")
     return _issue(req.agent_id, req.component, req)

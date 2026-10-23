@@ -3,11 +3,12 @@
 # 前置（宿主）：sudo bash host-prepare.sh（nvmet/nvmet-tcp 模块 + configfs 挂载 + 重启持久化，见 nvmet-host/README.md）
 # 本文件为完整编排：含共享 Agent 服务（代码在 storager/agent/，配置来源：../kurrent.yaml，
 # 节点声明式配置；.env 仅保留 compose 插值键）。
-# 注：storager-agent 服务块与 storager/iscsi/docker-compose.yml 保持一致。
+# 注：nvmet 后端由 Agent 经 HTTP 驱动 nvmet-host，不需要 docker.sock（最小权限）；
+# iscsi 后端仍按 storager/iscsi/docker-compose.yml 挂载以 exec 后端容器。
 
 services:
   # ── 存储节点 Agent（控制面数据面接口）──
-  # 经 docker.sock 调度后端容器；配置来源：../kurrent.yaml（kurrent join 生成/更新）
+  # nvmet 后端不挂 docker.sock：Agent 仅经 HTTPS 调 nvmet-host，容器逃逸面不含宿主 root
   storager-agent:
     build:
       context: ../agent
@@ -20,7 +21,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"   # nvmet-host 为 host 网络模式，经宿主 loopback 访问其 4841
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock   # 用来 exec 进后端容器（nvmet 由 Agent 经 HTTP 驱动）
       - /etc/localtime:/etc/localtime:ro
       # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
       - ${KURRENT_DISK_DIR:-../../storager_img}:/home/iscsi_img
@@ -55,7 +55,7 @@ services:
     # 健康检查：mTLS 探活 /healthz（带本组件 client cert；configfs 就绪才报健康）——
     # 宿主前置缺失（模块/configfs）时如实标记 unhealthy，不再是「容器在跑但数据面不可用」
     healthcheck:
-      test: ["CMD", "python3", "-c", "import json,ssl,urllib.request as u; c=ssl.create_default_context(cafile='/etc/kurrent/pki/ca.crt'); c.load_cert_chain('/etc/kurrent/pki/client.crt','/etc/kurrent/pki/client.key'); raise SystemExit(0 if json.load(u.urlopen('https://127.0.0.1:4841/healthz', context=c, timeout=3)).get('configfs') else 1)"]
+      test: ["CMD", "python3", "-c", "import json,ssl,urllib.request as u; c=ssl.create_default_context(cafile='/etc/kurrent/pki/ca-nodes.crt'); c.load_cert_chain('/etc/kurrent/pki/client.crt','/etc/kurrent/pki/client.key'); raise SystemExit(0 if json.load(u.urlopen('https://127.0.0.1:4841/healthz', context=c, timeout=3)).get('configfs') else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3

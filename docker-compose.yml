@@ -30,17 +30,17 @@ services:
     image: kurrent-control-plane
     container_name: kurrent-control-plane
     restart: unless-stopped
-    ports:
-      # 唯一对外入口为 nginx 443（443:443）；本机回环保留：kurrent init 健康检查与调试。
-      # 认证器链信任前提：4839 不得对局域网暴露（X-Client-Cert-DN 只信 nginx 注入）
-      - "127.0.0.1:4839:8080"
+    # 管理面不发布 TCP 端口：nginx 经共享卷中的 unix socket 访问（见 volumes）。
+    # 宿主 4839 已移除，健康检查在容器内经同一 socket 完成。
     environment:
       # 容器时区（日志时间戳）
       - TZ=Asia/Shanghai
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # 管理面唯一通道：控制面监听 cp.sock，nginx 是唯一挂载该卷的对端。
+      # reload 哨兵（nginx.reload/nginx.ack）也走该卷：控制面不持任何容器运行时权限。
+      - kurrent-run:/run/kurrent
       # 声明式配置（只读）：spec.networking 是 dnsmasq.conf 的权威来源
       - ./control_plane/kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
       - ./control_plane/config:/app/config
@@ -48,6 +48,12 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # dnsmasq 目录（可写）：dnsmasq.conf 由控制面启动时按 spec.networking 生成，dnsmasq 容器挂载同文件
       - ./dnsmasq:/app/dnsmasq
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   # ── Web 管理界面 + 文件浏览（nginx）──
   # 静态资源由 webui/app 构建产物挂载；public/ 为 iPXE 公开文件（ISO/kernel/initrd）
@@ -65,16 +71,21 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # ── Web UI 静态文件 (cd app && npm run build) ──
       - ./webui/app/dist:/usr/share/nginx/html:ro
-      # ── 文件浏览器页面 (浏览工具的 HTML/JS 本身) ──
-      - ./webui/deploy/www/browse:/usr/share/nginx/browse:ro
       # ── iPXE 公开文件目录: ISO, kernel, initrd (被浏览和下载的数据) ──
       - ./webui/deploy/public:/data:ro
       # ── TOFU 自签证书（控制面启动时自动生成到 state/certs，私钥不入库；nginx 只读挂载）──
       - ./control_plane/state/certs:/etc/nginx/certs:ro
-      # ── 内部 CA 公钥（组件证书轮换 mTLS 校验用；nginx 只读挂载，仅 ca.crt 被引用）──
-      - ./control_plane/state/pki:/etc/nginx/pki:ro
+      # ── 客户端证书信任包（ca-users + ca-nodes）：只挂信任包目录 ──
+      # 不挂整个 pki 目录：ca.key 与用户私钥不得出现在面向前端的容器文件系统里。
+      - ./control_plane/state/pki/nginx:/etc/nginx/pki:ro
+      # 管理面 unix socket 所在卷（控制面与 nginx 共享；无 TCP 监听）
+      - kurrent-run:/run/kurrent
       # ── iPXE 菜单/覆盖脚本 HTTPS 同源 (与 dnsmasq TFTP 同一目录) ──
       - ./tftp:/tftp:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  # 管理面 unix socket 的载体：只有控制面与 nginx 挂载，构成唯一写入边界。
+  kurrent-run:

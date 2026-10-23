@@ -15,7 +15,7 @@
 | 内核 | 宿主 `nvmet` / `nvmet-tcp` 模块 | 数据面 target（NVMe/TCP TLS 1.3，单口 4421） |
 | 容器 | 本组件（`kurrent-nvmet-host` 容器） | configfs 操作：subsystem/namespace/数据面端口/hosts(`dhchap_key`)；PSK 注入内核全局 `.nvme` keyring；启动清理历史明文口 |
 | 存储节点 | Agent（4840） | 盘文件管理（克隆/扫描）、后端调度、凭据推送转调本服务 |
-| 控制面 | control-plane（4839） | 凭据库（按 Worker）、/boot-vars 注入（含 TLS PSK/端口）、绑定关系权威 |
+| 控制面 | control-plane（unix socket，经 nginx 443 `/api/cp` 对外） | 凭据库（按 Worker）、/boot-vars 注入（含 TLS PSK/端口）、绑定关系权威 |
 
 ## 部署步骤
 
@@ -78,7 +78,7 @@ curl -sk --cert ../../control_plane/state/pki/components/nvmet-<agent_id>/client
 
 | 旧变量 | 现来源 |
 |---|---|
-| `KURRENT_AGENT_ID` | 声明 `metadata.name`（join 自动生成 12 位 hex，勿手工输入） |
+| `KURRENT_AGENT_ID` | 声明 `metadata.name`（bootstrap token 绑定的节点身份，join 写入） |
 | `KURRENT_COMPONENT` | 代码常量（`nvmet-host`，pki_client 调用点；CSR CN 前缀 `nvmet`） |
 | `KURRENT_PKI_DIR` | compose 挂载（宿主 `${KURRENT_NVMET_PKI_HOST}` → `/etc/kurrent/pki`） |
 | `KURRENT_CP_ENROLL_URL` | 声明 `spec.controlPlane.url` |
@@ -92,7 +92,7 @@ curl -sk --cert ../../control_plane/state/pki/components/nvmet-<agent_id>/client
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/healthz` | 探活（TLS 层要求客户端证书，链到内部 CA） |
+| `GET` | `/healthz` | 探活（TLS 层要求客户端证书，链到 nodes CA） |
 | `GET` | `/capabilities` | 后端能力（backend=nvmet、cd=false、`port` = 数据面端口含 `port_id`/`trsvcid`/`tsas`/`ready`；数据面关闭时为 `null`） |
 | `POST` | `/port` | 幂等确保数据面端口（NVMe/TCP TLS 1.3，无参数） |
 | `GET` | `/subsystems` | 子系统清单（含 namespaces/hosts） |
@@ -159,8 +159,8 @@ nvmet file backend 的逻辑块大小跟随底层 FS 块（典型 4096 B，对 f
 
 ## 安全边界
 
-- 本服务监听宿主网络栈 4841：mTLS（uvicorn `ssl_cert_reqs=2` + `ssl_ca_certs` 内部 CA）强制客户端证书且校验链；
-  身份边界 = 内部 CA 签发范围（签发受控于 bootstrap token 一次性引导 + CSR CN 校验 + 组件登记）
+- 本服务监听宿主网络栈 4841：mTLS（uvicorn `ssl_cert_reqs=2` + `ssl_ca_certs=ca-nodes.crt`）强制客户端证书且校验链；
+  身份边界 = nodes CA 签发范围（签发受控于绑定 agent_id 的派生 token + CSR CN 校验 + 组件登记）
 - 容器 `security_opt`：`apparmor:unconfined`（Ubuntu docker-default profile 拒 configfs 写入）、
   `seccomp=unconfined` + `systempaths=unconfined`（写内核 `.nvme` keyring 所需，见「传输加密」节）——
   三条都是**为完成既定职责**而放行的窄面豁免，生产建议改自定义 profile 只放行 configfs 与 `add_key`/`keyctl`

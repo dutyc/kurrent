@@ -12,7 +12,7 @@ The system is split along one clean line: the **control plane** handles identity
 
 The brain. A containerized node running:
 
-- the **Control Plane HTTP service** (container `:8080`, host `127.0.0.1:4839` only) — device ledger & pool, device↔Worker binding, worker lifecycle, storage scheduling (system disk create / delete), boot-variable projection, audit log
+- the **Control Plane HTTP service** (in-container unix socket `/run/kurrent/cp.sock`, reached by nginx only; no TCP listener) — device ledger & pool, device↔Worker binding, worker lifecycle, storage scheduling (system disk create / delete), boot-variable projection, audit log
 - **nginx** (`:443`, the only external entry) — WebUI SPA, management API (`/api/cp/`), boot-chain bare paths (`/devices/…`, `/boot-vars`), iPXE assets (`/file/`) and menus (`/tftp/`); `:80` only redirects with 301
 - **dnsmasq** (host network) — DHCP / TFTP and boot-file distribution
 - the **Web UI** — one client of the REST API, not a separate system; it authenticates with a session cookie
@@ -69,19 +69,27 @@ The binding relationship is authoritative on the **device side** (`bound_worker_
 
 Two orthogonal layers of trust.
 
-**① Management-plane authentication** — three credential types tried in order, all producing one `Identity{name, groups, method}`:
+**① Management-plane authentication** — three credential types tried in order, all producing one `Identity{name, groups, method, class}`:
 
-- mTLS client certificate (nginx validates the chain and passes the DN through; CN = user, O = group)
-- management token (Bearer; only a sha256 digest is stored, valid within its TTL)
-- session cookie (HttpOnly signed session, 7-day sliding renewal, browser sign-in state)
+- mTLS client certificate (nginx validates the chain and passes DN / issuer / serial / fingerprint / class through; CN = user, groups resolved from `state/users.yml`; `POST /pki/users/{cn}` issues one for a registered user; users-CA revocation goes through a CRL (per serial is supported) and is rejected on the next handshake; the CRL is re-signed every 12 hours and reloaded by an in-container nginx watcher)
+- management token (Bearer; only a sha256 digest is stored; scopes `admin` / `readonly` / `enroll`; TTL defaults to 24 hours, max 30 days; `last_used_at` is written back with throttling)
+- server-side session (the `__Host-kurrent_session` cookie carries only `{jti, exp, epoch}`; identity and groups come from `state/sessions.yml`; 12-hour TTL, deleting the registry entry invalidates the next request, with per-session and sign-out-all revocation)
 
-Authorization: read requests only need to be authenticated; write requests require the `admin` group. Credentials are self-bootstrapped: at startup the control plane signs an admin certificate with the internal CA and renders `admin.conf`.
+Credentials are split into three independent roots: `users` (human certificates), `nodes` (agent / nvmet-host), and `control` (control-plane clients). nginx trusts only the users + nodes public bundle and derives the principal class (`human` / `component`) from the certificate issuer; every control-plane route declares its accepted classes and **denies by default** — component certificates cannot reach the management plane, and human certificates cannot call `/enroll/renew`. Bootstrap tokens are bound to a node identity (`agent_id`) and are **single-use by default** (60-minute TTL; bulk onboarding opts into `max_uses` explicitly); the old "any node can use it" generic token no longer exists.
 
-**Trust premise**: the `X-Client-Cert-DN` header is only trusted from nginx, so **443 is the only external entry and the control-plane port binds `127.0.0.1` only** — remove either one and an administrator identity can be forged.
+Component certificates are revocable immediately: they are registered by serial at issuance (enroll / renew), and `DELETE /pki/components/{agent_id}` marks the revocation, writes the nodes CRL (the second table in `clients.crl`), reloads nginx, and deletes that node's bootstrap tokens; `/enroll/renew` returns 403 for a revoked serial, closing the window where a certificate could be re-issued before the CRL reload.
+
+Authorization: read requests only need to be authenticated; write requests require the `admin` group. A token with the `enroll` scope may only issue bootstrap tokens, never admin tokens. Self-bootstrap: at startup the control plane creates the three CAs, signs the admin certificate with the users CA (CN=admin, no O) and renders `admin.conf`, and records the admin group mapping in `users.yml`.
+
+**Audit and alarms**: every request appends one `state/audit.jsonl` event (principal class / principal / issuer / serial / fingerprint / route / decision / reason / request_id) with no secrets or token plaintext; if the write fails the request returns `503` (fail-closed). Eight detections are written as `event=alarm`: boot credential `injected && !verified`, component/control on a management route, unknown issuer / CRL hit (CRL rejection happens at the nginx handshake layer; the audit
+records issuer evidence that reaches the app), an authentication-failure burst, bootstrap identity/CN mismatch, user/admin certificate issuance / CRL update / CA generation, `users.yml` change, and audit write failure.
+
+**Trust premise**: `X-Client-Cert-*` and `X-Client-Class` headers are only trusted from nginx (cleared by default on every other proxied location), so **443 is the only external entry and the control plane listens on a unix socket only** — remove either one and an administrator identity can be forged.
 
 **② Device identity trust root** — device authentication along the boot chain:
 
 - the private key is generated and persisted inside device NVRAM (ECDSA P-256); fingerprint reporting is unauthenticated but only feeds the pool and grants no privilege
+- key rotation (`POST /devices/rotate`) is signed by the old key over `rotate‖mac‖new_pubkey‖nonce`; the old key is invalidated immediately on success, and `report` / `challenge` / `boot-vars` are rate-limited per source IP (`boot-vars` is the most expensive verification path)
 - challenge-response signing (one-shot nonce, bound to the MAC) proves the machine is what it claims to be
 - TOFU single anchor: the self-signed server certificate's fingerprint is pinned in device NVRAM on the first handshake; any later validation failure is fatal
 - **binding is authentication**: `/boot-vars` validates that the requesting MAC belongs to the matched Worker's bound device, preventing another device from stealing a Worker's boot identity

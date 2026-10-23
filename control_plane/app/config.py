@@ -31,10 +31,12 @@ DEFAULT_OPERATIONS_FILE = "/app/state/operations.jsonl"
 DEFAULT_SETTINGS_FILE = "/app/state/settings.json"
 DEFAULT_DNSMASQ_HOSTS_FILE = "/app/dnsmasq/dhcp-hosts.conf"
 DEFAULT_DNSMASQ_CONF = "/app/dnsmasq/dnsmasq.conf"      # 由控制面启动时按 spec.networking 生成（yml 权威）
-DEFAULT_DNSMASQ_CONTAINER = "kurrent-dnsmasq"           # compose 服务名（docker.sock reload 用）
 DEFAULT_CERT_DIR = "/app/state/certs"                   # TOFU 自签服务器证书（nginx 只读挂载）
 DEFAULT_CREDENTIALS_FILE = "/app/state/credentials.yml"
-DEFAULT_PKI_DIR = "/app/state/pki"                      # 内部 CA + 组件证书（nginx 只读挂载 ca.crt）
+DEFAULT_PKI_DIR = "/app/state/pki"                      # 三分根 PKI（nginx 只读挂载 nginx/ 信任包）
+DEFAULT_USERS_FILE = "/app/state/users.yml"             # 管理用户目录：CN → 组（证书只证明 CN）
+DEFAULT_SESSIONS_FILE = "/app/state/sessions.yml"       # 会话登记：sha256(jti) → 身份/组/到期（删即失效）
+DEFAULT_AUDIT_FILE = "/app/state/audit.jsonl"           # 认证/授权审计（与操作审计分离）
 DEFAULT_CONTROL_PLANE_COMPONENT = "control-plane"       # 控制面自身 client cert 别名（CN=control-plane）
 DEFAULT_MASTERS_FILE = "/app/state/masters.yml"
 DEFAULT_CREDENTIAL_PUSH_FILE = "/app/state/credential-push.yml"  # 凭据推送状态台账（对账/投影用）
@@ -51,12 +53,32 @@ REGISTRATION_WINDOW_MAX_DEVICES_UPPER = 1000
 CHALLENGE_NONCE_TTL_SECONDS = 60
 # nginx mTLS 校验通过后透传的客户端证书 DN 头（组件 renew + 管理面身份）
 CLIENT_CERT_DN_HEADER = "x-client-cert-dn"
-# ── 管理面身份常量：证书 CN=用户名、O=组 ──
+# 同理透传的序列号头（renew 拒绝已吊销证书的应用侧兜底，早于 CRL reload 生效）
+CLIENT_CERT_SERIAL_HEADER = "x-client-cert-serial"
+# issuer → 主体类（仅 mTLS SUCCESS 时由 nginx 注入；见 nginx.conf 的 $valid_client_class）
+CLIENT_CLASS_HEADER = "x-client-class"
+# ── 管理面身份常量：证书 CN=用户名（组来自 state/users.yml）；admin 为自举身份 ──
 ADMIN_CN = "admin"
 ADMIN_GROUP = "admin"
 VIEWER_GROUP = "viewer"
 ADMIN_CERT_DAYS = 365                     # 管理证书 TTL（天）
-SESSION_TTL_DAYS = 7                      # 会话 Cookie TTL（天，滑动续期）
+USER_CERT_DAYS_MAX = 3650                 # 人类证书 TTL 上限（天；即时失效靠 CRL，不靠短 TTL）
+SESSION_TTL_HOURS = 12                    # 会话 TTL（小时；剩余不足一半才滑动续期）
+SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
+# 自动化 token scope：admin=全部 / readonly=只读 / enroll=签发节点引导 token
+TOKEN_SCOPES = ("admin", "readonly", "enroll")
+TOKEN_TTL_HOURS_DEFAULT = 24
+TOKEN_TTL_HOURS_MAX = 720                 # 30 天上限
+# CRL 定期重签周期（小时）：必须小于 CRL next_update（7 天），否则长跑后 nginx 会因
+# CRL 过期拒绝全部客户端证书。重签后由 nginx reload 生效。
+CRL_REFRESH_HOURS = 12
+# bootstrap token：短 TTL（分钟）+ 一次性（max_uses 默认 1；旧条目无字段 = 不限）
+BOOTSTRAP_TOKEN_TTL_MINUTES_DEFAULT = 60
+BOOTSTRAP_TOKEN_TTL_MINUTES_MAX = 1440    # 24 小时上限
+BOOTSTRAP_TOKEN_MAX_USES_UPPER = 100
+# DHHC-1 定期轮换周期（天）：0 = 关闭。轮换由凭据对账线程执行：先推送到全部目标
+# Agent，全部送达才在台账切换；部分失败则回推旧密钥，下个周期重试。
+CREDENTIAL_ROTATION_DAYS = 90
 
 
 class NetworkingSpec(BaseModel):
@@ -77,7 +99,7 @@ class PkiSpec(BaseModel):
     """spec.pki：组件 PKI 策略（内部 CA + bootstrap token 引导 + 证书轮换）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    bootstrap_token_ttl_days: int = Field(7, alias="bootstrapTokenTtlDays", ge=1)
+    bootstrap_token_ttl_minutes: int = Field(60, alias="bootstrapTokenTtlMinutes", ge=1, le=1440)
     component_cert_days: int = Field(90, alias="componentCertDays", ge=1)
     renew_threshold: float = Field(0.2, alias="renewThreshold", gt=0, le=1)
 
@@ -99,15 +121,8 @@ class BootSpec(BaseModel):
     auto_boot_timeout_sec: int = Field(1, alias="autoBootTimeoutSec", ge=0)
 
 
-class DnsmasqSpec(BaseModel):
-    """spec.dnsmasq：dnsmasq 集成（hosts 变更后是否自动 reload）。"""
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    reload: bool = False
-
-
 class Spec(BaseModel):
-    """spec：networking 必填；pki/serverCert/boot/agentTimeoutSec/dnsmasq 带默认值。
+    """spec：networking 必填；pki/serverCert/boot/agentTimeoutSec 带默认值。
 
     NQN 命名域不在本文件声明：盘 NQN 与 Host NQN 的 base 均来自节点侧
     spec.agent.nqnBase（节点权威，enroll 经 capabilities.base_nqn 上报）。
@@ -119,7 +134,6 @@ class Spec(BaseModel):
     server_cert: ServerCertSpec = Field(default_factory=ServerCertSpec, alias="serverCert")
     boot: BootSpec = Field(default_factory=BootSpec)
     agent_timeout_sec: float = Field(10, alias="agentTimeoutSec", gt=0)
-    dnsmasq: DnsmasqSpec = Field(default_factory=DnsmasqSpec)
 
 
 class MetadataSpec(BaseModel):
@@ -170,17 +184,18 @@ _PATH_FIELDS = {
     "credentials_file": "DEFAULT_CREDENTIALS_FILE",
     "credential_push_file": "DEFAULT_CREDENTIAL_PUSH_FILE",
     "pki_dir": "DEFAULT_PKI_DIR",
+    "users_file": "DEFAULT_USERS_FILE",
+    "sessions_file": "DEFAULT_SESSIONS_FILE",
+    "audit_file": "DEFAULT_AUDIT_FILE",
     "masters_file": "DEFAULT_MASTERS_FILE",
     "admin_conf": "DEFAULT_ADMIN_CONF",
     "session_key_file": "DEFAULT_SESSION_KEY_FILE",
 }
 _STR_FIELDS = {
-    "dnsmasq_container": "DEFAULT_DNSMASQ_CONTAINER",
     "control_plane_component": "DEFAULT_CONTROL_PLANE_COMPONENT",
     "admin_cn": "ADMIN_CN",
 }
 _SPEC_FIELDS = {
-    "dnsmasq_reload": ("dnsmasq", "reload"),
     "default_arch": ("boot", "default_arch"),
     "boot_menu_timeout": ("boot", "menu_timeout_ms"),
     "auto_boot_timeout": ("boot", "auto_boot_timeout_sec"),
@@ -209,9 +224,16 @@ class Settings:
         if name == "insecure":
             # 开发模式开关（唯一放行口；生产严禁）：KURRENT_CP_INSECURE=1 显式开启
             return os.getenv("KURRENT_CP_INSECURE", "") == "1"
+        if name == "openapi_enabled":
+            # 交互式 API 文档默认关闭（避免未鉴权枚举接口）；开发环境显式开启
+            return os.getenv("KURRENT_CP_OPENAPI", "") == "1"
         if name == "credential_reconcile_interval":
             # 凭据对账周期（秒）：控制面→Agent 推送的幂等重放间隔；0 = 禁用（测试环境）
             return float(os.getenv("KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL", "60"))
+        if name == "credential_rotation_days":
+            # DHHC-1 定期轮换周期（天）；<=0 关闭（测试环境）
+            return float(os.getenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS",
+                                   str(CREDENTIAL_ROTATION_DAYS)))
         raise AttributeError(name)
 
 

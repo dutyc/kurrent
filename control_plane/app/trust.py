@@ -208,39 +208,61 @@ def verify_device_signature(mac: str, nonce: str, sig_b64: str, pubkey_hex: str)
         return False
 
 
+def verify_rotate_signature(mac: str, nonce: str, new_pubkey_hex: str,
+                            sig_b64: str, old_pubkey_hex: str) -> bool:
+    """设备密钥轮换验签：签名数据 = rotate||mac||new_pubkey||nonce（无分隔拼接，
+    与引导验签同一约定），签名者是旧密钥。任何异常 → False。"""
+    try:
+        pub = EllipticCurvePublicKey.from_encoded_point(
+            SECP256R1(), bytes.fromhex(old_pubkey_hex))
+        data = f"rotate{mac}{new_pubkey_hex}{nonce}".encode("utf-8")
+        pub.verify(base64.b64decode(sig_b64), data, ec.ECDSA(hashes.SHA256()))
+        return True
+    except Exception:
+        return False
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def device_auth_blocked(
+def verify_boot_identity(
     mac: str | None,
     nonce: str | None,
     sig: str | None,
     worker_id: str,
-) -> bool:
-    """注入四条件第 4 条：设备身份签名验证（挑战-响应，trust-root-blueprint §6.1）。
-    True = 拒绝下发。无 mac 无法验证身份（仅 hostname 的识别链），维持现状放行。
-    无 key_hash：强制开启 → 拒绝（不降级，已绑定也不放行）；过渡期 → 放行现状防冒领。
-    带 nonce+sig：重放/验签失败 → 拒绝（过渡期同样拒绝，伪造签名不放行）。"""
+) -> tuple[bool, bool]:
+    """设备身份签名验证（挑战-响应，trust-root-blueprint §6.1）。
+
+    返回 (allowed, verified)：
+    - allowed=False：拒绝下发引导变量。强制开启时无 mac / 无 key_hash / 无签名一律拒绝；
+      带 nonce+sig 但重放或验签失败，任何模式下都拒绝。
+    - verified=True：仅当 mac 在册、nonce 一次性且签名有效。只有该状态允许注入 NVMe-oF
+      凭据（nbft_secret / nbft_tls_psk）；过渡期允许下发非凭据变量，但绝不注入凭据。
+    无 mac 无法验证身份（仅 hostname 的识别链）：强制开启 → 拒绝，过渡期 → 允许但未验签。
+    """
     normalized = normalize_boot_mac(mac) if mac else None
     if not normalized:
-        return False
+        if enforcement_enabled():
+            record("boot_vars.credential", "rejected", mac="", worker_id=worker_id, reason="missing_mac")
+            return False, False
+        return True, False
     device = device_for_boot(normalized)
     key_hash = device.get("key_hash") if device else None
     if not key_hash:
         if enforcement_enabled():
             record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="no_key")
-            return True
-        return False
+            return False, False
+        return True, False
     if not nonce or not sig:
         if enforcement_enabled():
             record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="missing_sig")
-            return True
-        return False
+            return False, False
+        return True, False
     if not consume_nonce(normalized, nonce):
         record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="nonce_invalid")
-        return True
+        return False, False
     if not verify_device_signature(normalized, nonce, sig, key_hash):
         record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="verify_failed")
-        return True
-    return False
+        return False, False
+    return True, True

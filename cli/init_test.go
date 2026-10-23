@@ -192,7 +192,7 @@ func TestPrintInitDefaults(t *testing.T) {
 		t.Errorf("print init-defaults 输出与 kurrent.yaml.example 不同源（改注释先改 example）")
 	}
 	for _, want := range []string{
-		"kind: ControlPlaneConfiguration", "interface:", "dhcpRange:", "bootstrapTokenTtlDays:",
+		"kind: ControlPlaneConfiguration", "interface:", "dhcpRange:", "bootstrapTokenTtlMinutes:",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("print init-defaults 缺 %q", want)

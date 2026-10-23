@@ -1,8 +1,9 @@
 """dnsmasq.conf 派生生成：spec.networking 是权威，本模块渲染完整 dnsmasq.conf（幂等写）。
 
 生成时机：控制面启动时（main.py 钩子）。yml 变更 → 重启控制面即覆盖 conf；
-dnsmasq 容器挂载本文件（docker-compose.yml ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf），
-reload 语义由 spec.dnsmasq.reload 决定（docker.sock 重启容器）。
+dnsmasq 容器挂载本文件（docker-compose.yml ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf）。
+dnsmasq.conf 只在进程启动时读取，改 networking 需重启 dnsmasq 容器；而 hosts 台账
+（dhcp-hostsfile）由 dnsmasq 自己监听文件变化，控制面不需要 reload。
 """
 
 import ipaddress

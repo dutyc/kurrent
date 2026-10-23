@@ -23,11 +23,10 @@ It does **not** generate iPXE menus, serve static files, or directly operate `tg
 
 External entry point (the only one): `https://<host>/api/cp` (nginx 443; port 80 only redirects with 301).
 
-Local debugging (loopback mapping, on the control-plane host):
-
-```text
-http://localhost:4839
-```
+The management plane listens on no TCP port at all: nginx forwards over a unix socket
+(`/run/kurrent/cp.sock`) on a shared volume, and the container health check uses the same
+socket. For local debugging, go through the 443 entry point or enter the control-plane
+container to reach that socket.
 
 > The entry point uses a TOFU self-signed certificate (`control_plane/state/certs/server.crt`,
 > generated automatically at startup), so curl needs `-k`, or
@@ -45,22 +44,54 @@ only `TZ`; add any extra switch you need (for example the development-mode
 
 ### 1.3 Authentication (authenticator chain)
 
-External access goes through the nginx 443 entry point (the only external entry);
-control-plane port 4839 is bound to localhost only. Except `GET /healthz` and the
-iPXE boot-chain endpoints (`/boot-vars`, `/devices/report`, `/devices/challenge`),
-management endpoints require authentication. Three credential types are tried
-in order (serial short-circuit: first success wins; an invalid credential returns `401` without falling through):
+External access goes through the nginx 443 entry point (the only external entry); the
+control-plane management plane listens on a unix socket only and exposes no TCP port.
+Except `GET /healthz` and the iPXE boot-chain endpoints (`/boot-vars`, `/devices/report`,
+`/devices/challenge`), management endpoints require authentication. Three credential types
+are tried in order (serial short-circuit: first success wins; an invalid credential returns
+`401` without falling through):
 
 | Credential | Carrier | Notes |
 |---|---|---|
-| mTLS client certificate | 443 mutual TLS | admin certificate issued during setup (CN=username, O=group); the CLI auto-discovers `control_plane/state/admin.conf` (a binary outside the repo can install a self-contained snapshot into `~/.kurrent` with `kurrent credentials install`; it is the last link in the discovery chain). nginx validates the chain (internal CA) and passes the DN through; the control plane maps CN/O to identity |
-| Management token | `Authorization: Bearer <token>` | issued by `kurrent token create --usage admin` (only a sha256 digest is stored, TTL enforced); for scripts and WebUI sign-in |
-| Session cookie | `kurrent_session` | obtained via `POST /session` with a certificate or a management token (HttpOnly signed session, 7-day sliding TTL); browser sign-in state |
+| mTLS client certificate | 443 mutual TLS | admin certificate issued during setup (CN=admin, no O); the CLI auto-discovers `control_plane/state/admin.conf` (a binary outside the repo can install a self-contained snapshot into `~/.kurrent` with `kurrent credentials install`; it is the last link in the discovery chain). nginx validates the chain (users CA + nodes CA bundle) and, only on `SUCCESS`, injects DN / issuer / serial / fingerprint / class; the control plane resolves groups from `state/users.yml` by CN. Identity headers are empty by default on every other proxied location |
+| Management token | `Authorization: Bearer <token>` | issued by `kurrent token create --usage admin` (only a sha256 digest is stored); scopes are `admin` / `readonly` / `enroll`; TTL defaults to 24 hours, max 30 days; for scripts and WebUI sign-in |
+| Session cookie | `__Host-kurrent_session` | obtained via `POST /session` with a certificate or a management token; the cookie carries only `{jti, exp, epoch}`, and identity/groups come from the server-side `state/sessions.yml` registry (12-hour TTL, sliding renewal only in the second half); deleting the registry entry invalidates the next request |
 
-Authorization (minimal RBAC): read requests (GET) only need to be **authenticated**
-(no group check); write requests (POST/PUT/PATCH/DELETE) require the admin group,
-otherwise `403`. Component channels are unchanged: `/enroll/renew` is enforced by
-nginx (component certificates); boot-chain endpoints keep their own validation.
+**Principal classes**: `human` (client certs issued by the users CA), `component` (agent /
+nvmet-host certs issued by the nodes CA), `automation` (Bearer management token), and
+`anonymous` (no credential). nginx derives human / component from the certificate issuer
+and forwards `X-Client-Class`; each control-plane route declares its accepted classes and
+**denies by default** (cross-class requests get `403`: component certs cannot reach the
+management plane, human certs cannot call `/enroll/renew`).
+
+Authorization (minimal RBAC): read requests (GET) only need to be **authenticated**; write
+requests (POST/PUT/PATCH/DELETE) require the admin group, otherwise `403`. The only
+exception is an automation token with the `enroll` scope: it may call `POST /pki/tokens`
+to issue bootstrap tokens, and may not issue admin tokens. Reads are denied too (the scope
+means “issue only”, so it cannot enumerate devices, workers, credentials, or sessions),
+and the token cannot be exchanged for a browser session. Cookie-authenticated writes
+also require `Origin` to match `Host`. Boot-chain endpoints (`/boot-vars`,
+`/devices/report`, `/devices/challenge`) are `anonymous`; `POST /enroll` accepts
+`anonymous` (Bearer bootstrap token) and `automation`; `POST /enroll/renew` accepts
+`component` only.
+
+**Audit**: every request appends one `state/audit.jsonl` event (`event` /
+`principal_class` / `principal` / `issuer` / `serial` / `fingerprint_sha256` / `route` /
+`decision` / `reason` / `request_id` / `client_ip`), and the response carries
+`X-Request-Id`; secrets, token plaintext, private keys and PSKs are never recorded. If the
+audit write fails, the request fails with `503` (fail-closed). Eight alarms are written as
+`event=alarm` entries: boot credential `injected && !verified`, component/control on a
+management route, unknown issuer / CRL hit (nginx rejects a CRL hit at the handshake
+layer; the app-side alarm covers unknown-issuer evidence that reaches it), an
+authentication-failure burst from one source, bootstrap identity/CSR CN mismatch, admin certificate issuance / CRL update / CA
+generation, `users.yml` change, and audit write failure.
+
+**Alarm webhook (optional)**: with `KURRENT_CP_ALARM_WEBHOOK=<url>` set, every
+`event=alarm` audit entry is POSTed as JSON to that URL (same fields as the audit entry plus
+`alarm` / `severity` / `detail`; no keys or plaintext). Delivery uses a background thread and
+a bounded queue (200 entries), retries twice (1s / 4s apart, 5s timeout per attempt), and
+drops with an ERROR log when the queue is full — it never sits in the request path and does
+not affect the `503` fail-closed semantics. Nothing is delivered when the variable is unset.
 
 Development mode: `KURRENT_CP_INSECURE=1` allows all requests (identity
 insecure/admin); local development only, never in production — there is no
@@ -99,6 +130,14 @@ The current Control Plane state and configuration are divided as follows (contai
 | `state/credential-push.yml` | Credential push-state ledger (per-Agent delivery results, for reconciliation and projection, see 7.7) |
 | `state/masters.yml` | Master tag ledger (os / os_version annotations, see 6.4) |
 | `state/settings.json` | Runtime settings (registration window, enforcement switch) |
+| `state/users.yml` | Management-plane user→group map (CN → groups; admin entry bootstrapped on first start, then groups resolve by cert CN) |
+| `state/sessions.yml` | Server-side session registry (key = `sha256(jti)`; deleting an entry invalidates it, `epoch` invalidates all) |
+| `state/audit.jsonl` | Authentication/authorization/credential audit and alarms (see 1.3; separate from `operations.jsonl`) |
+| `state/pki/ca/{users,nodes,control}/` | Three separate root CAs (users=humans, nodes=node components, control=control-plane clients) |
+| `state/pki/users/issued.yml` | users-domain certificate registry (by serial; includes revocation time and reason) |
+| `state/pki/components/issued.yml` | nodes-domain component certificate registry (agent / nvmet-host, written at issuance; includes revocation time and reason) |
+| `state/pki/nginx/ca-bundle.pem` | nginx trust bundle (users + nodes public certs only; no private keys) |
+| `state/pki/nginx/clients.crl` | nginx client-certificate CRL (users + nodes tables concatenated) |
 | `state/operations.jsonl` | Control Plane operation audit trail (with actor) |
 | `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` bindings (**derived view**; the device ledger is authoritative) |
 
@@ -121,16 +160,21 @@ Notes:
 |---|---|---|
 | `GET` | `/healthz` | Health check |
 | `GET` | `/whoami` | Current request identity (authenticator chain result, see 1.3) |
-| `POST` | `/session` | Exchange credentials for a session cookie (sign-in, see 1.3) |
-| `DELETE` | `/session` | Sign out (clear the session cookie, see 1.3) |
+| `POST` | `/session` | Exchange credentials for a session cookie (registry-backed sign-in) |
+| `DELETE` | `/session` | Sign out (delete the session registry entry and clear the cookie) |
+| `GET` | `/sessions` | List active sessions (admin, see 6.7) |
+| `DELETE` | `/sessions/{session_id}` | Revoke one session (admin, see 6.7) |
+| `DELETE` | `/sessions` | Sign out all: clear the registry and bump epoch (admin, see 6.7) |
 | `GET` | `/boot-vars` | Dynamic iPXE boot variable injection, no auth required |
 | `GET` | `/devices/report` | iPXE device info reporting (no auth, 11 fields, see 16.6) |
 | `GET` | `/devices/challenge` | One-time nonce issuance (no auth, challenge-response, see 5.2) |
+| `POST` | `/devices/rotate` | Device key rotation (no auth, signed by the old key, see 5.3) |
 | `GET` | `/devices` | Device pool list (state filter, see 16.1) |
 | `GET` | `/devices/{mac}` | Single device detail (see 16.2) |
 | `POST` | `/devices` | Manually register a device into the pool (see 16.3) |
 | `POST` | `/devices/import` | Bulk import device manifest (see 16.4) |
 | `DELETE` | `/devices/{mac}` | Revoke a device (see 16.5) |
+| `DELETE` | `/devices/revoked` | Purge all revoked devices (optional `dry_run` preview, see 16.5.1) |
 | `GET` | `/settings/registration-window` | Get registration window status (see 5.1) |
 | `POST` | `/settings/registration-window` | Open the registration window (TTL hard cap 1-60 min; optional admission quota `max_devices` 1-1000, see 5.1) |
 | `DELETE` | `/settings/registration-window` | Close the registration window early (see 5.1) |
@@ -140,9 +184,14 @@ Notes:
 | `POST` | `/agents` | Register a new Agent (writes agents.yml; 409 if id exists) |
 | `POST` | `/agents/probe` | Probe an Agent and auto-derive registration parameters (preview, no file writes) |
 | `PUT` | `/agents/{agent_id}` | Update an Agent’s configuration (id cannot be changed) |
-| `POST` | `/pki/tokens` | Issue a cluster-wide bootstrap token (not node-bound, reusable within TTL, see 6.5) |
-| `GET` | `/pki/tokens` | List bootstrap token ledger entries (see 6.5) |
+| `POST` | `/pki/tokens` | Issue a node-bound bootstrap token (default single-use, 60 minutes) or a management token (scope/TTL, see 6.5) |
+| `GET` | `/pki/tokens` | List the unexpired token ledger (see 6.5) |
 | `DELETE` | `/pki/tokens/{token_id}` | Revoke a token (deletion takes effect immediately, see 6.5) |
+| `POST` | `/pki/users/{cn}` | Issue a certificate for a registered user (private key only in this response, see 6.7) |
+| `GET` | `/pki/users` | List certificates issued by the users CA (revoked/expired included, see 6.7) |
+| `DELETE` | `/pki/users/{cn}` | Revoke certificates (optional `serial` for a single one): re-sign CRL + reload nginx + kick sessions (see 6.7) |
+| `GET` | `/pki/components` | List nodes-domain component certificates (revoked/expired included, see 6.7) |
+| `DELETE` | `/pki/components/{agent_id}` | Revoke component certificates (optional `serial`): write the nodes CRL + reload nginx + delete bootstrap tokens (see 6.7) |
 | `DELETE` | `/agents/{agent_id}` | Remove an Agent’s registry entry (incl. master-tag cleanup, see 6.6) |
 | `GET` | `/agents/{agent_id}/luns` | List iSCSI targets/LUNs on a given Agent |
 | `GET` | `/masters` | Aggregate master image inventory from all storage nodes (merged with registered tags, for clone selection) |
@@ -194,9 +243,11 @@ curl -s "$BASE_URL/healthz"
 
 ### Description
 
-Provides per-worker boot variables for iPXE boot scripts. This endpoint does not require authentication and only exposes variables needed for booting within a controlled network.
+Provides per-worker boot variables for iPXE boot scripts. This endpoint does not require authentication and only exposes variables needed for booting within a controlled network. NVMe-oF credentials (`nbft_secret` / `nbft_tls_psk`) are **injected only after the device identity is verified by signature** (`mac` + one-time `nonce` + a valid signature, see 5.1).
 
 > **Note**: This endpoint is **read-only** (a projection of boot variables, no write side effects). Registration-window enrollment (new MACs entering the device pool with a public key) has been consolidated into `GET /devices/report` (see 16.6), which `boot.ipxe.cfg` chains **before** `/boot-vars`.
+
+**Rate limit**: sliding window per source IP (240 requests/minute by default; override with `KURRENT_CP_RATE_LIMIT_BOOT_VARS`, `<=0` disables). Over the limit returns `429` with `Retry-After` and emits a `boot_rate_limited` alarm. Signature verification is the most expensive work here; the limit only suppresses scanning and is not an identity boundary.
 
 The Control Plane identifies the device and projects boot variables in the following order:
 
@@ -218,14 +269,14 @@ The response of `/boot-vars` is a projection of the inventory:
 | `base_iqn` | The IQN of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk) with the last colon-and-following part stripped — the disk NQN is the authoritative identifier, the IQN is derived from it. **Not returned** if the Worker has no system disk (iPXE falls back to the static default in `boot.ipxe.cfg`). |
 | `storager_ip` | The `storager_ip` of the Agent that hosts the default boot disk (same disk selection rule as above) — the data-plane address shared by NVMe-oF boot and the iSCSI installers. Not returned when there is no system disk. |
 | `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`, consumed by the installer iSCSI assembly). The root-path assembly is done on the iPXE side. **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is resolved by **querying the Agent’s `/capabilities` `backend` field in real time** (the node reports its own capability — capability is truth); if the agent is unregistered / the query fails / the value is invalid, stgt format is assumed. It is **not derived from the Agent’s `tags`** in `agents.yml` (tags are human annotations only — otherwise a drifting tag would assemble a wrong separator). **Not sent for nvmet backends** (the menu installer items are guarded by `isset ${iscsi-sep}` and skipped). Not returned when there is no system disk. |
-| `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected when the Worker is bound and has a key entry**; not returned when there is no key / the Worker is unbound / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (on nvmet backends a missing key withholds the whole `/boot-vars` payload and the menu refuses to boot) |
-| `nbft_tls_psk` | Pre-shared key for NVMe/TCP TLS: a **pure function of the authentication key** (`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex, see 7.7; no separate storage field — rotating or revoking the key rotates or revokes the PSK atomically). Returned **only when all three hold: the Worker is bound with a key, the backend is nvmet, and the Agent reports a ready data-plane port**; otherwise the whole boot-variable payload is withheld (boot refused, audited) — encryption is the default and there is no plaintext fallback. The firmware uses it for its own handshake on that port and hands it to the initramfs via the NBCT table, which reconnects with `--tls` on the same port |
+| `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected only when the Worker is bound, has a key entry, and the device identity is verified by signature**; not returned when there is no key / the Worker is unbound / the request is unverified / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (on nvmet backends a missing key withholds the whole `/boot-vars` payload and the menu refuses to boot) |
+| `nbft_tls_psk` | Pre-shared key for NVMe/TCP TLS: a **pure function of the authentication key** (`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex, see 7.7; no separate storage field — rotating or revoking the key rotates or revokes the PSK atomically). Returned **only when all four hold: the Worker is bound with a key, the device identity is verified by signature, the backend is nvmet, and the Agent reports a ready data-plane port**; otherwise the whole boot-variable payload is withheld (boot refused, audited) — encryption is the default and there is no plaintext fallback. The firmware uses it for its own handshake on that port and hands it to the initramfs via the NBCT table, which reconnects with `--tls` on the same port |
 | `nbft_tls_port` | Data-plane port (shared by the firmware and kernel boot segments; read live from the Agent’s `/capabilities.port.trsvcid` — capability is truth, same live-query rule as `iscsi_sep`/`backend`); returned under the same conditions as `nbft_tls_psk`. The menu appends `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` to the sanboot URI |
 | `hostnqn` | The Worker’s initiator Host NQN (disk NQN prefix + `:host.<worker_id>`, in the same namespace as the disk NQN and matching the host entry registered in nvmet-host); **injected when the default disk carries an NQN**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch `0005` supports the `hostnqn` setting) |
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — 2026-08-30 MAIN MENU dynamicization: the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
 | `os_version` | Version annotation of the default boot disk (disk record `os_version`; `''` = no version) — omitted when empty; the `os-label` assembly in menu.ipxe adapts (shows `os version` when present). Not returned when the Worker has no system disk. |
 | `menu_default` | Derived chain: `workers.yml` `default_disk` (set separately after disk creation; os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). 2026-08-30 dynamicization: since the menu OS item has converged to the single generic item `boot-os`, any OS-semantics default (`default_disk`, or legacy OS names in `boot.menu_default`) is normalized to `boot-os`; non-OS navigation values (`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`) are returned as-is |
-| `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutSec` (default 1, consumed as milliseconds). Units are milliseconds. |
+| `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutSec` (default 1). Units are milliseconds. |
 
 Worker lookup rules (**binding authority first**):
 
@@ -279,7 +330,7 @@ The entire enrollment process is logged as operations (`device.register` / `devi
 
 ### Anti-Impersonation (Binding as Authentication)
 
-When a request carries a `mac`, the Control Plane verifies the Worker that the device is **bound to** (`bound_worker_id`, the binding authority); if it does not match (device bound to another Worker / unbound / unknown), the request is **denied** — an empty script is returned and the boot vars are not leaked. Requests without a `mac` (hostname only) cannot be verified and remain allowed for compatibility. This makes the device↔Worker binding the boot-time authentication boundary: only the bound device can receive the Worker's boot configuration (e.g., `disk_nqn` / `storager_ip`).
+When a request carries a `mac`, the Control Plane verifies the Worker that the device is **bound to** (`bound_worker_id`, the binding authority); if it does not match (device bound to another Worker / unbound / unknown), the request is **denied** — an empty script is returned and the boot vars are not leaked. Requests without a `mac` (hostname only) cannot be verified: with signature enforcement on they are **rejected** (`missing_mac`); during the transition period only menu/navigation variables are served and credentials are never injected. This makes the device↔Worker binding and the device signature the boot-time authentication boundary: only the bound device, after signature verification, can receive the Worker's boot configuration and data-plane credentials (e.g., `disk_nqn` / `nbft_secret` / `nbft_tls_psk`).
 
 ### Query Parameters
 
@@ -423,7 +474,7 @@ If `storager_ip` is not configured, the Control Plane falls back to the host por
 
 The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL has a hard cap of 60 minutes (a permanent window cannot be configured at the code level) and auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
 
-The signature enforcement switch (transition-period compatibility): when off, keyless devices are served as before (anti-impersonation boundary only); when on, `/boot-vars` applies the 4th injection condition to bound devices — no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
+The signature enforcement switch (transition-period compatibility): when off, keyless devices may still receive menu variables but **credentials are never injected** (credentials require a verified signature); when on, `/boot-vars` applies the 4th injection condition to bound devices — missing `mac` → rejected as `missing_mac`; no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
 
 #### GET /settings/registration-window
 
@@ -503,7 +554,7 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 
 ### 5.2 GET /devices/challenge
 
-Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to MAC, replay protection; the nonce itself holds no secret) for the `/boot-vars` signature verification chain. Device missing or unclaimed (no `key_hash`) → **404** (cannot take the signature path).
+Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to MAC, replay protection; the nonce itself holds no secret) for the `/boot-vars` signature verification chain. Device missing, unclaimed (no `key_hash`), or revoked → **404** (cannot take the signature path, and revoked devices get no nonce).
 
 **Query parameters**:
 
@@ -518,13 +569,34 @@ Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to M
 set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-**Errors**: `400` (invalid MAC); `404` (device missing/unclaimed).
+**Errors**: `400` (invalid MAC); `404` (device missing/unclaimed); `429` (source IP above the per-minute threshold, carries `Retry-After`).
+
+**Rate limit**: like `/devices/report`, limited per source IP in a sliding window (120 requests/minute by default; override with `KURRENT_CP_RATE_LIMIT_CHALLENGE`, `<=0` disables). Exceeding it emits a `boot_rate_limited` alarm.
 
 **Challenge-response chain (with `/boot-vars`, device identity verification)**:
 
 1. `GET /devices/challenge?mac=<mac>` → obtain `${nonce}` by executing the response script
 2. iPXE signs `nonce‖mac` (UTF-8, no separator; MAC in lowercase colon form) with the device key (ECDSA P-256) → `sig` (base64(DER)); hostname does not participate in the signature (identity is guaranteed by MAC → device-ledger binding)
 3. `GET /boot-vars?mac=&hostname=&nonce=&sig=` → credentials are served only after verification passes (injection condition #4, see 5.1); verification failure → empty script (deny, audited as `boot_vars.credential`, reasons see 5.1)
+
+### 5.3 POST /devices/rotate
+
+Device key rotation (**no auth**; proves itself with a signature from the old key; does not reopen the registration window and issues no certificate). The device must be claimed (has `key_hash`) and not revoked.
+
+1. `GET /devices/challenge?mac=` to obtain a one-time nonce
+2. Sign `rotate‖mac‖new_pubkey‖nonce` with the **old private key** (UTF-8, no separator; `new_pubkey` is a 130-hex uncompressed point, `mac` is lowercase colon form)
+3. `POST /devices/rotate?mac=&pubkey=&nonce=&sig=` (`sig` = base64(DER))
+
+On success the ledger's `key_hash` becomes the new public key and `key_rotated_at` is recorded; the old key **fails immediately** on the `/boot-vars` verification path. The nonce is one-time (replay `401`); revoked device `403`; unclaimed (no `key_hash`) `409`; unknown device `404`; invalid `pubkey` `400`. Rate limit: 10/minute per source IP (override with `KURRENT_CP_RATE_LIMIT_ROTATE`).
+
+```bash
+# sig must be produced by the device's old private key: ECDSA-P256(rotate + mac + new_pubkey + nonce)
+curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>&nonce=<64-hex>&sig=<base64-DER>"
+```
+
+```json
+{ "mac": "00:0c:29:b9:8b:2d", "rotated": true }
+```
 
 ---
 
@@ -819,32 +891,49 @@ Returns `{ "agent": ..., "name": ..., "removed": true|false }` (`removed=false` 
 | `401` | Missing or invalid Token |
 | `404` | Agent not found |
 
-## 6.5 One-Command Join: bootstrap token issuance (cluster-wide) + enroll auto-registration
+## 6.5 One-Command Join: node-bound bootstrap token issuance + enroll auto-registration
 
 ### Description
 
-The control plane issues a **cluster-wide bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to 7 days). **Not bound to any node** — the node identity is self-determined (join auto-generates a random short id; the hand-written field is the declaration `metadata.remark` label) and auto-registered at enroll; the token can be **reused across multiple enrolls within its TTL** (not consumed; no usage limit). Every issuance is a new token (plaintext unrecoverable); **revocation is supported** (`DELETE /pki/tokens/{token_id}`, deletion takes effect immediately); tokens that are not revoked expire naturally — no 409 idempotency gate.
+The control plane issues a **node-bound bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to **60 minutes**, max 24 hours): issuance specifies `agent_id` (= the node declaration `metadata.name`, charset `[a-z0-9][a-z0-9.-]*`), and enroll only accepts that identity. Tokens are **single-use by default**: an allowance is reserved atomically before issuance and released if issuance fails; bulk onboarding uses `max_uses` (`--uses N`, max 100) explicitly instead of unlimited reuse. Every issuance is a new token (plaintext unrecoverable); **revocation is supported** (`DELETE /pki/tokens/{token_id}`, deletion takes effect immediately); unrevoked tokens expire naturally.
+
+The node identity is a machine identity: when `kurrent token create` omits `--agent-id`, it
+generates a random 12-hex id and bakes it into the printed join command (`--agent-id`);
+human labels go into `metadata.remark`.
 
 The `nvmet-host` component credential is **not issued here**: when an agent enrolls with `backend=nvmet`, the control plane derives one (bound to agent_id) and returns it in the enroll/renew response; the agent persists it to `storager/bootstrap/nvmet-host.token` for the nvmet-host container (capability-driven derivation — issuance does not foresee the backend).
 
 ### POST /pki/tokens
 
-The request body is optional: `{"usage": "bootstrap"}` (default, node bootstrap
-token) or `{"usage": "admin"}` (management token for the authenticator chain
-Bearer path; groups=admin).
+Request body: `{"usage": "bootstrap", "agent_id": "<node id>", "component": "agent", "max_uses": 1}`
+(bootstrap is the default; `component` is `agent` | `nvmet-host`; `max_uses` is 1-100,
+default 1), or `{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}`
+(management token for the authenticator chain Bearer path; scope is `admin` | `readonly` |
+`enroll`, default `admin`; TTL is 1-720 hours, default 24). Scopes cap authority:
+`readonly` is read-only, `enroll` may only issue bootstrap tokens (every other read or
+write endpoint and session exchange returns `403`); `readonly` / `enroll` tokens may not
+issue admin tokens.
 
 #### curl
 
 ```bash
-# Node bootstrap token (default)
+# Node bootstrap token (bound to a node identity)
 curl -s -X POST "$BASE_URL/pki/tokens" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "node-01"}'
 
 # Management token (scripts and WebUI sign-in; same identity as the admin cert)
 curl -s -X POST "$BASE_URL/pki/tokens" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"usage": "admin"}'
+
+# Read-only management token (24 hours)
+curl -s -X POST "$BASE_URL/pki/tokens" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}'
 ```
 
 #### Successful response (201)
@@ -854,25 +943,31 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
   "token": "a1b2c3.0123456789abcdef",
   "expires_at": "2026-09-22T12:00:00Z",
   "usage": ["enroll"],
-  "groups": []
+  "groups": [],
+  "scopes": [],
+  "uses": 0,
+  "max_uses": 1,
+  "agent_id": "node-01",
+  "component": "agent"
 }
 ```
 
 The `token` plaintext is visible only in this response (storage keeps only the
-sha256 hash). `usage=["enroll"]` is a node bootstrap token (validated by enroll;
-not bound to a node, reusable within its TTL); `usage=["admin"]` with
-`groups=["admin"]` is a management token (authenticator-chain Bearer; same as
+sha256 hash). `usage=["enroll"]` is a node bootstrap token (bound to `agent_id`,
+single-use by default, 60 minutes); `usage=["admin"]` with `scopes=["admin"]` is a
+management token (authenticator-chain Bearer; same as
 `kurrent token create --usage admin`).
 
 #### Common errors
 
 | HTTP status | Common cause |
 |---:|---|
+| `400` | bootstrap token without/with an illegal `agent_id`, an out-of-range quota/TTL, or an invalid scope |
 | `401` | Missing or wrong token |
 
 ### GET /pki/tokens
 
-List **non-expired** token ledger entries (management visibility): bootstrap tokens, admin tokens, and nvmet-host derived tokens share one table. Never returns plaintext (already unrecoverable) or `token_secret_hash`; `created_at` is an empty string for legacy entries (the field is injected at issuance; historical entries lack it). Read requests only need authentication (minimal RBAC).
+List **non-expired** token ledger entries (management visibility): bootstrap tokens, admin tokens, and nvmet-host derived tokens share one table. Never returns plaintext (already unrecoverable) or `token_secret_hash`; `created_at` is an empty string for legacy entries (the field is injected at issuance; historical entries lack it). `scopes` / `uses` / `max_uses` / `last_used_at` support audit and capacity observation (`max_uses=0` means unlimited: legacy entries and management tokens). Read requests only need authentication (minimal RBAC).
 
 ```bash
 curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
@@ -884,11 +979,15 @@ curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
     "token_id": "a1b2c3",
     "usage": ["admin"],
     "groups": ["admin"],
+    "scopes": ["admin"],
     "component": "",
     "agent_id": "",
     "name": "admin",
     "created_at": "2026-09-27T09:00:00+00:00",
-    "expires_at": "2026-10-04T09:00:00+00:00"
+    "expires_at": "2026-10-04T09:00:00+00:00",
+    "last_used_at": "2026-09-27T10:12:00+00:00",
+    "uses": 0,
+    "max_uses": 0
   }
 ]
 ```
@@ -906,24 +1005,26 @@ Returns `{"revoked": "a1b2c3"}` on success; `404` when the token does not exist.
 
 ### 6.5.1 enroll auto-registration (POST /enroll, nginx entry /api/cp/enroll)
 
-First-report auto-registration: when an `agent` component enrolls (`POST /enroll`, Bearer = cluster-wide bootstrap token) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto", "storage")`; `("auto",)` only for legacy agents that report no capabilities — the **backend type is not written into tags**, it is resolved by `/boot-vars` querying `/capabilities` in real time) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) and `remark` field (agent side `metadata.remark`, human label) into the registry. Rules:
+First-report auto-registration: when an `agent` component enrolls (`POST /enroll`, Bearer = bootstrap token bound to that node identity) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto", "storage")`; `("auto",)` only for legacy agents that report no capabilities — the **backend type is not written into tags**, it is resolved by `/boot-vars` querying `/capabilities` in real time) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) and `remark` field (agent side `metadata.remark`, human label) into the registry. The response carries two certificates (client / serving, issued by the nodes CA, subject = CN only) and **two trust anchors**: `ca_nodes_crt` (validate peer components) and `ca_control_crt` (validate control-plane clients). Rules:
 
-- Token validation: format / registry entry / component match / not expired; generic tokens carry no node binding (the CSR CN self-determines identity; anti-spoofing is enforced by CN checks); derived tokens (`nvmet-host`) must match the agent_id (anti-cross-use)
-- `nvmet-host` components are **not auto-registered** (they share the agent_id; the agent component must be registered first — otherwise 400, container restart retries; the token is not consumed)
+- Token validation: format / registry entry / component match / binding match (`agent_id` equals the ledger entry) / not expired; on success an allowance is **reserved atomically** and released if certificate issuance fails; single-use by default (`max_uses` can raise it)
+- `/enroll/renew` uses the component’s existing client cert (nginx forces mTLS on that path; the issuer must be the nodes CA → class=component; human certs get `403`), and re-signs only when CN == `<prefix>-<agent_id>`
+- `nvmet-host` components are **not auto-registered** (they share the agent_id; the agent component must be registered first — otherwise 400, container restart retries; the allowance is not consumed)
 - A non-empty `base_url` must start with `http://` / `https://`, otherwise 400 (no auto-registration)
 - When an already-registered agent enrolls/renews again, `base_url` / `remark` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move or remark change, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` are **left untouched**, and fields the node does not report keep their current values
 - An agent reporting `backend=nvmet` gets an extra `nvmet_token` field in the response (derived nvmet-host credential); stgt/lio backends and legacy agents have no such field
 
 ### 6.5.2 One-command join (node side)
 
-Declarative workflow (declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL**; pasting it on the storage node yields the address — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (`metadata.name` auto-generated random id, the address synced into `spec.controlPlane.url`) or read in and merged when present, then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the storager directory from outside the repository root):
+Declarative workflow (declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL and the node id**; pasting it on the storage node yields both the address and the identity — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (`metadata.name` = `--agent-id`, the address synced into `spec.controlPlane.url`) or read in and merged when present (a declared identity that differs from `--agent-id` is rejected), then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the storager directory from outside the repository root):
 
 ```bash
-# Control plane (issue a cluster-wide bootstrap token; --cp-url = control-plane HTTPS entry reachable from the storage node, derived from --server otherwise):
-kurrent token create --cp-url https://<cp-host>
+# Control plane (issue a node-bound bootstrap token; --cp-url = control-plane HTTPS entry reachable
+# from the storage node, derived from --server otherwise; omitting --agent-id generates a random 12-hex id):
+kurrent token create --agent-id node-01 --cp-url https://<cp-host>
 
-# Storage node (the command already carries the URL — paste and run; business keys can be pre-declared via kurrent config print node-defaults):
-kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef
+# Storage node (the command already carries the URL and node id — paste and run; business keys can be pre-declared via kurrent config print node-defaults):
+kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id node-01
 ```
 
 ## 6.6 DELETE /agents/{agent_id}
@@ -953,6 +1054,154 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01" \
 |---:|---|
 | `401` | Missing or wrong token |
 | `404` | Agent does not exist |
+
+## 6.7 Management sessions and certificate revocation
+
+### Sessions (server-side registry)
+
+`POST /session` exchanges the current credential (admin certificate / management token)
+for a session cookie; the cookie carries only `{jti, exp, epoch}`, and identity/groups
+come from `state/sessions.yml`. The default TTL is 12 hours with sliding renewal only in
+the second half; cookie-authenticated writes require `Origin` to match `Host`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/sessions` | List unexpired sessions (admin); `session_id` = `sha256(jti)`, not a usable credential |
+| `DELETE` | `/sessions/{session_id}` | Revoke one: delete the entry; next request gets `401`; missing → `404` |
+| `DELETE` | `/sessions` | Sign out all: clear the registry and bump `epoch`, invalidating every existing cookie |
+
+`session_id` is 64 hex characters; pass it to DELETE verbatim (`kurrent sessions list`
+prints the full value). Removing a user from `state/users.yml` makes that user's session
+fail with `401` on its next request and cleans it up automatically.
+
+### Certificate issuance, listing and revocation (users CA + CRL)
+
+`POST /pki/users/{cn}` signs a **CSR** for a user **already registered** in
+`state/users.yml` (admin only). The private key is generated locally by the requester and
+**never uploaded**; the control plane only signs.
+
+- The CN must exist in `state/users.yml` first (the certificate carries only the CN;
+  groups come from that file); unknown users get `400`
+- `csr` is required (PEM): its CN must equal the `cn` in the path, and it may not carry
+  any subject attribute other than CN (self-reported O/OU are rejected); missing/invalid
+  → `400`
+- `days` is optional: 365 by default, 3650 max
+- The response contains only `certificate` (PEM), never the private key; the certificate
+  file stays at `state/pki/users/<cn>/issued/<serial>.crt` for audit; issuance emits a
+  `user_cert_issued` alarm event
+- Exception: the bootstrap admin certificate created by `kurrent init` is still generated
+  locally by the control plane (local convenience path)
+
+```bash
+# Requester (local): generate key + CSR, keep the key at 0600 and never upload it
+kurrent cert keygen alice --out ./alice
+# Admin: read the CSR file and submit it
+kurrent cert issue alice --csr ./alice/alice.csr --out ./alice --days 365
+```
+
+The request body is `{"csr": "<PEM>", "days": 365}`; the response carries certificate
+metadata plus `certificate` (PEM).
+
+`GET /pki/users` lists certificates issued by the users CA (revoked / expired included):
+
+```json
+[
+  {
+    "cn": "admin",
+    "serial": "6f1c0d2e",
+    "fingerprint": "<sha256 hex>",
+    "created_at": "2026-10-23T09:00:00+00:00",
+    "expires_at": "2027-10-23T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/users/{cn}?reason=key_compromise` revokes a CN's certificates; add
+`&serial=<hex>` to revoke exactly one (a user may hold an old and a new certificate):
+
+- `reason` is `unspecified` (default) | `key_compromise` | `superseded` | `cessation_of_operation`
+- Marks `state/pki/users/issued.yml`, re-signs `state/pki/nginx/users.crl` and
+  `clients.crl` (users + nodes concatenated), then reloads nginx — the revoked certificate
+  fails on its **next TLS handshake**
+- Omitting `serial` revokes every unrevoked certificate for the user and deletes all of
+  their sessions; with `serial`, only sessions bound to that certificate fingerprint are
+  kicked (count returned as `sessions`)
+- Cannot revoke the current principal's own certificate (`400`); no unrevoked certificate
+  → `404`; CRL written but reload failed → `500` (revocation is not in effect yet)
+- Emits a `crl_updated` alarm
+
+The control plane re-signs the CRL and asks nginx to reload every 12 hours
+(`CRL_REFRESH_HOURS`; `KURRENT_CP_CRL_REFRESH_INTERVAL` overrides the interval in
+seconds, `<=0` disables it) so the 7-day `nextUpdate` cannot expire during long runs —
+an expired CRL makes nginx reject **every** client certificate. The controller never
+touches the container runtime: the reload request goes to the shared volume
+(`/run/kurrent/nginx.reload`), an in-container watcher runs `nginx -s reload` and writes
+`nginx.ack`, and the controller waits for that acknowledgement (timeout ⇒ `500`).
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/users/alice?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "alice", "serials": ["6f1c0d2e"], "sessions": 1, "reason": "key_compromise" }
+```
+
+CLI equivalents are `kurrent cert keygen <cn> [--out DIR]`,
+`kurrent cert issue <cn> --csr FILE`, `kurrent cert list [-o json]` and
+`kurrent cert revoke <cn> [--serial HEX] [--reason ...]`; the WebUI "Credentials" page
+shows token scopes / last-used and the session registry.
+
+### Component certificates (nodes domain, agent / nvmet-host)
+
+`GET /pki/components` lists the component certificates signed by the nodes CA (one entry
+each for `client` and `serving`):
+
+```json
+[
+  {
+    "cn": "agent-node-a",
+    "agent_id": "node-a",
+    "kind": "client",
+    "serial": "3f9c1b7e",
+    "fingerprint": "9c1f...",
+    "created_at": "2026-10-23T09:00:00+00:00",
+    "expires_at": "2027-01-21T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/components/{agent_id}?reason=key_compromise` (optionally `&serial=<hex>`)
+revokes that node's component certificates:
+
+- records the revocation in `state/pki/components/issued.yml`, re-signs the nodes part of
+  `clients.crl`, and reloads nginx — the revoked certificate fails the **next mTLS
+  handshake** (both control-plane and peer-component directions)
+- also deletes the node's bootstrap tokens (agent and nvmet-host paths), closing the
+  "revoke, then enroll a fresh certificate" path; `/enroll/renew` additionally returns
+  `403` for a revoked serial (application-side fallback while the CRL reload is pending)
+- registration happens only at issuance (enroll / renew): certificates issued before P4
+  have no registry entry and cannot be revoked until they are re-issued
+- `404` when nothing is left to revoke; `400` for a bad `reason` / `serial`; `500` when
+  the CRL was written but the nginx reload failed
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "node-a", "serials": ["3f9c1b7e", "7a2d4c11"], "kinds": ["client", "serving"], "reason": "key_compromise" }
+```
+
+CLI equivalents are `kurrent cert components [-o json]` and
+`kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]`.
 
 ---
 ---
@@ -1358,8 +1607,8 @@ After installation finishes, the CD target is cleaned up as part of the Worker d
 | `401` | Missing or incorrect Token |
 | `404` | Worker not found when creating a system disk; the `disk_agent` Agent does not exist |
 | `409` | `worker_id` already exists; `hostname` already exists; MAC already bound; Worker already has a disk for that (os, os_version) (duplicate version); IQN already exists on Agent; backing file already exists; target Agent is disabled (drain: `agent ... disabled: not accepting new disks`) |
-| `500` | dnsmasq reload failed; file write failure; other unexpected errors |
-| `503` | Agent unreachable; docker.sock unavailable |
+| `500` | dnsmasq binding write failed; file write failure; other unexpected errors |
+| `503` | Agent unreachable |
 
 ---
 
@@ -1626,6 +1875,16 @@ replay); `none` no sync target (no NVMe-oF disks, no credential ever set, or the
 Operations that trigger a push: **issuance on disk creation** (nvmet backends, see above),
 setting/deleting credentials, device bind/unbind/rebind
 (`PUT /workers/{worker_id}/mac`), disk delete (including batch), and Worker deletion.
+
+**Periodic rotation (2026-10-23)**: each reconciliation cycle first checks the DHHC-1 key age
+(`rotated_at`, falling back to `updated_at` / `created_at`). Past
+`KURRENT_CP_CREDENTIAL_ROTATION_DAYS` (default 90 days, `<=0` disables it) the key is rotated:
+a new key is generated and pushed to every target Agent of that Worker, and the ledger
+`state/credentials.yml` is switched **only after all pushes succeed** (`rotated_at` /
+`updated_at` refreshed, `credential.rotate` audited). If any target fails, already-delivered
+targets get the old key pushed back and the ledger stays unchanged, retrying next cycle; entries
+without an nvmet target are skipped. Until the switch, `/boot-vars` still projects the old key,
+so the window in which hosts hold the new key covers only the push itself.
 
 Static storage boundary (2026-10-05): the plaintext key lands in exactly four places along the
 chain — control-plane `state/credentials.yml`, the Agent container credential cache (which also
@@ -2490,9 +2749,28 @@ Revoke a device: `pooled` → `revoked`; the record stays in the inventory (audi
 
 **409**: device is bound to a Worker (must unbind first) or already revoked.
 
+### 16.5.1 DELETE /devices/revoked
+
+Purges revoked devices (`revoked` → entry deleted); `dry_run=true` only returns the MACs that
+would be purged and leaves the ledger untouched. Only revoked entries are removed — `pooled` /
+`bound` devices are never touched; an empty list is returned when there is nothing to purge
+(idempotent). Intended for cleaning up probe leftovers or mistakenly revoked devices.
+Repeat `mac` to scope the purge (e.g. `?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa`; MACs that
+are not revoked are ignored); without it every revoked device is purged.
+
+```bash
+curl -s -X DELETE "$BASE_URL/devices/revoked?dry_run=true" -H "Authorization: Bearer $TOKEN"
+curl -s -X DELETE "$BASE_URL/devices/revoked?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "purged": ["02:00:00:00:00:01", "02:00:00:00:00:aa"], "count": 2, "dry_run": false }
+```
+
 ### 16.6 GET /devices/report
 
-iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open, the admission quota is not used up, and a valid public key is carried. **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
+iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open, the admission quota is not used up, and a valid public key is carried. For an existing device, `uuid` can only fill an empty value and is never overwritten by a reported value (the binding comparison basis is not writable through an unauthenticated endpoint). **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
 
 | Parameter | Required | Description |
 |---|---|---|
@@ -2507,6 +2785,8 @@ Behavior:
 - Revoked device: ignored (not updated, not resurrected)
 - Unknown MAC + window open + quota left + valid public key: enters the pool (`state=pooled`, `key_hash` filled, `source=ipxe`)
 - Unknown MAC + window closed / quota used up / no public key: fingerprint only, no pool entry (enrollment only during the window and bounded by the admission quota, see 5.1)
+
+**Rate limit**: sliding window per source IP (`X-Real-IP`, overwritten by nginx), 120 requests/minute by default; over the limit returns `429` (with `Retry-After`) and emits a `boot_rate_limited` alarm. Override with `KURRENT_CP_RATE_LIMIT_REPORT`, `<=0` disables. This is scan suppression, not an identity boundary.
 
 **curl** (simulating an iPXE report; the boot chain uses the **bare path** — no `/api/cp` prefix — and requires no authentication):
 
@@ -2641,7 +2921,7 @@ The current version does **not** yet include:
 #### Control-plane host
 - dnsmasq: `53` (default DNS listener), `67` (DHCP), `69` (TFTP)
 - nginx: `80` (301 redirect to 443 only), `443` (the only external entry: WebUI / management API / boot chain / file downloads)
-- Control Plane: `4839` (bound to `127.0.0.1` only; used by `kurrent init` health checks and debugging, not on the request path)
+- Control Plane: no TCP port (in-container unix socket `/run/kurrent/cp.sock`, reachable only by nginx and the container health check)
 
 #### Storage node
 - Agent: `4840` (mTLS, called by the control plane)

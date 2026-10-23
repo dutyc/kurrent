@@ -42,9 +42,9 @@ class AgentConfig:
 class AgentClient:
     """控制面 → Agent 的 mTLS 客户端（控制面持自身客户端证书访问 Agent）。
 
-    身份 = 控制面组件证书（CN=control-plane，内部 CA 签发）；对端 agent 以
-    uvicorn ssl_cert_reqs=2 + 应用层 CN 匹配校验。缺证书材料时拒绝连接
-    （不降级明文——agent 已强制 mTLS）。
+    身份 = 控制面组件证书（CN=control-plane，control CA 签发）；对端 agent /
+    nvmet-host 以 uvicorn ssl_cert_reqs=2 + ssl_ca_certs=ca-control.crt 校验，
+    control 域之外无任何证书可用。缺证书材料时拒绝连接（不降级明文）。
     """
 
     def __init__(self, agent: AgentConfig, timeout: float, *,
@@ -54,13 +54,13 @@ class AgentClient:
         self.agent = agent
         self.timeout = timeout
         comp_dir = settings.pki_dir / "components" / settings.control_plane_component
-        self.ca_cert = ca_cert or settings.pki_dir / "ca.crt"
+        self.ca_cert = ca_cert or settings.pki_dir / "ca" / "nodes" / "ca.crt"
         self.client_cert = client_cert or comp_dir / "client.crt"
         self.client_key = client_key or comp_dir / "client.key"
         self._tls_context = None
 
     def _mtls_context(self) -> ssl.SSLContext:
-        """mTLS 上下文：固定信任内部 CA + 本组件 client cert。
+        """mTLS 上下文：固定信任 nodes CA（节点 serving 证书）+ 本组件 client cert。
 
         强制 TLS1.2：docker-proxy（userland proxy）对 TLS1.3 客户端证书握手有
         兼容问题（经宿主端口映射的连接会 Broken pipe），且项目 TLS ≤ 1.2 约束

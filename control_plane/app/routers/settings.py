@@ -3,7 +3,7 @@
 窗口/开关状态逻辑在 trust 域（被 boot 验签链路共用），本模块仅 HTTP 壳。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from ..auth import authenticate, authorize_request
 from ..config import (
@@ -16,7 +16,12 @@ from ..stores import record, runtime_settings
 from ..trust import enforcement_enabled, window_open, window_record, window_status
 from ..utils import client_host, now_iso
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 @router.get("/settings/registration-window")

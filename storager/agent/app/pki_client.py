@@ -5,14 +5,14 @@ mTLS → /renew），并把 CA/证书落盘到 pki_dir。调用时机：uvicorn 
 时），证书未就绪则进程退出（无证书不启动）。
 
 证书布局（pki_dir 由容器挂载持久化）：
-  ca.crt           内部 CA（校验对端证书链）
+  ca-control.crt  控制面客户端证书的信任锚（uvicorn --ssl-ca-certs）
+  ca-nodes.crt    同伴组件证书的信任锚（agent → nvmet-host）
   client.crt/key   client cert（本组件身份：向 cp renew、向 nvmet-host 认证）
   serving.crt/key  serving cert（本组件 TLS 服务端）
 
-enroll 凭据 = 集群级通用 bootstrap token（独立凭据文件 agent.token：
-不绑节点、TTL 内可多次 enroll 复用）；nvmet-host 派生
-凭据随本组件 enroll/renew 响应下发并落盘（nvmet-host.token，供 nvmet-host 容器引导）；
-renew 凭据 = 现有 client cert（mTLS，nginx 校验后透传 DN 给控制面）。
+enroll 凭据 = 绑定本 agent_id 的 bootstrap token（独立凭据文件 agent.token）；
+nvmet-host 派生凭据随本组件 enroll/renew 响应下发并落盘（nvmet-host.token）；
+renew 凭据 = 现有 client cert（mTLS，nginx 按 issuer 判定 class=component）。
 """
 
 import datetime as _dt
@@ -106,9 +106,11 @@ class PkiClient:
         self.derived_token_file = Path(derived_token_file) if derived_token_file else None
 
     def ready(self) -> bool:
-        """证书就绪且剩余生命周期高于阈值。"""
+        """证书就绪、剩余生命周期高于阈值，且两个信任锚都已落盘。"""
         ratio = _cert_remaining_ratio(self.pki_dir / "client.crt")
-        return ratio is not None and ratio > RENEW_THRESHOLD
+        return (ratio is not None and ratio > RENEW_THRESHOLD
+                and (self.pki_dir / "ca-control.crt").is_file()
+                and (self.pki_dir / "ca-nodes.crt").is_file())
 
     def ensure(self, force_renew: bool = False) -> None:
         """引导或轮换证书（进程启动时调用）。已就绪则跳过；force_renew 时证书在也重签
@@ -117,8 +119,17 @@ class PkiClient:
             log.info("pki: client cert ok (cn=%s)", self.cn)
             return
         if (self.pki_dir / "client.crt").exists():
-            log.warning("pki: client cert expired or near expiry, renewing (cn=%s)", self.cn)
-            self._enroll(renew=True)
+            log.warning("pki: renewing client cert (cn=%s, force=%s)", self.cn, force_renew)
+            try:
+                self._enroll(renew=True)
+            except RuntimeError as exc:
+                # 旧信任根/证书被拒时回退到 bootstrap enroll：CA 收紧后节点不能
+                # 再用旧证书换新证书，但绑定 token 仍允许重新加入。
+                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+                    log.warning("pki: renew rejected (%s); falling back to bootstrap enroll", exc)
+                    self._enroll(renew=False)
+                else:
+                    raise
         else:
             log.info("pki: no client cert, enrolling (cn=%s)", self.cn)
             self._enroll(renew=False)
@@ -162,6 +173,9 @@ class PkiClient:
         certs = data.get("certificates", {})
         if "client.crt" not in certs or "serving.crt" not in certs:
             raise RuntimeError(f"pki enroll: unexpected response: {sorted(data.keys())}")
+        for field in ("ca_nodes_crt", "ca_control_crt"):
+            if not data.get(field):
+                raise RuntimeError(f"pki enroll: missing trust anchor {field}")
         _write_pem(self.pki_dir / "client.key", key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.TraditionalOpenSSL,
@@ -172,7 +186,8 @@ class PkiClient:
             encryption_algorithm=serialization.NoEncryption()))
         _write_pem(self.pki_dir / "client.crt", certs["client.crt"].encode())
         _write_pem(self.pki_dir / "serving.crt", certs["serving.crt"].encode())
-        _write_pem(self.pki_dir / "ca.crt", data["ca_crt"].encode())
+        _write_pem(self.pki_dir / "ca-nodes.crt", data["ca_nodes_crt"].encode())
+        _write_pem(self.pki_dir / "ca-control.crt", data["ca_control_crt"].encode())
         # nvmet-host 派生凭据落盘（agent 组件）：控制面按 backend=nvmet 能力签发随响应
         # 下发；写入共享凭据目录供 nvmet-host 容器引导（缺失响应 = 非 nvmet 后端/旧控制面）
         if self.derived_token_file and data.get("nvmet_token"):
@@ -217,7 +232,7 @@ def _write_token(path: Path, token: str) -> None:
 def ensure_pki() -> None:
     """模块级入口：从节点配置（kurrent.yaml）+ 引导凭据文件装配并执行引导/轮换。
 
-    通用 bootstrap token 在独立凭据文件（compose 挂载，join 写入）；nvmet-host 派生
+    绑定 agent_id 的 bootstrap token 在独立凭据文件（compose 挂载，join 写入）；nvmet-host 派生
     凭据随 enroll/renew 响应下发落盘（backend=nvmet 时）；派生凭据缺失（历史部署迁移
     清除等）→ 证书在也强制 renew 一次以重新派生。"""
     from .config import (CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA,

@@ -16,9 +16,9 @@ spec:
     dhcpRange: 192.168.80.50,192.168.80.100   # DHCP 池起止
     gateway: 192.168.80.2              # dhcp-option=3
     dns: 223.5.5.5                     # dhcp-option=6
-  # 组件 PKI 策略（内部 CA + bootstrap token 引导 + 证书轮换）
+  # 组件 PKI 策略（三分根 CA users/nodes/control + 绑 agent_id 的 bootstrap token 引导 + 证书轮换）
   pki:
-    bootstrapTokenTtlDays: 7
+    bootstrapTokenTtlMinutes: 60
     componentCertDays: 90
     renewThreshold: 0.2
   # TOFU 引导链服务器证书（自签，启动时幂等生成；nginx 只读挂载 state/certs）
@@ -32,6 +32,3 @@ spec:
     autoBootTimeoutSec: 1
   # 调用存储 Agent 超时（秒）
   agentTimeoutSec: 10
-  # dnsmasq 集成：hosts 台账变更后是否自动 reload 容器（需 docker.sock 挂载）
-  dnsmasq:
-    reload: false

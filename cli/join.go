@@ -1,11 +1,12 @@
 // join 子命令：存储节点加入控制面并收敛到运行态（配置即声明）。
 // 命令携带控制面地址——签发命令输出即带地址，节点粘贴执行即获得地址，
-// 无需预编辑任何文件：kurrent join <cp-url> [--token T]。
+// 无需预编辑任何文件：kurrent join <cp-url> [--token T] [--agent-id ID]。
 // 节点声明 storager/kurrent.yaml 缺失时按模板自动生成（url=命令地址、name=随机短标识、
 // backend nvmet、advertiseUrl 推导、diskDir/nqnBase 默认），已存在则读入并把地址同步
 // 进声明（非 forbid 式合并，未知字段与手工编辑保留；yml 即 kurrent.yaml，后续可编辑）。
-// 身份分层：name = 机器身份（join 自动生成、勿手工输入）；人工输入归 metadata.remark
-// （备注，人类识别用，随首次 enroll 带入控制面台账）。
+// 身份分层：name = 机器身份（bootstrap token 绑定它；--agent-id 写入，未给则 join
+// 自动生成随机短标识）；人工输入归 metadata.remark（备注，人类识别用，随首次 enroll
+// 带入控制面台账）。
 // 引导凭据落盘（--token 或既有 bootstrap/agent.token）→ .env 插值键同步 → 收敛启动
 // agent（docker compose 为内部编排细节，重跑幂等）。nvmet 后端先预检宿主前置
 // （内核模块 nvmet/nvmet-tcp + configfs 挂载），未就绪指路 nvmeof/host-prepare.sh。
@@ -27,15 +28,17 @@ import (
 func cmdJoin(args []string) {
 	p := parseArgs(args)
 	if len(p.pos) < 1 {
-		fatal("用法: kurrent join <cp-url> [--config PATH] [--token T] [--dir PATH]\n" +
+		fatal("用法: kurrent join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]\n" +
 			"      <cp-url>: 控制面 HTTPS 入口（kurrent token\n" +
 			"      create 签发的命令直接带地址，粘贴即可执行）；\n" +
 			"      storager/kurrent.yaml 即节点声明：缺失时 join 按模板自动生成（地址/身份\n" +
 			"      标识自决），kurrent config print node-defaults 可预置模板再编辑；\n" +
-			"      引导凭据 --token 可选（不给则要求 storager/bootstrap/agent.token 已就位）")
+			"      bootstrap token 绑定节点身份，--agent-id 写入声明 metadata.name\n" +
+			"      （token create 输出的命令已携带）；引导凭据 --token 可选（不给则要求\n" +
+			"      storager/bootstrap/agent.token 已就位）")
 	}
 	if len(p.pos) > 1 {
-		fatal("多余位置参数: %s（用法: kurrent join <cp-url> [--config PATH] [--token T] [--dir PATH]）", strings.Join(p.pos[1:], " "))
+		fatal("多余位置参数: %s（用法: kurrent join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]）", strings.Join(p.pos[1:], " "))
 	}
 	dir, err := resolveStoragerDir(p.opt("dir", ""))
 	if err != nil {
@@ -47,7 +50,10 @@ func cmdJoin(args []string) {
 			fatal("解析 --config: %v", err)
 		}
 	}
-	if err := joinRun(joinOpts{dir: dir, configFile: configFile, cpURL: p.pos[0], token: p.opt("token", "")}); err != nil {
+	if err := joinRun(joinOpts{
+		dir: dir, configFile: configFile, cpURL: p.pos[0],
+		token: p.opt("token", ""), agentID: strings.TrimSpace(p.opt("agent-id", "")),
+	}); err != nil {
 		fatal("%v", err)
 	}
 }
@@ -57,6 +63,7 @@ type joinOpts struct {
 	configFile string // 节点声明文件（缺省 <dir>/kurrent.yaml；其他路径 = 应用为节点配置）
 	cpURL      string // 控制面 HTTPS 入口（必填）
 	token      string // 引导凭据（可选：给则写入 agent.token；不给要求文件已就位）
+	agentID    string // 节点身份（可选：写入声明 metadata.name；绑定 token 时必须与之一致）
 }
 
 // resolveStoragerDir 定位 storager 目录：--dir 优先；否则 cwd 下 storager/；cwd 已是 storager 时用 cwd。
@@ -82,6 +89,9 @@ func resolveStoragerDir(explicit string) (string, error) {
 }
 
 var cpHostRe = regexp.MustCompile(`https?://([^/:]+)`)
+
+var errAgentIDRequired = fmt.Errorf("bootstrap token 绑定节点身份：请用 --agent-id <id> 指定" +
+	"（kurrent token create --agent-id 输出的命令已携带；id 须与签发时的绑定一致）")
 
 // normalizeAgentID agent_id 字符集规范化（校验用）：小写，非字母数字/点/横线字符替换为
 // '-'，保留 '.'——证书 CN 与控制面登记键仅用该字符集。身份由 join 自动生成，显式声明值
@@ -115,15 +125,23 @@ func joinRun(o joinOpts) error {
 
 	// 节点声明：kurrent.yaml 缺失时按模板自动生成（无预置文件时用缺省模板：
 	// 生成后即权威声明，可后续手工编辑；--config 指向其他路径 = 应用为节点配置）
+	if o.agentID != "" && normalizeAgentID(o.agentID) != o.agentID {
+		return fmt.Errorf("--agent-id 含非法字符（字符集仅允许小写字母/数字/./-）: %s", o.agentID)
+	}
 	data, err := os.ReadFile(o.configFile)
 	var root yaml.Node
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("读取 %s: %w", o.configFile, err)
 		}
-		nodeID, ierr := newNodeID()
-		if ierr != nil {
-			return ierr
+		nodeID := o.agentID
+		if nodeID == "" {
+			if o.token != "" {
+				return errAgentIDRequired
+			}
+			if nodeID, err = newNodeID(); err != nil {
+				return err
+			}
 		}
 		if err := yaml.Unmarshal([]byte(newNodeDeclaration(nodeID, cpURL,
 			filepath.Join(filepath.Dir(o.dir), "storager_img"))), &root); err != nil {
@@ -137,11 +155,25 @@ func joinRun(o joinOpts) error {
 		return fmt.Errorf("%s: kind = %q, want NodeConfiguration", o.configFile, kind)
 	}
 
-	// agent_id：机器身份——声明留空 → 自动生成随机短标识（12 位 hex，与盘 os_tag 同构、
-	// docker 容器 ID 短形式；多节点各自生成天然不冲突）并持久化进声明（重跑保留，身份
-	// 稳定）；显式声明校验字符集（人工输入归属 metadata.remark，name 勿手工编辑）
+	// agent_id：机器身份——bootstrap token 绑定的就是这个 id。--agent-id 写入声明
+	// （与已声明值不一致即拒绝，身份须稳定）；声明留空且未给 --agent-id 时自动生成
+	// 随机短标识（12 位 hex，与盘 os_tag 同构、docker 容器 ID 短形式）；给了 --token
+	// 却无身份则拒绝（随机 id 必然与 token 绑定不符，提前报错胜过 enroll 401）。
 	agentID := strings.TrimSpace(nodeValue(&root, "metadata", "name"))
+	if o.agentID != "" {
+		if agentID != "" && agentID != o.agentID {
+			return fmt.Errorf("%s: metadata.name=%s 与 --agent-id=%s 不一致（节点身份须稳定，勿中途改名）",
+				o.configFile, agentID, o.agentID)
+		}
+		if agentID == "" {
+			agentID = o.agentID
+			setPath(&root, agentID, "metadata", "name")
+		}
+	}
 	if agentID == "" {
+		if o.token != "" {
+			return errAgentIDRequired
+		}
 		nodeID, err := newNodeID()
 		if err != nil {
 			return err
@@ -205,9 +237,9 @@ func joinRun(o joinOpts) error {
 	}
 
 	// 引导凭据文件：--token 给则写入 agent.token（0600）；不给则要求文件已就位
-	// （TTL 内可复用，重跑覆盖新 token）。
+	// （控制面侧默认一次性，重跑需重新签发 token 覆盖）。
 	// nvmet-host.token 是派生凭据——agent enroll 上报 backend=nvmet 时控制面签发随
-	// 响应下发（签发不绑节点、不预知后端）。nvmet 后端重跑 join 时清除旧派生文件
+	// 响应下发（绑定 agent_id、不预知后端）。nvmet 后端重跑 join 时清除旧派生文件
 	// （迁移清理，将由 agent 引导时重新派生；stgt/lio 后端不产生该文件）
 	bootstrapDir := filepath.Join(o.dir, "bootstrap")
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
@@ -219,8 +251,8 @@ func joinRun(o joinOpts) error {
 			return fmt.Errorf("写入 %s: %w", tokenFile, err)
 		}
 	} else if data, err := os.ReadFile(tokenFile); err != nil || strings.TrimSpace(string(data)) == "" {
-		return fmt.Errorf("bootstrap token missing: %s 不存在或为空——kurrent join --token <token> 传入（kurrent token create 签发）",
-			tokenFile)
+		return fmt.Errorf("bootstrap token missing: %s 不存在或为空——kurrent join --token <token> 传入（kurrent token create --agent-id %s 签发）",
+			tokenFile, agentID)
 	}
 	if backend == "nvmet" {
 		if err := os.Remove(filepath.Join(bootstrapDir, "nvmet-host.token")); err != nil && !os.IsNotExist(err) {

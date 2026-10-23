@@ -4,7 +4,7 @@ import copy
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 
 from ..auth import authenticate, authorize_request
 from ..models import BatchBindRequest, BindPair, CreateDeviceRequest, ImportDevicesRequest
@@ -13,7 +13,12 @@ from ..utils import canonical_mac, clean_str, client_host, now_iso
 
 log = logging.getLogger("control-plane")
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 @router.get("/devices")
@@ -175,10 +180,6 @@ def unbind_device(mac: str, request: Request):
             try:
                 removed = dnsmasq.remove_hostname(hostname)
                 record("dnsmasq.hosts.delete", "ok", worker_id=worker_id, hostname=hostname, removed=removed)
-                try:
-                    dnsmasq.reload()
-                except Exception:
-                    log.exception("unbind: dnsmasq reload failed")
             except Exception as exc:
                 # 回滚台账（dnsmasq 写入失败，恢复设备为 bound）
                 data["devices"] = snapshot["devices"]
@@ -305,6 +306,30 @@ def batch_bind(req: BatchBindRequest, request: Request):
     return {"succeeded": succeeded, "skipped": skipped, "failed": failed}
 
 
+@router.delete("/devices/revoked")
+def purge_revoked_devices(request: Request, dry_run: bool = False,
+                          mac: list[str] = Query(default=[])) -> dict:
+    """清除已吊销设备（revoked → 删除条目）；`dry_run=true` 只列出将被清除的 MAC。
+
+    `mac` 可重复给出以限定范围（未吊销的 MAC 会被忽略）；缺省清除全部 revoked。
+    只做台账清理，不改变绑定关系（revoked 设备本就不允许绑定）；凭据域无条目可清。
+    返回按 MAC 排序的列表，便于核对（探测残留、误吊销的清理路径）。
+    """
+    wanted = {canonical_mac(item) for item in mac} or None
+    with devices.locked():
+        data = devices.load()
+        targets = sorted(m for m, dev in data["devices"].items()
+                         if dev.get("state") == "revoked"
+                         and (wanted is None or m in wanted))
+        if targets and not dry_run:
+            for target in targets:
+                data["devices"].pop(target)
+            devices.save(data)
+    if targets and not dry_run:
+        record("device.purge", "ok", macs=targets, client=client_host(request))
+    return {"purged": targets, "count": len(targets), "dry_run": dry_run}
+
+
 @router.delete("/devices/{mac}")
 def revoke_device(mac: str, request: Request):
     """注销设备（吊销）：pooled → revoked；已绑定需先解绑（bound → 409）；已吊销 409。"""
@@ -387,7 +412,7 @@ def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
         except Exception as exc:
             raise HTTPException(500, f"devices save failed: {exc}") from exc
 
-        # 2) dnsmasq：清旧绑定 + 加新绑定（reload 失败仅告警——文件已生效，容器下次重启加载）
+        # 2) dnsmasq：清旧绑定 + 加新绑定（dnsmasq 自己监听 dhcp-hostsfile，无需通知）
         try:
             if old_worker and old_worker != worker_id:
                 old_hostname = _hostname_of(workers, old_worker)
@@ -396,10 +421,6 @@ def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
             if old_device and old_device != mac:
                 dnsmasq.remove_hostname(hostname)
             dnsmasq.add_binding(mac, hostname)
-            try:
-                dnsmasq.reload()
-            except Exception:
-                log.exception("bind: dnsmasq reload failed")
         except Exception as exc:
             # 3) 失败回滚：恢复台账快照 + 尽力恢复 dnsmasq
             data["devices"] = snapshot["devices"]
@@ -415,10 +436,6 @@ def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
                         dnsmasq.add_binding(mac, old_hostname)
                 if old_device and old_device != mac:
                     dnsmasq.add_binding(old_device, hostname)
-                try:
-                    dnsmasq.reload()
-                except Exception:
-                    pass
             except Exception:
                 log.exception("bind rollback: dnsmasq restore failed")
             raise HTTPException(500, f"dnsmasq binding failed: {exc}") from exc

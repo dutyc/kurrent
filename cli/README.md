@@ -30,7 +30,7 @@ kurrent agents list          # 此后任意目录可用；凭据轮换后重跑 
 
 # 方式二：显式指定管理凭据文件或管理 token（也是环境变量兜底项）
 export KURRENT_CREDENTIALS=/path/to/admin.conf  # 默认发现 control_plane/state/admin.conf
-export KURRENT_CP_URL=https://<host>/api/cp     # 无管理凭据时默认 http://127.0.0.1:4839
+export KURRENT_CP_URL=https://<host>/api/cp     # 无管理凭据时须显式指定（配合 token）
 export KURRENT_CP_TOKEN=<admin-token>           # kurrent token create --usage admin
 kurrent agents list
 ```
@@ -41,15 +41,16 @@ kurrent agents list
   （所以在仓库内任意子目录、含 `cli/` 下执行都可用）；② 再退回可执行文件旁
   `<exe 目录>/../control_plane/state/admin.conf`（仓库布局 `cli/kurrent` → 仓库根，
   覆盖从仓库外调用该二进制的情形）；③ 垫底用户级快照 `~/.kurrent/admin.conf`
-  （仓库源在场时优先实时源，脱离仓库才吃快照）。都找不到才回退无凭据通道——此时 401
-  会附带提示指明"未发现凭据"与安装命令，而非只报 `unauthorized`
+  （仓库源在场时优先实时源，脱离仓库才吃快照）。都找不到时若无 `--server` 会直接报错
+  并给出安装/连接指引；给出 `--server` + `--token` 才走无凭据的 Bearer 通道——管理面
+  只监听 unix socket，不再提供本机回环端口
 - `kurrent credentials install`：把仓库管理凭据**复制**为自包含快照 `~/.kurrent/`
   （重写证书键为 `pki/<文件名>` 相对路径 + `installed-from`/`installed-at` 溯源；
   目录 0700、文件 0600）——快照是复制而非跟随，**凭据轮换后重跑 install 刷新**；
   `credentials show` 查看生效凭据与快照状态；`credentials remove` 删除快照
 - `--server` 控制面 API 根：有管理凭据时覆盖其中的 server 地址（远程管理员指向
   `https://<host>/api/cp`；凭据文件缺省 server 为 `https://127.0.0.1/api/cp`）；
-  无管理凭据时默认 `http://127.0.0.1:4839`（仅控制面本机回环可用）
+  无管理凭据时没有默认值，必须显式给出并配合 `--token`
 - `--token` 管理 token（`kurrent token create --usage admin` 产物；认证器链 Bearer）
 
 ## 命令
@@ -64,16 +65,38 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
                                               --remark/--tags 即清空对应字段）
   agents remove <id>                          删除 Agent 台账（含母盘标签）
   agents probe --base-url URL                 探测 Agent 能力（不落盘）
-  token create [--usage bootstrap|admin] [--cp-url URL]
+  token create [--usage bootstrap|admin] [--agent-id ID] [--cp-url URL]
+               [--uses N] [--scope admin,readonly,enroll] [--ttl 24h]
                                               签发凭据：
-                                              bootstrap（默认）集群级通用引导 token——
-                                              不绑节点、TTL 内可复用，输出带地址的 join
-                                              命令；admin 管理 token（认证器链 Bearer，供
-                                              脚本与 WebUI 登录）
+                                              bootstrap（默认）引导 token——绑定节点
+                                              身份（--agent-id；省略则生成随机 12 位 hex
+                                              标识），enroll 只接受该节点、默认一次性、
+                                              60 分钟；--uses N 放开次数（≤100）；输出带
+                                              地址与节点 id 的 join 命令；admin 管理 token
+                                              （认证器链 Bearer，供脚本与 WebUI 登录；
+                                              --scope 收窄权限，--ttl 默认 24h、上限 720h）
   token list [-o table|json]                  列出未过期 token 台账（不返回明文摘要；
                                               与 WebUI「凭据」页同源）
   token revoke <token_id>                     吊销 token：删除台账条目，
                                               立即失效、无法恢复
+  sessions list [-o table|json]               管理面会话台账（session_id = sha256(jti)）
+  sessions revoke <session_id>                逐个吊销：删登记，下一请求立即失效
+  sessions revoke-all                         全部下线：清空登记并递增 epoch
+  cert keygen <cn> [--out DIR] [--force]      本地生成 RSA-2048 私钥与 CSR：写
+                                              <DIR>/<cn>.key（0600）与 <cn>.csr，
+                                              私钥永不上送（默认 DIR=.）
+  cert issue <cn> --csr FILE [--days N]       把本地 CSR 交给 users CA 签发（用户须先在
+                                              users.yml 登记），只写 <DIR>/<cn>.crt
+  cert list [-o table|json]                   列出 users CA 签发的证书（含吊销/过期）
+  cert revoke <cn> [--serial HEX] [--reason REASON]
+                                              吊销证书（--serial 只废一张，只踢绑定该
+                                              证书的会话）：重签 CRL + reload nginx +
+                                              踢会话，下一次 TLS 握手即拒绝
+  cert components [-o table|json]             列出 agent / nvmet-host 的 nodes 域证书
+                                              （含吊销/过期）
+  cert revoke-component <agent_id> [--serial HEX] [--reason REASON]
+                                              吊销组件证书：写 nodes CRL + reload nginx
+                                              + 删除该节点的 bootstrap token
   credentials install | show | remove         管理凭据用户级快照：install 复制仓库
                                               admin.conf（含证书副本）到 ~/.kurrent，
                                               此后任意目录可运行 kurrent（凭据轮换后重跑
@@ -85,10 +108,12 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
   init [--config PATH] [--dir PATH]          控制面初始化：校验声明并收敛启动控制面
                                               （默认读 control_plane/kurrent.yaml；
                                               --config 指定其他声明文件则应用之）
-  join <cp-url> [--config PATH] [--token T] [--dir PATH]
+  join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]
                                               节点侧加入：
                                               声明 kurrent.yaml 缺失自动生成、已存在则读入并
                                               同步地址，收敛启动 agent（幂等可重跑）；
+                                              --agent-id 写入声明 metadata.name（token 绑定
+                                              的节点身份，token create 输出的命令已携带）；
                                               nvmet 后端预检宿主前置（内核模块 + configfs），
                                               未就绪指路 nvmeof/host-prepare.sh
   workers list | workers get <id>             Worker 台账（只读）
@@ -123,12 +148,13 @@ $EDITOR control_plane/kurrent.yaml
 ## 一键加入流程
 
 ```bash
-# 1) 控制面：签发集群级通用 bootstrap token（不绑节点）；输出带控制面地址的 join 命令
-./kurrent token create --cp-url https://192.168.1.10
-#    → kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef
+# 1) 控制面：签发绑定节点身份的 bootstrap token；输出带地址与节点 id 的 join 命令
+./kurrent token create --agent-id node-01 --cp-url https://192.168.1.10
+#    → kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id node-01
+#    （省略 --agent-id 则生成随机 12 位 hex 身份，join 命令同样携带）
 
-# 2) 节点（存储服务器上，仓库根目录执行——命令已携带地址，粘贴即用）：
-./kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef
+# 2) 节点（存储服务器上，仓库根目录执行——命令已携带地址与节点 id，粘贴即用）：
+./kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id node-01
 #    → storager/kurrent.yaml 缺失时按模板自动生成（url=命令地址、name=自动生成的
 #      随机标识、backend nvmet、advertiseUrl 推导、diskDir/nqnBase 默认），已存在则
 #      读入合并并同步地址（非 forbid：手工编辑保留；yml 即 kurrent.yaml 后续可编辑）
@@ -145,8 +171,9 @@ $EDITOR control_plane/kurrent.yaml
 
 要点：
 
-- bootstrap token 为集群级通用引导凭据（`<6位>.<16位>`，TTL 默认 7 天，控制面只存 sha256 摘要）；**不绑节点**——节点身份（`metadata.name`）由 join 自动生成随机短标识（12 位 hex，与盘 os_tag 同构；人工输入归属 `metadata.remark` 备注）+ enroll 自动登记；控制面地址由 join 命令携带（同步进声明 `spec.controlPlane.url`）
-- token TTL 内可被**多次 enroll 复用**（不限制使用次数）；每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
+- bootstrap token 为**绑定节点身份**的引导凭据（`<6位>.<16位>`，控制面只存 sha256 摘要）：签发时指定 `--agent-id`（= 节点声明 `metadata.name`；省略则生成随机 12 位 hex 短标识，与盘 os_tag 同构），enroll 只接受同一身份；人工输入归属 `metadata.remark` 备注；控制面地址由 join 命令携带（同步进声明 `spec.controlPlane.url`）
+- token **默认一次性**（TTL 60 分钟、上限 24 小时）：使用额度在签发前原子占用、签发失败退回；批量引导用 `--uses N`（1-100）显式放开。每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
+- 管理 token 用 `--scope`（`admin` 默认 / `readonly` 只读 / `enroll` 仅签发引导 token）与 `--ttl`（默认 24h、上限 720h）收窄权限与寿命；台账记录 `last_used_at`，列表与 WebUI 可对照使用情况
 - `nvmet-host` 组件凭据**不手工签发**：agent enroll 上报 `backend=nvmet` 时控制面派生随响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）
 - nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）与 configfs 挂载——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`；`--check` 只读诊断）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
 - enroll 自动登记时携带 `base_url`（声明 `spec.agent.advertiseUrl`，默认推导 `https://<cp-host>:4840`）、`remark`（声明 `metadata.remark`，备注/人类识别用）与能力标签；特殊场景（NAT 等）编辑声明覆盖

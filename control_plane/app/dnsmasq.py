@@ -3,9 +3,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import docker
-
-
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
 
@@ -16,10 +13,11 @@ class HostBinding:
 
 
 class DnsmasqHosts:
-    def __init__(self, hosts_file: Path, container_name: str, reload_enabled: bool = True):
+    """dhcp-hostsfile 台账。dnsmasq 自己 inotify 监听该文件（man: re-read when it changes），
+    控制面只负责原子地改内容，不再经 docker.sock 向容器发 SIGHUP。"""
+
+    def __init__(self, hosts_file: Path):
         self.hosts_file = hosts_file
-        self.container_name = container_name
-        self.reload_enabled = reload_enabled
 
     def list_bindings(self) -> list[HostBinding]:
         return [_parse_binding(line) for line in self._read_lines() if _parse_binding(line) is not None]
@@ -83,22 +81,6 @@ class DnsmasqHosts:
             return old_mac
         self._write_lines(new_lines)
         return old_mac
-
-    def reload(self) -> dict[str, str]:
-        if not self.reload_enabled:
-            return {"status": "skipped", "reason": "disabled"}
-        try:
-            client = docker.from_env()
-            container = client.containers.get(self.container_name)
-            result = container.exec_run(["killall", "-HUP", "dnsmasq"])
-        except docker.errors.NotFound as exc:
-            raise RuntimeError(f"dnsmasq container not found: {self.container_name}") from exc
-        except docker.errors.DockerException as exc:
-            raise RuntimeError(f"docker error while reloading dnsmasq: {exc}") from exc
-        output = result.output.decode(errors="replace") if result.output else ""
-        if result.exit_code != 0:
-            raise RuntimeError(f"dnsmasq reload failed rc={result.exit_code}: {output.strip()}")
-        return {"status": "ok"}
 
     def _read_lines(self) -> list[str]:
         self.hosts_file.parent.mkdir(parents=True, exist_ok=True)

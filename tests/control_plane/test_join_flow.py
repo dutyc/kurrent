@@ -1,6 +1,6 @@
 """enroll 自动登记 / bootstrap-token 签发 / agent 删除（一键加入链路）。
 
-首次引导自动登记（enroll）+ 集群级通用 bootstrap token（不绑节点、TTL 内可复用）
+首次引导自动登记（enroll）+ 绑定 agent_id 的 bootstrap token（TTL 内可复用）
 + 节点删除（仅清登记，节点续期自动重新登记）。
 nvmet-host 组件凭据：agent enroll 上报 backend=nvmet 时控制面派生随响应下发。
 """
@@ -31,9 +31,19 @@ def tmp_pki(tmp_path):
 
 def _mock_issue(monkeypatch):
     """mock 证书签发链路（不生成真实 CA/证书）。"""
-    monkeypatch.setattr(pki_mod, "ensure_ca", lambda d: (object(), object()))
+    monkeypatch.setattr(
+        pki_mod, "ensure_ca_set",
+        lambda d: {"users": (object(), object()), "nodes": (object(), object()),
+                   "control": (object(), object())},
+    )
     monkeypatch.setattr(pki_mod, "sign_component_certs", lambda *a, **k: dict(_FAKE_CERTS))
-    monkeypatch.setattr(pki_mod, "ca_cert_pem", lambda d: b"FAKE-CA")
+    monkeypatch.setattr(pki_mod, "ca_cert_pem", lambda d, kind="nodes": b"FAKE-CA")
+
+
+def _token(tmp_pki, agent_id, component="agent", max_uses=1):
+    """签发绑定节点身份的 bootstrap token（默认一次性）。"""
+    return pki_mod.issue_bootstrap_token(tmp_pki, agent_id=agent_id, component=component,
+                                         max_uses=max_uses)
 
 
 def _enroll(client, token, agent_id, component, base_url="", capabilities=None, remark=None):
@@ -51,12 +61,14 @@ def _enroll(client, token, agent_id, component, base_url="", capabilities=None, 
 
 class TestEnrollAutoRegister:
     def test_agent_auto_registered(self, client, tmp_pki, monkeypatch):
-        """不在册 agent 用通用 token 引导 → 201 + agents.yml 自动登记（base_url 上报）。"""
+        """不在册 agent 用绑定 token 引导 → 201 + agents.yml 自动登记（base_url 上报）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)  # 集群级通用：不绑节点
+        token = _token(tmp_pki, "auto-01")
         resp = _enroll(client, token, "auto-01", "agent", "https://192.168.1.50:4840")
         assert resp.status_code == 201
         assert resp.json()["certificates"] == {k: v.decode() for k, v in _FAKE_CERTS.items()}
+        assert resp.json()["ca_nodes_crt"] == "FAKE-CA"
+        assert resp.json()["ca_control_crt"] == "FAKE-CA"
         a = agents.get("auto-01")
         assert a.base_url == "https://192.168.1.50:4840"
         assert a.role_disk and not a.role_cd and a.enabled
@@ -64,7 +76,7 @@ class TestEnrollAutoRegister:
     def test_auto_registered_with_remark(self, client, tmp_pki, monkeypatch):
         """上报 remark（声明 metadata.remark）→ 随自动登记写入台账（备注，人类识别用）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-10")
         resp = _enroll(client, token, "auto-10", "agent", "https://192.168.1.50:4840",
                        remark="storage-nvmet-01")
         assert resp.status_code == 201
@@ -73,7 +85,7 @@ class TestEnrollAutoRegister:
     def test_auto_registered_without_base_url(self, client, tmp_pki, monkeypatch):
         """无 base_url 也自动登记（空地址，控制面不探测，WebUI/CLI 可补）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-02")
         resp = _enroll(client, token, "auto-02", "agent")
         assert resp.status_code == 201
         assert agents.get("auto-02").base_url == ""
@@ -82,7 +94,7 @@ class TestEnrollAutoRegister:
         """A2 裁定（声明权威）：已在册 agent 再次 enroll/renew 时按节点声明刷新
         base_url / remark / role.cd；控制面属性（enabled/storager_ip/tags）原样保留。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-r1", max_uses=2)
         assert _enroll(client, token, "auto-r1", "agent", "https://10.0.0.5:4840",
                        capabilities={"backend": "nvmet", "cd": False},
                        remark="old-remark").status_code == 201
@@ -108,7 +120,7 @@ class TestEnrollAutoRegister:
     def test_reenroll_unreported_fields_preserved(self, client, tmp_pki, monkeypatch):
         """旧 agent 兼容：再次 enroll 未上报 base_url/remark/capabilities → 不清空现有值。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-r2", max_uses=2)
         assert _enroll(client, token, "auto-r2", "agent", "https://10.0.0.5:4840",
                        remark="kept").status_code == 201
         assert _enroll(client, token, "auto-r2", "agent").status_code == 201
@@ -120,23 +132,21 @@ class TestEnrollAutoRegister:
     def test_nvmet_host_enroll_does_not_refresh(self, client, tmp_pki, monkeypatch):
         """仅 agent 组件承载声明字段：nvmet-host enroll 不触发台账刷新。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-r3")
         assert _enroll(client, token, "auto-r3", "agent", "https://10.0.0.5:4840").status_code == 201
-        nvmet_token = pki_mod.issue_bootstrap_token(tmp_pki, "auto-r3", "nvmet-host")
+        nvmet_token = _token(tmp_pki, "auto-r3", "nvmet-host")
         assert _enroll(client, nvmet_token, "auto-r3", "nvmet-host",
                        "https://10.9.9.9:4840").status_code == 201
         assert agents.get("auto-r3").base_url == "https://10.0.0.5:4840"
 
-    def test_generic_token_reusable_across_nodes(self, client, tmp_pki, monkeypatch):
-        """通用 token TTL 内可被多次 enroll 复用（不限制使用次数）。
-
-        同一 token 引导第二个节点（不同 agent_id）→ 同样 201，token 不消耗。
-        """
+    def test_token_bound_to_agent_rejects_other(self, client, tmp_pki, monkeypatch):
+        """token 绑定 agent_id：同一 token 不能引导另一个节点（默认拒绝）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "node-a")
         assert _enroll(client, token, "node-a", "agent").status_code == 201
-        assert _enroll(client, token, "node-b", "agent").status_code == 201
-        assert agents.get("node-a") and agents.get("node-b")
+        assert _enroll(client, token, "node-b", "agent").status_code == 401
+        with pytest.raises(KeyError):
+            agents.get("node-b")
 
     def test_nvmet_derives_component_token(self, client, tmp_pki, monkeypatch):
         """agent 上报 backend=nvmet → 响应携带派生 nvmet-host token（绑 agent_id）。
@@ -145,7 +155,7 @@ class TestEnrollAutoRegister:
         换 agent_id 使用 → 401（防串用）。
         """
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-07")
         resp = _enroll(client, token, "auto-07", "agent", "https://192.168.1.50:4840",
                        capabilities={"backend": "nvmet", "cd": False})
         assert resp.status_code == 201
@@ -157,13 +167,13 @@ class TestEnrollAutoRegister:
         # 派生 token 引导 nvmet-host（agent 已登记）→ 201
         assert _enroll(client, nvmet_token, "auto-07", "nvmet-host").status_code == 201
         # 派生 token 绑 agent_id：换 id 使用 → 401（对方 agent 在册时才走到 token 校验）
-        assert _enroll(client, pki_mod.issue_bootstrap_token(tmp_pki), "other-node", "agent").status_code == 201
+        assert _enroll(client, _token(tmp_pki, "other-node"), "other-node", "agent").status_code == 201
         assert _enroll(client, nvmet_token, "other-node", "nvmet-host").status_code == 401
 
     def test_stgt_no_derivation(self, client, tmp_pki, monkeypatch):
         """stgt 后端（无 nvmet-host 组件）→ 响应不含 nvmet_token。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-08")
         resp = _enroll(client, token, "auto-08", "agent", "https://192.168.1.51:4840",
                        capabilities={"backend": "stgt", "cd": True})
         assert resp.status_code == 201
@@ -175,7 +185,7 @@ class TestEnrollAutoRegister:
     def test_auto_registered_without_capabilities_backward_compat(self, client, tmp_pki, monkeypatch):
         """旧 agent 不上报能力 → 兼容默认（仅 auto 标签、无 cd 角色、不派生）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-09")
         resp = _enroll(client, token, "auto-09", "agent")
         assert resp.status_code == 201
         assert "nvmet_token" not in resp.json()
@@ -187,7 +197,7 @@ class TestEnrollAutoRegister:
     def test_invalid_base_url_rejected(self, client, tmp_pki, monkeypatch):
         """上报地址格式非法 → 400（不自动登记）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki)
+        token = _token(tmp_pki, "auto-03")
         resp = _enroll(client, token, "auto-03", "agent", "not-a-url")
         assert resp.status_code == 400
         with pytest.raises(KeyError):
@@ -196,7 +206,7 @@ class TestEnrollAutoRegister:
     def test_nvmet_not_auto_registered(self, client, tmp_pki, monkeypatch):
         """nvmet-host 不在册不自动登记（共享 agent_id，须 agent 组件先行在册）。"""
         _mock_issue(monkeypatch)
-        token = pki_mod.issue_bootstrap_token(tmp_pki, "auto-04", "nvmet-host")
+        token = _token(tmp_pki, "auto-04", "nvmet-host")
         resp = _enroll(client, token, "auto-04", "nvmet-host")
         assert resp.status_code == 400
         assert "not registered" in resp.json()["detail"]
@@ -209,37 +219,52 @@ class TestEnrollAutoRegister:
         （token 校验本就 TTL 复用不消耗——400 先于 token 校验，重试语义天然成立）
         """
         _mock_issue(monkeypatch)
-        nvmet_tok = pki_mod.issue_bootstrap_token(tmp_pki, "auto-06", "nvmet-host")
+        nvmet_tok = _token(tmp_pki, "auto-06", "nvmet-host")
         assert _enroll(client, nvmet_tok, "auto-06", "nvmet-host").status_code == 400
         # agent 组件登记后，用同一 nvmet token 重试 → 201（token 未被消耗）
-        agent_tok = pki_mod.issue_bootstrap_token(tmp_pki)
+        agent_tok = _token(tmp_pki, "auto-06")
         assert _enroll(client, agent_tok, "auto-06", "agent").status_code == 201
         assert _enroll(client, nvmet_tok, "auto-06", "nvmet-host").status_code == 201
 
 
 class TestTokenEndpoint:
-    """POST /pki/tokens：集群级通用 bootstrap token 签发。"""
+    """POST /pki/tokens：绑定 agent_id 的 bootstrap token 签发。"""
 
     def test_issue(self, client, tmp_pki, auth_headers):
-        """签发成功：token 格式 <6位>.<16位>，明文仅本次可见；响应无节点绑定字段。"""
-        resp = client.post("/pki/tokens", headers=auth_headers)
+        """签发成功：token 格式 <6位>.<16位>，明文仅本次可见；响应含绑定字段。"""
+        resp = client.post("/pki/tokens", json={"agent_id": "auto-01"}, headers=auth_headers)
         assert resp.status_code == 201
         body = resp.json()
         assert re.fullmatch(r"[0-9a-f]{6}\.[0-9a-f]{16}", body["token"])
         assert body["expires_at"]
         assert body["usage"] == ["enroll"]
-        assert "agent_id" not in body and "component" not in body
+        assert body["agent_id"] == "auto-01" and body["component"] == "agent"
+
+    def test_requires_agent_id(self, client, tmp_pki, auth_headers):
+        """bootstrap token 不绑 agent_id → 400（默认拒绝，不再签发通用 token）。"""
+        resp = client.post("/pki/tokens", headers=auth_headers)
+        assert resp.status_code == 400
+        assert "agent_id" in resp.json()["detail"]
+
+    def test_rejects_illegal_agent_id_charset(self, client, tmp_pki, auth_headers):
+        """节点身份字符集与证书 CN 同规（小写字母/数字/./-）：非法值 400，不落台账。"""
+        resp = client.post("/pki/tokens", json={"agent_id": "Bad Node!"}, headers=auth_headers)
+        assert resp.status_code == 400
+        assert "agent_id" in resp.json()["detail"]
+        assert client.get("/pki/tokens", headers=auth_headers).json() == []
 
     def test_each_issue_is_new(self, client, tmp_pki, auth_headers):
-        """每次签发都是新 token（每次新签；多 token 并存，TTL 复用）。"""
-        first = client.post("/pki/tokens", headers=auth_headers).json()["token"]
-        second = client.post("/pki/tokens", headers=auth_headers).json()["token"]
+        """每次签发都是新 token（多 token 并存；默认一次性）。"""
+        first = client.post("/pki/tokens", json={"agent_id": "auto-01"},
+                            headers=auth_headers).json()["token"]
+        second = client.post("/pki/tokens", json={"agent_id": "auto-01"},
+                             headers=auth_headers).json()["token"]
         assert first != second
 
     def test_requires_bearer(self, client, tmp_pki, monkeypatch):
         """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
         monkeypatch.setenv("KURRENT_CP_INSECURE", "")
-        resp = client.post("/pki/tokens")
+        resp = client.post("/pki/tokens", json={"agent_id": "auto-01"})
         assert resp.status_code == 401
 
     def test_token_validate_rejects_unknown(self, client, tmp_pki, monkeypatch):
@@ -259,9 +284,11 @@ class TestTokenManagement:
         token_id = resp.json()["token"].split(".", 1)[0]
         items = client.get("/pki/tokens", headers=auth_headers).json()
         entry = next(i for i in items if i["token_id"] == token_id)
-        assert set(entry) == {"token_id", "usage", "groups", "component", "agent_id",
-                              "name", "created_at", "expires_at"}
+        assert set(entry) == {"token_id", "usage", "groups", "scopes", "uses", "max_uses",
+                              "component", "agent_id", "name", "created_at", "expires_at",
+                              "last_used_at"}
         assert entry["usage"] == ["admin"] and entry["groups"] == ["admin"]
+        assert entry["scopes"] == ["admin"] and entry["max_uses"] == 0 and entry["uses"] == 0
         assert entry["name"] == "admin" and entry["component"] == "" and entry["agent_id"] == ""
         assert entry["created_at"] and entry["expires_at"]  # created_at 签发时注入
 
@@ -300,13 +327,13 @@ class TestTokenManagement:
 
 class TestEnrollDualComponent:
     def test_agent_and_nvmet_enroll_independent(self, client, tmp_pki, monkeypatch):
-        """agent 通用 token + nvmet 派生 token（绑 agent_id）：各自引导互不影响。"""
+        """agent token + nvmet 派生 token（各自绑 agent_id）：互不影响。"""
         _mock_issue(monkeypatch)
-        agent_tok = pki_mod.issue_bootstrap_token(tmp_pki)
-        nvmet_tok = pki_mod.issue_bootstrap_token(tmp_pki, "auto-05", "nvmet-host")
+        agent_tok = _token(tmp_pki, "auto-05")
+        nvmet_tok = _token(tmp_pki, "auto-05", "nvmet-host")
         assert agent_tok and nvmet_tok
         assert _enroll(client, agent_tok, "auto-05", "agent").status_code == 201
-        # agent 在册后，nvmet 组件用自己 token 引导（agent 通用 token 不消耗不影响）
+        # agent 在册后，nvmet 组件用自己 token 引导
         resp = _enroll(client, nvmet_tok, "auto-05", "nvmet-host")
         assert resp.status_code == 201
 

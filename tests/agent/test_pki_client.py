@@ -14,7 +14,8 @@ class _FakeResp:
                 "client.crt": "FAKE-CLIENT",
                 "serving.crt": "FAKE-SERVING",
             },
-            "ca_crt": "FAKE-CA",
+            "ca_nodes_crt": "FAKE-NODES-CA",
+            "ca_control_crt": "FAKE-CONTROL-CA",
         }
 
     def __enter__(self):
@@ -94,13 +95,22 @@ def test_no_token_and_no_cert_raises(monkeypatch, pki_dir, captured):
         c._enroll(renew=False)
 
 
+def test_enroll_writes_trust_anchors(monkeypatch, pki_dir, captured):
+    """三分根：enroll 响应落盘 control（入站）与 nodes（同伴校验）两个锚。"""
+    c = _client(monkeypatch, pki_dir, captured, bootstrap_token="tok.123")
+    c._enroll(renew=False)
+    assert (pki_dir / "ca-control.crt").read_text(encoding="utf-8") == "FAKE-CONTROL-CA"
+    assert (pki_dir / "ca-nodes.crt").read_text(encoding="utf-8") == "FAKE-NODES-CA"
+
+
 def test_derived_token_written_when_present(monkeypatch, pki_dir, captured, tmp_path):
     """agent enroll 响应含 nvmet_token（backend=nvmet 派生）→ 落盘共享凭据目录。"""
     derived = tmp_path / "nvmet-host.token"
     c = _client(monkeypatch, pki_dir, captured,
                 resp_payload={
                     "certificates": {"client.crt": "C", "serving.crt": "S"},
-                    "ca_crt": "CA",
+                    "ca_nodes_crt": "N",
+                    "ca_control_crt": "C2",
                     "nvmet_token": "abc123.def4567890123456",
                 },
                 bootstrap_token="tok.123", derived_token_file=derived)

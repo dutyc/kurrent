@@ -280,12 +280,12 @@ oplog = OperationLog(LOG_FILE)
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（内部 CA 信任模型）。
+    """mTLS 客户端证书鉴权（control CA 信任模型）。
 
-    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=内部 CA 起服：TLS 层
-    强制客户端证书且校验链到内部 CA（无证书/链不符握手即被拒），此处只需确认
-    连接信息存在——身份边界 = 内部 CA 签发范围（bootstrap token 一次性引导 +
-    CSR CN 校验 + 组件登记，签发受控制面管控）。
+    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=ca-control.crt 起服：
+    TLS 层强制客户端证书且只认控制面 control 域（无证书/链不符握手即被拒），
+    此处只需确认连接信息存在——身份边界 = control CA 签发范围（只有控制面
+    持有该根签发的客户端证书）。
 
     注：uvicorn 不透传客户端证书到 ASGI scope（Kludex/uvicorn#745），应用层
     无法做 CN=control-plane 白名单；若未来 uvicorn 支持 scope 证书，可在此

@@ -234,12 +234,17 @@ Tab 切换：Identity / Disks / Boot / CD（条件展示）/ NVMe-oF Credential�
 ### Credentials（凭据）
 
 - token 台账列表（`GET /pki/tokens`，仅未过期条目）：Token ID、用途（enroll / admin）、
-  组、归属（component / agent_id）、备注、签发时间、到期时间；旧条目签发时间显示 `-`（历史条目无该字段）
+  权限（scopes）、组、归属（component / agent_id）、备注、到期、最近使用、签发时间；
+  旧条目缺失字段显示 `-`（历史条目无该字段）
 - 工具栏：`刷新`、`签发管理 token`（POST `/pki/tokens` `{"usage":"admin"}`；
   一次性明文展示 + 复制按钮 + 红字提示「仅本次可见，妥善保存」）
 - 吊销：每行 ConfirmAction 二次确认（危险按钮），DELETE `/pki/tokens/{token_id}`；
   删除即失效、无法恢复（审计 `pki.token.revoke` 留痕）
-- 与 CLI `kurrent token list|revoke` 同款调用；证书与会话轮换不在本页范围（另立项）
+- 会话台账（`GET /sessions`，管理员）：用户、组、登录、最近活动、到期，逐行吊销
+  （DELETE `/sessions/{session_id}`）与「全部下线」（DELETE `/sessions`）；登记删除后
+  下一请求即失效
+- 与 CLI `kurrent token|sessions|cert` 同款调用；证书吊销（`DELETE /pki/users/{cn}`）
+  由 CLI `kurrent cert revoke` 操作，本页只读展示 token 与会话
 
 ### Operations
 
@@ -299,7 +304,7 @@ async function request(path, options) {
 前端**不落任何凭据**在 localStorage：
 
 1. 启动探测 `GET /whoami`（`raw: true`，不触发 401 跳转）→ 已认证（浏览器导入了管理证书时走 mTLS 自动通过）直接进入
-2. 未认证 → 登录页粘贴**管理 token**（`kurrent token create --usage admin`）→ `POST /session` 换取 HttpOnly 签名 Cookie（TTL 7 天滑动续期）
+2. 未认证 → 登录页粘贴**管理 token**（`kurrent token create --usage admin`）→ `POST /session` 换取 HttpOnly 服务端会话 Cookie（12 小时 TTL，剩余不足一半才滑动续期；登记在控制面，删登记即失效）
 3. 任意请求 401 → `setUnauthorizedHandler` 把状态置回 `unauthed`（回登录页）
 4. 登出 = `DELETE /session`（无状态签名会话，服务端无吊销态）
 
@@ -307,8 +312,8 @@ async function request(path, options) {
 
 | 环境 | `/api/cp/*` 代理 | 配置位置 |
 |---|---|---|
-| `npm run dev` | Vite proxy → `http://localhost:4839`（剥离 `/api/cp` 前缀） | `vite.config.js` |
-| 生产部署 | nginx `proxy_pass` → `kurrent-control-plane:8080`（剥离 `/api/cp/`） | `deploy/nginx/nginx.conf` |
+| `npm run dev` | Vite proxy → `https://127.0.0.1`（nginx 443，`secure:false`；保留 `/api/cp` 前缀，`VITE_CP_PROXY` 可覆盖） | `vite.config.js` |
+| 生产部署 | nginx `proxy_pass` → unix socket `/run/kurrent/cp.sock`（剥离 `/api/cp/` 前缀） | `deploy/nginx/nginx.conf` |
 
 ---
 
@@ -327,8 +332,6 @@ WebUI 不再独立编排：`deploy/` 只提供 nginx 镜像，服务定义在**�
 |---|---|
 | `/` | WebUI SPA（`try_files → index.html`） |
 | `/api/cp/*` | Control Plane API 代理 |
-| `/browse/` | 文件浏览器 HTML 页面 |
-| `/api/browse/*` | njs 目录列表 JSON API |
 | `/file/*` | iPXE 文件下载（ISO、kernel、initrd） |
 
 ### Docker Compose（仓库根 `docker-compose.yml` 的 `kurrent-nginx`）
@@ -342,10 +345,9 @@ services:
       - "${KURRENT_HTTPS_PORT:-443}:443"          # 唯一对外入口（WebUI + API + 引导链 + 文件）
     volumes:
       - ./webui/app/dist:/usr/share/nginx/html:ro                 # WebUI 静态文件
-      - ./webui/deploy/www/browse:/usr/share/nginx/browse:ro       # 文件浏览器页面
       - ./webui/deploy/public:/data:ro                            # iPXE 公开文件（ISO/kernel/initrd）
       - ./control_plane/state/certs:/etc/nginx/certs:ro            # TOFU 自签证书
-      - ./control_plane/state/pki:/etc/nginx/pki:ro                # 内部 CA（仅 ca.crt 被引用）
+      - ./control_plane/state/pki/nginx:/etc/nginx/pki:ro          # 信任包（users+nodes 公钥，无私钥）
       - ./tftp:/tftp:ro                                          # iPXE 菜单/覆盖脚本（HTTPS 同源）
 ```
 
@@ -402,16 +404,12 @@ webui/
 │           └── global.css       # CSS 变量 + Reset + 字体
 │
 └── deploy/
-    ├── Dockerfile               # nginx:1.27-alpine + njs
+    ├── Dockerfile               # nginx:1.27-alpine
     ├── nginx/
     │   ├── nginx.conf           # location 块 + upstream（编排在仓库根 docker-compose.yml）
-    │   └── njs/
-    │       └── file-list.js     # JSON 目录列表（njs）
+    │   └── snippets/            # 身份头断言片段
     ├── public/                  # iPXE 公开文件目录
     │   └── .gitkeep
-    └── www/
-        └── browse/
-            └── index.html       # 文件浏览器 HTML
 ```
 
 ---
@@ -426,5 +424,5 @@ webui/
 | 样式 | 纯 CSS（CSS 变量驱动，零第三方 UI 库） |
 | i18n | 自研 React Context（零依赖） |
 | API | 原生 fetch（零 HTTP 库） |
-| 部署 | nginx:1.27-alpine + njs 模块 |
+| 部署 | nginx:1.27-alpine（静态文件 + API 代理，无脚本执行面） |
 | 构建产物 | 纯静态文件（HTML + JS + CSS）：JS 302.8 KB（gzip 93.6 KB）／CSS 37.9 KB（gzip 6.5 KB） |

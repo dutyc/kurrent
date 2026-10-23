@@ -12,7 +12,7 @@
 
 集群大脑。容器化节点，运行：
 
-- **控制面 HTTP 服务**（容器内 `:8080`，宿主仅 `127.0.0.1:4839`）——设备台账与设备池、设备↔Worker 绑定、Worker 生命周期编排、存储调度（系统盘创建 / 删除）、启动变量投影、审计日志
+- **控制面 HTTP 服务**（容器内经 unix socket `/run/kurrent/cp.sock` 供 nginx 访问，不监听 TCP）——设备台账与设备池、设备↔Worker 绑定、Worker 生命周期编排、存储调度（系统盘创建 / 删除）、启动变量投影、审计日志
 - **nginx**（`:443`，唯一对外入口）——WebUI SPA、管理面 API（`/api/cp/`）、引导链裸路径（`/devices/…`、`/boot-vars`）、iPXE 资产（`/file/`）与菜单（`/tftp/`）；`:80` 仅 301 升级
 - **dnsmasq**（host 网络）——DHCP / TFTP 与引导文件分发
 - **Web UI**——REST API 的一个客户端，不是独立系统；鉴权走会话 Cookie
@@ -69,20 +69,26 @@
 
 两层彼此正交的信任。
 
-**① 管理面认证**——三种凭据串行短试、统一产出 `Identity{name, groups, method}`：
+**① 管理面认证**——三种凭据串行短试、统一产出 `Identity{name, groups, method, class}`：
 
-- mTLS 客户端证书（nginx 校验链后透传 DN，CN = 用户名、O = 组）
-- 管理 token（Bearer，台账只存 sha256 摘要，TTL 内有效）
-- 会话 Cookie（HttpOnly 签名会话，7 天滑动续期，浏览器登录态）
+- mTLS 客户端证书（nginx 校验链后透传 DN/issuer/serial/fingerprint/class；CN = 用户名，组由 `state/users.yml` 决定；证书可由 `POST /pki/users/{cn}` 为已登记用户签发，users CA 吊销走 CRL（可按序列号），下一次握手即拒绝；控制面每 12 小时重签 CRL 并由 nginx 容器内 watcher 自行 reload）
+- 管理 token（Bearer；台账只存 sha256 摘要；scope = `admin` / `readonly` / `enroll`，TTL 默认 24 小时、上限 30 天，`last_used_at` 节流回写）
+- 服务端会话（Cookie `__Host-kurrent_session` 只携带 `{jti, exp, epoch}`，身份与组以 `state/sessions.yml` 为准；12 小时 TTL，删登记即下一请求失效，支持逐个吊销与全部下线）
 
-授权：读请求只需已认证，写请求需 `admin` 组。凭据自举：控制面启动时用内部 CA 签发 admin 证书并渲染 `admin.conf`。
+凭据域按三个独立根拆分：`users`（人类证书）、`nodes`（agent / nvmet-host）、`control`（控制面客户端）。nginx 只信任 users + nodes 的公钥包，按证书 issuer 判定主体类 `human` / `component`；控制面每个路由声明接受的主体类，**默认拒绝**——节点证书不能访问管理面，人类证书不能调用 `/enroll/renew`。引导 token 绑定节点身份（`agent_id`）且**默认一次性**（60 分钟 TTL，批量用 `max_uses` 显式放开），不再存在「任意节点可用」的通用 token。
 
-**信任前提**：`X-Client-Cert-DN` 头只信 nginx 注入，因此 **443 是唯一对外入口、控制面端口只绑 `127.0.0.1`**——两者缺一即可伪造管理员身份。
+组件证书同样可即时吊销：签发（enroll / renew）时按序列号登记，`DELETE /pki/components/{agent_id}` 标记吊销、写 nodes CRL（`clients.crl` 的第二张表）、reload nginx 并删除该节点的 bootstrap token；`/enroll/renew` 对已吊销序列号返回 403，堵住 CRL 尚未 reload 时换发新证书的窗口。
+
+授权：读请求只需已认证，写请求需 `admin` 组；`enroll` scope 的 token 只能签发 bootstrap token，不能签发 admin token。凭据自举：控制面启动时创建三个 CA，用 users CA 签发 admin 证书并渲染 `admin.conf`（CN=admin，无 O），管理员组映射写入 `users.yml`。
+
+**审计与告警**：每请求写一条 `state/audit.jsonl`（主体类 / 主体 / issuer / serial / fingerprint / 路由 / 决策 / 原因 / request_id），不记录 secret 与 token 明文；写盘失败时请求 `503`（fail-closed）。八条检测写入 `event=alarm`：引导凭据 `injected && !verified`、component/control 进入管理路由、未知 issuer / CRL 命中（CRL 拒绝发生在 nginx 握手层，应用审计记录到达应用层的 issuer 证据）、同源认证失败风暴、bootstrap 身份/CN 不符、用户/管理员证书签发 / CRL 更新 / CA 生成、`users.yml` 变更、审计写入失败。
+
+**信任前提**：`X-Client-Cert-*` 与 `X-Client-Class` 头只信 nginx 注入（其余反代 location 默认清空），因此 **443 是唯一对外入口、控制面只监听 unix socket**——缺一即可伪造管理员身份。
 
 **② 设备身份信任根**——引导链上的设备认证：
 
 - 私钥在设备 NVRAM 内生成并持久化（ECDSA P-256），指纹上报不鉴权，但只喂设备池、不产生任何权限
-- 挑战-响应验签（nonce 一次性、绑定 MAC）证明"这台机器确实是它"
+- 挑战-响应验签（nonce 一次性、绑定 MAC）证明"这台机器确实是它"；密钥轮换（`POST /devices/rotate`）用旧密钥签名 `rotate‖mac‖new_pubkey‖nonce`，成功后旧密钥立即失效；`report` / `challenge` / `boot-vars` 按来源 IP 限速（`boot-vars` 是最贵的验签路径）
 - TOFU 单锚：服务器自签证书的指纹在首次握手时落到设备 NVRAM，其后任何校验失败即中止
 - **绑定即认证**：`/boot-vars` 校验请求 MAC 是否属于命中 Worker 的绑定设备，防止其他设备冒领引导身份
 

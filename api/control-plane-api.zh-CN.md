@@ -23,11 +23,8 @@ Control Plane 是 Controller 节点上的常驻 HTTP 服务，负责：
 
 对外入口（唯一）：`https://<host>/api/cp`（nginx 443；80 仅 301 升级）。
 
-本地调试（在控制面服务器上直连回环映射）：
-
-```text
-http://localhost:4839
-```
+控制面管理面不监听任何 TCP 端口：nginx 经共享卷中的 unix socket（`/run/kurrent/cp.sock`）
+转发，容器健康检查走同一 socket。本机调试请经 443 入口，或进入控制面容器访问该 socket。
 
 > 入口使用 TOFU 自签证书（`control_plane/state/certs/server.crt`，控制面启动时自动生成），
 > curl 需加 `-k`，或 `--cacert control_plane/state/certs/server.crt` 固定信任该证书本体。
@@ -43,19 +40,46 @@ http://localhost:4839
 
 ### 1.3 鉴权（认证器链）
 
-外部访问统一经 nginx 443 入口（唯一对外入口）；控制面 4839 仅绑本机回环。除
-`GET /healthz` 与 iPXE 引导链端点（`/boot-vars`、`/devices/report`、`/devices/challenge`）
-外，管理面接口要求认证——三种凭据**串行短试**（首个成功即止；凭据无效即 `401`，不降级）：
+外部访问统一经 nginx 443 入口（唯一对外入口）；控制面管理面只监听 unix socket，
+不暴露 TCP。除 `GET /healthz` 与 iPXE 引导链端点（`/boot-vars`、`/devices/report`、
+`/devices/challenge`）外，管理面接口要求认证——三种凭据**串行短试**（首个成功即止；
+凭据无效即 `401`，不降级）：
 
 | 凭据 | 载体 | 说明 |
 |---|---|---|
-| mTLS 客户端证书 | 443 双向 TLS | `kurrent init` 签发的 admin 证书（CN=用户名、O=组）；CLI 自动发现 `control_plane/state/admin.conf` 使用（脱离仓库的二进制由 `kurrent credentials install` 装一份自包含快照到 `~/.kurrent`，发现链垫底）。nginx 校验证书链（内部 CA）后透传 DN，控制面按 CN/O 识别身份 |
-| 管理 token | `Authorization: Bearer <token>` | `kurrent token create --usage admin` 签发（台账只存 sha256 摘要，TTL 内有效）；供脚本调用与 WebUI 登录 |
-| 会话 Cookie | `kurrent_session` | 以证书或管理 token 经 `POST /session` 换取（HttpOnly 签名会话，TTL 7 天滑动续期）；浏览器登录态 |
+| mTLS 客户端证书 | 443 双向 TLS | `kurrent init` 签发的 admin 证书（CN=admin、无 O）；CLI 自动发现 `control_plane/state/admin.conf` 使用（脱离仓库的二进制由 `kurrent credentials install` 装一份自包含快照到 `~/.kurrent`，发现链垫底）。nginx 校验证书链（users CA + nodes CA 信任包）后，仅在 `SUCCESS` 时注入 DN / issuer / serial / fingerprint / class，控制面按 CN 查 `state/users.yml` 得组；其余反代 location 的身份头默认清空 |
+| 管理 token | `Authorization: Bearer <token>` | `kurrent token create --usage admin` 签发（台账只存 sha256 摘要）；scope 为 `admin` / `readonly` / `enroll`，TTL 默认 24 小时、上限 30 天；供脚本调用与 WebUI 登录 |
+| 会话 Cookie | `__Host-kurrent_session` | 以证书或管理 token 经 `POST /session` 换取；Cookie 只携带 `{jti, exp, epoch}`，身份与组以服务端 `state/sessions.yml` 为准（12 小时 TTL，剩余不足一半才滑动续期）；删登记即下一请求失效 |
 
-授权（RBAC 最小版）：读请求（GET）只需**已认证**（不做组校验）；写请求
-（POST/PUT/PATCH/DELETE）需 admin 组，否则 `403`。组件通道语义不变：`/enroll/renew` 由
-nginx 强制组件证书，引导链端点走各自校验。
+**主体类（class）**：`human`（users CA 签发的客户端证书）、`component`（nodes CA 签发的
+agent / nvmet-host 证书）、`automation`（Bearer 管理 token）、`anonymous`（无凭据）。
+nginx 按证书 issuer 判定 human / component 并透传 `X-Client-Class`；控制面路由声明
+各自接受的主体类，**默认拒绝**（跨类请求 `403`：节点证书不能访问管理面，人类证书
+不能调用 `/enroll/renew`）。
+
+授权（RBAC 最小版）：读请求（GET）只需**已认证**；写请求
+（POST/PUT/PATCH/DELETE）需 admin 组，否则 `403`。唯一例外是 scope 含 `enroll`
+的自动化 token：仅放行 `POST /pki/tokens` 签发 bootstrap token，且不得签发 admin
+token；读接口同样 `403`（scope 语义是「仅签发」，不能借读接口枚举设备/Worker/凭据
+与会话），也不能用该 token 换浏览器会话。Cookie 认证的写请求还要求 `Origin` 与 `Host`
+同源。引导链端点（`/boot-vars`、
+`/devices/report`、`/devices/challenge`）为 `anonymous`；`POST /enroll` 接受
+`anonymous`（Bearer 引导 token）与 `automation`；`POST /enroll/renew` 仅接受
+`component`。
+
+**审计**：每请求写一条 `state/audit.jsonl`（`event` / `principal_class` / `principal` /
+`issuer` / `serial` / `fingerprint_sha256` / `route` / `decision` / `reason` /
+`request_id` / `client_ip`），响应头返回 `X-Request-Id`；不记录 secret、token 明文、
+私钥与 PSK。审计写入失败时请求返回 `503`（fail-closed）。八条告警以 `event=alarm`
+事件写入同一文件：引导凭据 `injected && !verified`、component/control 进入管理路由、
+未知 issuer / CRL 命中（CRL 由 nginx 在握手层直接拒绝，应用侧告警覆盖到达应用层的未知 issuer 证据）、同源认证失败风暴、bootstrap 身份/CN 不符、管理员证书签发 /
+CRL 更新 / CA 生成、`users.yml` 变更、审计写入失败。
+
+**告警外投（可选）**：设置 `KURRENT_CP_ALARM_WEBHOOK=<url>` 后，每条 `event=alarm`
+审计事件会以 JSON POST 到该地址（字段与审计事件相同，另含 `alarm` / `severity` /
+`detail`；不含任何密钥或明文）。投递走后台线程与有界队列（200 条），失败重试 2 次
+（间隔 1s / 4s，单次超时 5s）；队列满时丢弃并记 ERROR 日志——外投不进入请求路径，
+不影响 `503` fail-closed 语义。未设置该变量时不投递。
 
 开发模式：`KURRENT_CP_INSECURE=1` 时放行全部请求（身份 insecure/admin），仅限本地
 开发；生产严禁——不存在“未配置凭据即放行”的空放行路径。
@@ -93,6 +117,14 @@ curl -s "$BASE_URL/workers" \
 | `state/credential-push.yml` | 凭据推送状态台账（逐 Agent 送达结果，对账与投影用，见 7.7） |
 | `state/masters.yml` | 母盘标签登记台账（os / os_version 备注，见 6.4） |
 | `state/settings.json` | 运行时设置（注册窗口 / 验签强制开关） |
+| `state/users.yml` | 管理面用户组映射（CN → groups；首次启动自举 admin 条目，之后随证书 CN 查组） |
+| `state/sessions.yml` | 服务端会话登记（key = `sha256(jti)`；删条目即失效，`epoch` 用于全部下线） |
+| `state/audit.jsonl` | 认证/授权/凭据审计与告警（见 1.3；与 `operations.jsonl` 分离） |
+| `state/pki/ca/{users,nodes,control}/` | 三分根 CA（users=人类、nodes=节点组件、control=控制面客户端） |
+| `state/pki/users/issued.yml` | users 域证书登记（按序列号；含吊销时间与原因） |
+| `state/pki/components/issued.yml` | nodes 域组件证书登记（agent / nvmet-host，签发时写入；含吊销时间与原因） |
+| `state/pki/nginx/ca-bundle.pem` | nginx 信任包（仅 users + nodes 公钥；不含私钥） |
+| `state/pki/nginx/clients.crl` | nginx 客户端证书 CRL（users + nodes 两张表拼接） |
 | `state/operations.jsonl` | 控制面操作轨迹（含 actor） |
 | `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` 绑定（**派生视图**，权威在设备台账） |
 
@@ -115,16 +147,21 @@ curl -s "$BASE_URL/workers" \
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
 | `GET` | `/whoami` | 当前请求身份（认证器链结果，见 1.3） |
-| `POST` | `/session` | 凭据换会话 Cookie（登录，见 1.3） |
-| `DELETE` | `/session` | 登出（清除会话 Cookie，见 1.3） |
+| `POST` | `/session` | 凭据换会话 Cookie（登录，登记在服务端） |
+| `DELETE` | `/session` | 登出（删除会话登记并清除 Cookie） |
+| `GET` | `/sessions` | 列出未过期会话（管理员，见 6.7） |
+| `DELETE` | `/sessions/{session_id}` | 逐个吊销会话（管理员，见 6.7） |
+| `DELETE` | `/sessions` | 全部下线：清空登记并递增 epoch（管理员，见 6.7） |
 | `GET` | `/boot-vars` | iPXE 启动变量动态注入，不鉴权 |
 | `GET` | `/devices/report` | iPXE 设备信息上报（不鉴权，11 字段，见 16.6） |
 | `GET` | `/devices/challenge` | 一次性 nonce 签发（不鉴权，挑战-响应，见 5.2） |
+| `POST` | `/devices/rotate` | 设备密钥轮换（不鉴权，旧密钥签名，见 5.3） |
 | `GET` | `/devices` | 设备池列表（state 过滤，见 16.1） |
 | `GET` | `/devices/{mac}` | 单设备详情（见 16.2） |
 | `POST` | `/devices` | 手动注册设备入池（见 16.3） |
 | `POST` | `/devices/import` | 批量导入设备清单（见 16.4） |
 | `DELETE` | `/devices/{mac}` | 注销设备（吊销，见 16.5） |
+| `DELETE` | `/devices/revoked` | 清除全部已吊销设备（可选 `dry_run` 预览，见 16.5.1） |
 | `GET` | `/settings/registration-window` | 查询注册窗口状态（见 5.1） |
 | `POST` | `/settings/registration-window` | 开启注册窗口（TTL 1-60 分钟硬上限；可选放行额度 `max_devices` 1-1000 台，见 5.1） |
 | `DELETE` | `/settings/registration-window` | 提前关闭注册窗口（见 5.1） |
@@ -134,9 +171,14 @@ curl -s "$BASE_URL/workers" \
 | `POST` | `/agents` | 注册新 Agent（写入 agents.yml，重复 id 返回 409） |
 | `POST` | `/agents/probe` | 探测 Agent 并自动推导注册参数（预览，不写文件） |
 | `PUT` | `/agents/{agent_id}` | 更新 Agent 配置（id 不可改） |
-| `POST` | `/pki/tokens` | 签发集群级通用 bootstrap token（不绑节点，TTL 内可复用，见 6.5） |
+| `POST` | `/pki/tokens` | 签发 bootstrap token（绑 agent_id、默认一次性、60 分钟）或管理 token（scope/TTL，见 6.5） |
 | `GET` | `/pki/tokens` | 列出未过期 token 台账（无明文/hash，见 6.5） |
 | `DELETE` | `/pki/tokens/{token_id}` | 吊销 token：删条目即失效（见 6.5） |
+| `POST` | `/pki/users/{cn}` | 为已登记用户签发证书（私钥仅本次响应可见，见 6.7） |
+| `GET` | `/pki/users` | 列出 users CA 签发的证书（含已吊销/已过期，见 6.7） |
+| `DELETE` | `/pki/users/{cn}` | 吊销证书（可选 `serial` 精确到一张）：重签 CRL + reload nginx + 踢会话（见 6.7） |
+| `GET` | `/pki/components` | 列出 nodes 域组件证书（含已吊销/已过期，见 6.7） |
+| `DELETE` | `/pki/components/{agent_id}` | 吊销组件证书（可选 `serial`）：写 nodes CRL + reload nginx + 删 bootstrap token（见 6.7） |
 | `DELETE` | `/agents/{agent_id}` | 删除 Agent 台账（含母盘标签清理，见 6.6） |
 | `GET` | `/agents/{agent_id}/luns` | 列出指定 Agent 上的 iSCSI target/LUN |
 | `GET` | `/masters` | 聚合列出全部存储节点上的母盘清单（合并登记标签，供克隆选盘） |
@@ -189,9 +231,11 @@ curl -s "$BASE_URL/healthz"
 
 ### 说明
 
-给 iPXE 启动脚本读取 per-worker 启动变量。该接口不鉴权，只暴露受控内网启动所需变量。
+给 iPXE 启动脚本读取 per-worker 启动变量。该接口不鉴权，只暴露受控内网启动所需变量；其中 NVMe-oF 凭据（`nbft_secret` / `nbft_tls_psk`）**只在设备身份验签通过后注入**（`mac` + 一次性 `nonce` + 有效签名，见 5.1）。
 
 > **注意**：该端点**只读**（启动变量投影，无写副作用）。注册窗口期注册（新 MAC 携公钥入设备池）已收敛到 `GET /devices/report`（见 16.6），由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`。
+
+**限速**：按来源 IP 滑窗限速（默认 240 次/分钟，`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 可覆盖，`<=0` 关闭）；超限 `429` + `Retry-After` 并写 `boot_rate_limited` 告警。验签是这里最贵的操作，限速只抑制扫描，不作身份边界。
 
 Control Plane 按以下顺序识别设备并投影启动变量：
 
@@ -213,14 +257,14 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 | `base_iqn` | `workers.yml` 中该 Worker 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 `iqn` 去掉最后一个 `:` 后的前缀——盘标识权威 = NQN，IQN 由盘 NQN 派生；Worker 无系统盘时**不返回**（iPXE 沿用 `boot.ipxe.cfg` 静态默认值） |
 | `storager_ip` | 默认启动盘（同上选盘规则）的 `agent` -> `agents.yml` 中该 Agent 的 `storager_ip`（数据面地址，NVMe-oF 引导与 iSCSI 安装器共用）；无系统盘时不返回 |
 | `iscsi_sep` | iSCSI root **连接符**（`${storager-ip}` 与 `${base-iqn}` 之间的分隔字段，安装器 iSCSI 拼装消费），root-path 拼装由 iPXE 侧完成。**仅 stgt / LIO 后端返回**：stgt 后端为 `:::1:`（lun 占位 1），LIO 后端为 `::::`（空占位）；后端类型**实时查询 Agent `/capabilities` 的 `backend` 字段**（节点自报，能力即真相），未登记 / 查询失败 / 取值非法则默认 stgt 格式；**不由 `agents.yml` 的 `tags` 推导**（tags 只作人工标签，否则标签与实况漂移时会按过期值拼出错连接符）；**nvmet 后端不下发**（menu 安装器项 `isset ${iscsi-sep}` 守卫跳过）；无系统盘时不返回 |
-| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker 且密钥库有条目时注入**，无密钥 / 未绑定 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（nvmet 后端下无密钥即 `/boot-vars` 整体不下发，menu 因缺变量而拒绝引导） |
-| `nbft_tls_psk` | NVMe/TCP TLS 的预共享密钥：**认证密钥的纯函数**（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex，见 7.7，无独立存储字段——轮换/吊销认证密钥即原子轮换/吊销 PSK）。**须同时满足「已绑定且有密钥」「后端为 nvmet」「该 Agent 上报的数据面端口就绪」才下发**，任一不满足即整个引导变量不下发（拒绝引导并记审计）——加密是默认行为，无明文回退。固件用它在该端口完成自身握手，并随 NBCT 表交给 initramfs，由其在同一端口以 `--tls` 重连 |
+| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker、密钥库有条目且设备身份验签通过时注入**，无密钥 / 未绑定 / 未验签 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（nvmet 后端下无密钥即 `/boot-vars` 整体不下发，menu 因缺变量而拒绝引导） |
+| `nbft_tls_psk` | NVMe/TCP TLS 的预共享密钥：**认证密钥的纯函数**（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex，见 7.7，无独立存储字段——轮换/吊销认证密钥即原子轮换/吊销 PSK）。**须同时满足「已绑定且有密钥」「设备身份验签通过」「后端为 nvmet」「该 Agent 上报的数据面端口就绪」才下发**，任一不满足即整个引导变量不下发（拒绝引导并记审计）——加密是默认行为，无明文回退。固件用它在该端口完成自身握手，并随 NBCT 表交给 initramfs，由其在同一端口以 `--tls` 重连 |
 | `nbft_tls_port` | 数据面端口（固件段与内核段共用；实时取 Agent `/capabilities.port.trsvcid`——能力即真相，同 `iscsi_sep`/`backend` 的实时判定口径）；与 `nbft_tls_psk` 同条件下发。menu 在 sanboot URI 上拼 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` |
 | `hostnqn` | 该 Worker 的发起端 Host NQN（盘 NQN 前缀 + `:host.<worker_id>`，与盘 NQN 同域、与 nvmet-host 登记的 host 条目一致）；**默认盘带 NQN 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件补丁 `0005` 支持 `hostnqn` 设置） |
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
 | `os_version` | 默认启动盘的版本备注（盘记录 `os_version`，`''` = 无版本）——空值不下发，menu.ipxe 的 `os-label` 拼接自适应（有版本显示 `os version`）。Worker 无系统盘时不返回 |
 | `menu_default` | 推导链：`workers.yml` 的 `default_disk`（建盘后单独设置，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。2026-08-30 动态化：菜单 OS 项已收敛为唯一通用项 `boot-os`，OS 语义的默认值（`default_disk`，或 `boot.menu_default` 中的旧系统名）统一归一到 `boot-os`；非 OS 导航值（`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`）原样返回 |
-| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutSec`（默认 1，按毫秒消费）。单位均为毫秒 |
+| `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutSec`（默认 1）。单位均为毫秒 |
 
 查找 Worker 的规则（**绑定权威优先**）：
 
@@ -277,7 +321,7 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 
 ### 防冒领（绑定即认证）
 
-请求带 `mac` 时，Control Plane 按设备台账校验该设备**绑定到的 Worker**（`bound_worker_id`，绑定权威）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份，保持兼容放行。这使设备↔Worker 绑定成为开机时的认证边界：只有绑定的设备才能拿到该 Worker 的启动配置（如 `disk_nqn` / `storager_ip`）。
+请求带 `mac` 时，Control Plane 按设备台账校验该设备**绑定到的 Worker**（`bound_worker_id`，绑定权威）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份：**验签强制开启时直接拒绝**（`missing_mac`）；过渡期只下发菜单/导航变量，绝不注入凭据。这使设备↔Worker 绑定与设备验签共同成为开机时的认证边界：只有绑定的设备、并在验签通过后，才能拿到该 Worker 的启动配置与数据面凭据（如 `disk_nqn` / `nbft_secret` / `nbft_tls_psk`）。
 
 ### Query 参数
 
@@ -421,7 +465,7 @@ agents:
 
 注册窗口是部署期的受控注册通道（2026-08-21 裁定取代原 `auto-register` 永久开关，旧端点已删除）：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 硬上限 60 分钟（代码层不可配永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——密钥认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
 
-验签强制开关（过渡期兼容）：关闭时无密钥设备照现状放行（防冒领边界）；开启后 `/boot-vars` 对已绑定设备执行注入四条件第 4 条——无 `key_hash` → `no_key` 拒绝；缺 `nonce`/`sig` → `missing_sig` 拒绝；重放或签名无效 → 拒绝。已认领设备带无效签名在过渡期同样拒绝（伪造签名不放行）。建议全部存量设备完成密钥认领后再开启。
+验签强制开关（过渡期兼容）：关闭时无密钥设备仍可拿到菜单变量，但**凭据一律不注入**（凭据只认验签）；开启后 `/boot-vars` 对已绑定设备执行注入四条件第 4 条——缺 `mac` → `missing_mac` 拒绝；无 `key_hash` → `no_key` 拒绝；缺 `nonce`/`sig` → `missing_sig` 拒绝；重放或签名无效 → 拒绝。已认领设备带无效签名在过渡期同样拒绝（伪造签名不放行）。建议全部存量设备完成密钥认领后再开启。
 
 #### GET /settings/registration-window
 
@@ -501,7 +545,7 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 
 ### 5.2 GET /devices/challenge
 
-挑战端点（**不鉴权**）：为 `/boot-vars` 验签链路签发一次性 nonce（短 TTL、绑定 MAC、防重放，nonce 本身无秘密）。设备不存在或未认领（无 `key_hash`）→ **404**（无法走验签链路）。
+挑战端点（**不鉴权**）：为 `/boot-vars` 验签链路签发一次性 nonce（短 TTL、绑定 MAC、防重放，nonce 本身无秘密）。设备不存在、未认领（无 `key_hash`）或已吊销 → **404**（无法走验签链路，且不给吊销设备签发 nonce）。
 
 **Query 参数**：
 
@@ -516,13 +560,34 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-**错误**：`400`（非法 MAC）；`404`（设备不存在/未认领）。
+**错误**：`400`（非法 MAC）；`404`（设备不存在/未认领）；`429`（同一来源 IP 每分钟超过阈值，带 `Retry-After`）。
+
+**限速**：与 `/devices/report` 一样按来源 IP 滑窗限速（默认 120 次/分钟，`KURRENT_CP_RATE_LIMIT_CHALLENGE` 可覆盖，`<=0` 关闭）；超限写 `boot_rate_limited` 告警。
 
 **挑战-响应链路（与 `/boot-vars` 配合，设备身份验签）**：
 
 1. `GET /devices/challenge?mac=<mac>` → 执行响应脚本后取得 `${nonce}`
 2. iPXE 用设备密钥对 `nonce‖mac`（UTF-8 无分隔拼接，mac 小写冒号格式）做 ECDSA P-256 签名 → `sig`（base64(DER)）；hostname 不参与签名（由 MAC → 设备台账绑定保证身份）
 3. `GET /boot-vars?mac=&hostname=&nonce=&sig=` → 验签通过才下发凭据（注入四条件第 4 条，见 5.1）；验签失败 → 空脚本（拒绝下发，审计 `boot_vars.credential`，reason 见 5.1）
+
+### 5.3 POST /devices/rotate
+
+设备密钥轮换（**不鉴权**，凭旧密钥签名自证；不重开注册窗口、不发证书）。设备须已认领（有 `key_hash`）且未吊销。
+
+1. `GET /devices/challenge?mac=` 取一次性 nonce
+2. 用**旧私钥**签名 `rotate‖mac‖new_pubkey‖nonce`（UTF-8 无分隔拼接；`new_pubkey` 为 130 hex 未压缩点，`mac` 为小写冒号格式）
+3. `POST /devices/rotate?mac=&pubkey=&nonce=&sig=`（`sig` = base64(DER)）
+
+成功后台账 `key_hash` 换成新公钥并记录 `key_rotated_at`；旧密钥在 `/boot-vars` 验签链路上**立即失效**。nonce 一次性（重放 `401`）；设备已吊销 `403`；未认领（无 `key_hash`）`409`；未知设备 `404`；非法 `pubkey` `400`。限速 10 次/分钟/来源 IP（`KURRENT_CP_RATE_LIMIT_ROTATE` 覆盖）。
+
+```bash
+# sig 须由设备旧私钥生成：ECDSA-P256(rotate + mac + new_pubkey + nonce)
+curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>&nonce=<64-hex>&sig=<base64-DER>"
+```
+
+```json
+{ "mac": "00:0c:29:b9:8b:2d", "rotated": true }
+```
 
 ---
 
@@ -817,31 +882,47 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/
 | `401` | 缺少 Token 或 Token 错误 |
 | `404` | Agent 不存在 |
 
-## 6.5 一键加入：bootstrap token 签发（集群级通用）+ enroll 自动登记
+## 6.5 一键加入：bootstrap token 签发（绑定节点身份）+ enroll 自动登记
 
 ### 说明
 
-控制面签发**集群级通用 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要、TTL 默认 7 天）。**不绑节点**——节点身份由节点自决（join 自动生成随机短标识，人工输入归属声明 `metadata.remark` 备注）+ enroll 自动登记；TTL 内可被**多次 enroll 复用**（不消耗，不限制使用次数）。每次签发都是新 token（明文不可恢复、不可再查）；**支持吊销**（`DELETE /pki/tokens/{token_id}`，删除即失效），未吊销的 token 到期自然失效，无 409 幂等限制。
+控制面签发**绑定节点身份的 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要，TTL 默认 **60 分钟**、上限 24 小时）：签发时指定 `agent_id`（= 节点声明 `metadata.name`，字符集 `[a-z0-9][a-z0-9.-]*`），enroll 只接受同一身份。token **默认一次性**：使用额度在签发前原子占用，签发失败退回；批量引导用 `max_uses`（`--uses N`，上限 100）显式放开次数，不使用无限复用。每次签发都是新 token（明文不可恢复、不可再查）；**支持吊销**（`DELETE /pki/tokens/{token_id}`，删除即失效），未吊销的 token 到期自然失效。
+
+节点身份是机器身份：`kurrent token create` 省略 `--agent-id` 时生成随机 12 位 hex 短标识，
+并把它写进输出的 join 命令（`--agent-id`）；人工识别用备注写 `metadata.remark`。
 
 `nvmet-host` 组件凭据**不在此签发**：agent enroll 上报 `backend=nvmet` 时控制面派生（绑 agent_id）随 enroll/renew 响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）。
 
 ### POST /pki/tokens
 
-请求体可选：`{"usage": "bootstrap"}`（默认，节点引导 token）或 `{"usage": "admin"}`
-（管理 token，认证器链 Bearer 用；groups=admin）。
+请求体：`{"usage": "bootstrap", "agent_id": "<节点 id>", "component": "agent", "max_uses": 1}`
+（默认 bootstrap；`component` 取 `agent` | `nvmet-host`；`max_uses` 1-100，默认 1），或
+`{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}`
+（管理 token，认证器链 Bearer 用；scope 取 `admin` | `readonly` | `enroll`，省略 =
+`admin`；TTL 1-720 小时，默认 24）。scope 是权限上限：`readonly` 只读，`enroll`
+只能签发 bootstrap token（其余读写接口与换会话一律 `403`）；`readonly` / `enroll`
+token 不得签发 admin token。
 
 #### curl
 
 ```bash
-# 节点引导 token（默认）
+# 节点引导 token（绑定节点身份）
 curl -s -X POST "$BASE_URL/pki/tokens" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "node-01"}'
 
 # 管理 token（供脚本调用与 WebUI 登录；等同 admin 证书身份）
 curl -s -X POST "$BASE_URL/pki/tokens" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"usage": "admin"}'
+
+# 只读管理 token（24 小时）
+curl -s -X POST "$BASE_URL/pki/tokens" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}'
 ```
 
 #### 成功返回（201）
@@ -851,23 +932,29 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
   "token": "a1b2c3.0123456789abcdef",
   "expires_at": "2026-09-22T12:00:00Z",
   "usage": ["enroll"],
-  "groups": []
+  "groups": [],
+  "scopes": [],
+  "uses": 0,
+  "max_uses": 1,
+  "agent_id": "node-01",
+  "component": "agent"
 }
 ```
 
 `token` 明文仅本次返回可见（存储只留 sha256 摘要）；`usage=["enroll"]` 为节点引导
-token（enroll 校验用，不绑节点、TTL 内可复用）；`usage=["admin"]` + `groups=["admin"]`
+token（绑定 `agent_id`、默认一次性、60 分钟）；`usage=["admin"]` + `scopes=["admin"]`
 为管理 token（认证器链 Bearer 用；`kurrent token create --usage admin` 同款）。
 
 #### 常见错误
 
 | HTTP 状态码 | 常见原因 |
 |---:|---|
+| `400` | bootstrap token 缺少 `agent_id` / `agent_id` 字符集非法 / 额度或 TTL 越界 / scope 非法 |
 | `401` | 缺少 Token 或 Token 错误 |
 
 ### GET /pki/tokens
 
-列出**未过期** token 台账条目（可视化管理）：bootstrap 引导 token、管理 token、nvmet-host 派生 token 同表。不返回明文（本就不可恢复）与 `token_secret_hash`；`created_at` 对旧条目为空串（该字段自签发时注入，历史条目没有）。读请求只需已认证（RBAC 最小版）。
+列出**未过期** token 台账条目（可视化管理）：bootstrap 引导 token、管理 token、nvmet-host 派生 token 同表。不返回明文（本就不可恢复）与 `token_secret_hash`；`created_at` 对旧条目为空串（该字段自签发时注入，历史条目没有）。`scopes` / `uses` / `max_uses` / `last_used_at` 供审计与容量观察（`max_uses=0` 表示不限，旧条目与管理 token）。读请求只需已认证（RBAC 最小版）。
 
 ```bash
 curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
@@ -879,11 +966,15 @@ curl -s "$BASE_URL/pki/tokens" -H "Authorization: Bearer $TOKEN"
     "token_id": "a1b2c3",
     "usage": ["admin"],
     "groups": ["admin"],
+    "scopes": ["admin"],
     "component": "",
     "agent_id": "",
     "name": "admin",
     "created_at": "2026-09-27T09:00:00+00:00",
-    "expires_at": "2026-10-04T09:00:00+00:00"
+    "expires_at": "2026-10-04T09:00:00+00:00",
+    "last_used_at": "2026-09-27T10:12:00+00:00",
+    "uses": 0,
+    "max_uses": 0
   }
 ]
 ```
@@ -901,24 +992,26 @@ curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
 
 ### 6.5.1 enroll 自动登记（POST /enroll，nginx 入口 /api/cp/enroll）
 
-首次引导自动登记：agent 组件引导（`POST /enroll`，Bearer = 集群级通用 bootstrap token）时若 `agents.yml` 无该 id，**自动创建条目**（role_disk=True、role_cd=False、enabled=True、tags=`("auto", "storage")`；旧 agent 不上报能力时仅 `("auto",)`——**后端类型不进 tags**，它由 `/boot-vars` 实时查 `/capabilities` 判定），并把请求体 `base_url` 字段（agent 侧 `spec.agent.advertiseUrl`，控制面可达地址）与 `remark` 字段（agent 侧 `metadata.remark`，备注/人类识别用）写入台账。规则：
+首次引导自动登记：agent 组件引导（`POST /enroll`，Bearer = 绑定该节点身份的 bootstrap token）时若 `agents.yml` 无该 id，**自动创建条目**（role_disk=True、role_cd=False、enabled=True、tags=`("auto", "storage")`；旧 agent 不上报能力时仅 `("auto",)`——**后端类型不进 tags**，它由 `/boot-vars` 实时查 `/capabilities` 判定），并把请求体 `base_url` 字段（agent 侧 `spec.agent.advertiseUrl`，控制面可达地址）与 `remark` 字段（agent 侧 `metadata.remark`，备注/人类识别用）写入台账。响应同时下发两张证书（client / serving，nodes CA 签发，subject 只含 CN）与**两个信任锚**：`ca_nodes_crt`（校验同伴组件）与 `ca_control_crt`（校验控制面客户端）。规则：
 
-- token 校验：格式 / 登记存在 / 组件匹配 / 未过期；通用 token 无节点绑定，CSR CN 自决身份（防冒名由 CN 校验承担）；派生 token（nvmet-host）须 agent_id 匹配（防串用）
-- `nvmet-host` 组件**不自动登记**（与 agent 共享 agent_id，须 agent 组件先行在册；否则 400，容器重启重试；token 不消耗）
+- token 校验：格式 / 登记存在 / 组件匹配 / 绑定匹配（`agent_id` 与 token 登记一致）/ 未过期；通过后**原子占用一次额度**，证书签发失败退回，默认一次性（`max_uses` 可提高）
+- `/enroll/renew` 凭据 = 组件现有 client cert（nginx 该路径强制 mTLS，issuer 必须是 nodes CA → class=component；人类证书 `403`），校验 CN == `<前缀>-<agent_id>` 后重签
+- `nvmet-host` 组件**不自动登记**（与 agent 共享 agent_id，须 agent 组件先行在册；否则 400，容器重启重试；额度不消耗）
 - `base_url` 非空时必须为 `http://` / `https://` 开头，否则 400（不自动登记）
 - 已登记 agent 再次 enroll/renew 时**按节点声明刷新** `base_url` / `remark` / `role.cd`（声明权威：节点文件说了算，节点搬家/改备注后 renew 即对齐，无需重装）；控制面属性 `enabled` / `storager_ip` / `tags` **不碰**，节点未上报的字段保留现有值
 - agent 上报 `backend=nvmet` → 响应附加 `nvmet_token`（派生 nvmet-host 凭据）；stgt/lio 或旧 agent 无此字段
 
 ### 6.5.2 一键加入命令（节点侧）
 
-声明式工作流（配置即声明、CLI 即工具）：控制面签发 token 时输出**带控制面地址的 join 命令**，存储节点粘贴执行即获得地址——节点声明 `storager/kurrent.yaml` 缺失时由 join 按模板自动生成（`metadata.name` 自动生成随机标识、地址同步进 `spec.controlPlane.url`）、已存在则读入合并，随后收敛启动 agent（幂等可重跑；仓库根以外执行加 `--dir` 指定 storager 目录）：
+声明式工作流（配置即声明、CLI 即工具）：控制面签发 token 时输出**带控制面地址与节点 id 的 join 命令**，存储节点粘贴执行即获得地址与身份——节点声明 `storager/kurrent.yaml` 缺失时由 join 按模板自动生成（`metadata.name` = `--agent-id`、地址同步进 `spec.controlPlane.url`）、已存在则读入合并（已声明身份与 `--agent-id` 不一致即拒绝），随后收敛启动 agent（幂等可重跑；仓库根以外执行加 `--dir` 指定 storager 目录）：
 
 ```bash
-# 控制面（签发集群级通用 bootstrap token；--cp-url = 存储节点可达的控制面 HTTPS 入口，缺省按 --server 推导）：
-kurrent token create --cp-url https://<cp-host>
+# 控制面（签发绑定节点身份的 bootstrap token；--cp-url = 存储节点可达的控制面 HTTPS 入口，
+# 缺省按 --server 推导；--agent-id 省略则生成随机 12 位 hex 身份）：
+kurrent token create --agent-id node-01 --cp-url https://<cp-host>
 
-# 存储节点（命令已携带地址，粘贴执行；业务键可用 kurrent config print node-defaults 预置模板编辑）：
-kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef
+# 存储节点（命令已携带地址与节点 id，粘贴执行；业务键可用 kurrent config print node-defaults 预置模板编辑）：
+kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id node-01
 ```
 
 ## 6.6 DELETE /agents/{agent_id}
@@ -948,6 +1041,139 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01" \
 |---:|---|
 | `401` | 缺少 Token 或 Token 错误 |
 | `404` | Agent 不存在 |
+
+## 6.7 管理面会话与证书吊销
+
+### 会话（服务端登记）
+
+`POST /session` 用当前凭据（admin 证书 / 管理 token）换会话 Cookie；Cookie 只携带
+`{jti, exp, epoch}`，身份与组以 `state/sessions.yml` 为准。默认 TTL 12 小时，剩余
+不足一半才滑动续期；Cookie 写请求要求 `Origin` 与 `Host` 同源。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/sessions` | 列出未过期会话（管理员）；`session_id` = `sha256(jti)`，不是可用凭据 |
+| `DELETE` | `/sessions/{session_id}` | 逐个吊销：删登记，下一请求 `401`；不存在 `404` |
+| `DELETE` | `/sessions` | 全部下线：清空登记并递增 `epoch`，所有既有 Cookie 失效 |
+
+`session_id` 含 64 位 hex，原样传给 DELETE（`kurrent sessions list` 输出完整值）。
+用户从 `state/users.yml` 删除时，其会话下一次请求即 `401` 并自动清理。
+
+### 证书签发、列表与吊销（users CA + CRL）
+
+`POST /pki/users/{cn}` 按 CSR 为 `state/users.yml` 中**已登记**的用户签发证书（管理员）。
+私钥由申请者本地生成、**永不上送**；控制面只签 CSR。
+
+- CN 必须先在 `state/users.yml` 中登记（证书只承载 CN，组来自该文件），未知用户 `400`
+- `csr` 必填（PEM）：其 CN 必须等于路径里的 `cn`，且除 CN 外不得携带 subject 属性
+  （自报 O/OU 一律拒绝）；缺失/非法 `400`
+- `days` 可选：默认 365，上限 3650
+- 响应只含 `certificate`（PEM），不含私钥；证书文件留在
+  `state/pki/users/<cn>/issued/<serial>.crt` 供审计；签发写告警事件 `user_cert_issued`
+- 例外：`kurrent init` 自举的 admin 证书仍由控制面本地生成（本机便捷路径）
+
+```bash
+# 申请者本地：生成 key + CSR（私钥保持 0600，不上送）
+kurrent cert keygen alice --out ./alice
+# 管理员签发（CLI 读取 CSR 文件后提交）
+kurrent cert issue alice --csr ./alice/alice.csr --out ./alice --days 365
+```
+
+请求体形如 `{"csr": "<PEM>", "days": 365}`；响应为证书元数据 + `certificate`（PEM）。
+
+`GET /pki/users` 列出 users CA 签发的证书（含已吊销 / 已过期）：
+
+```json
+[
+  {
+    "cn": "admin",
+    "serial": "6f1c0d2e",
+    "fingerprint": "<sha256 hex>",
+    "created_at": "2026-10-23T09:00:00+00:00",
+    "expires_at": "2027-10-23T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/users/{cn}?reason=key_compromise` 吊销某 CN 的证书；加
+`&serial=<hex>` 只吊销指定序列号（同一个人可能同时持有新旧两张）：
+
+- `reason` 取 `unspecified`（默认）| `key_compromise` | `superseded` | `cessation_of_operation`
+- 标记 `state/pki/users/issued.yml`，重签 `state/pki/nginx/users.crl` 与
+  `clients.crl`（users + nodes 拼接），再 reload nginx——被吊销证书**下一次 TLS
+  握手**即失败
+- 省略 `serial` = 吊销该用户全部未吊销证书并删除其全部会话；给出 `serial` 时只踢
+  绑定该证书指纹的会话（返回 `sessions` 数量）
+- 不能吊销当前凭据自身（`400`）；无未吊销证书返回 `404`；CRL 已写但 reload 失败
+  返回 `500`（吊销尚未生效）
+- 成功后写告警事件 `crl_updated`
+
+CRL 由控制面每 12 小时重签一次并请求 nginx 重新加载（`CRL_REFRESH_HOURS`；测试/部署可用
+`KURRENT_CP_CRL_REFRESH_INTERVAL` 覆盖秒数，`<=0` 关闭），保证 7 天的 `nextUpdate`
+不会在长跑中过期——过期 CRL 会让 nginx 拒绝**全部**客户端证书。控制面不接触容器运行时：
+重载请求写入共享卷（`/run/kurrent/nginx.reload`），nginx 容器内的 watcher 执行
+`nginx -s reload` 后回写 `nginx.ack`，控制面据此确认（超时按 500 处理）。
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/users/alice?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "alice", "serials": ["6f1c0d2e"], "sessions": 1, "reason": "key_compromise" }
+```
+
+CLI 对应 `kurrent cert keygen <cn> [--out DIR]`、`kurrent cert issue <cn> --csr FILE`、
+`kurrent cert list [-o json]` 与 `kurrent cert revoke <cn> [--serial HEX] [--reason ...]`；
+WebUI「凭据」页展示 token 权限 / 最近使用与会话台账。
+
+### 组件证书（nodes 域，agent / nvmet-host）
+
+`GET /pki/components` 列出 nodes CA 签发的组件证书（`client` 与 `serving` 各一条）：
+
+```json
+[
+  {
+    "cn": "agent-node-a",
+    "agent_id": "node-a",
+    "kind": "client",
+    "serial": "3f9c1b7e",
+    "fingerprint": "9c1f...",
+    "created_at": "2026-10-23T09:00:00+00:00",
+    "expires_at": "2027-01-21T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/components/{agent_id}?reason=key_compromise`（可加 `&serial=<hex>`）吊销
+该节点的组件证书：
+
+- 标记 `state/pki/components/issued.yml`，重签 `clients.crl` 的 nodes 部分，再 reload
+  nginx——被吊销证书**下一次 mTLS 握手**即失败（控制面与同伴组件两侧都拒绝）
+- 同时删除该节点的 bootstrap token（agent 与 nvmet-host 两路），断掉“吊销后重新
+  enroll 一张新证书”的路径；`/enroll/renew` 对已吊销序列号额外返回 `403`（CRL reload
+  窗口内的应用侧兜底）
+- 登记只在签发（enroll / renew）时写入：P4 之前签发、未登记的旧证书不可吊销，下一次
+  renew 入库后即可管理
+- 无未吊销证书返回 `404`；`reason` / `serial` 非法 `400`；CRL 已写但 reload 失败 `500`
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "node-a", "serials": ["3f9c1b7e", "7a2d4c11"], "kinds": ["client", "serving"], "reason": "key_compromise" }
+```
+
+CLI 对应 `kurrent cert components [-o json]` 与
+`kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]`。
 
 ---
 ---
@@ -1352,8 +1578,8 @@ curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
 | `401` | 缺少 Token 或 Token 错误 |
 | `404` | 创建系统盘时 Worker 不存在；`disk_agent` 指定的 Agent 不存在 |
 | `409` | `worker_id` 已存在；`hostname` 已存在；MAC 已绑定；Worker 已有该 (os, os_version) 系统盘（同版本重复创建）；Agent 上 IQN 已存在；backing 文件已存在；目标 Agent 已停用（排空：`agent ... disabled: not accepting new disks`） |
-| `500` | dnsmasq reload 失败；写文件失败；其他未预期错误 |
-| `503` | Agent 不可达；docker.sock 不可用 |
+| `500` | dnsmasq 绑定写入失败；写文件失败；其他未预期错误 |
+| `503` | Agent 不可达 |
 
 ---
 
@@ -1645,6 +1871,13 @@ worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点�
 记录或记录为旧值（待对账重放）；`none` 无同步目标（无 NVMe-oF 盘、凭据从未设置无推送历史，或盘所在 Agent 未登记）。
 
 触发推送的操作：**建盘即签发**（nvmet 后端，见上）、设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、删盘（含批量）、删除 Worker。
+
+**定期轮换（2026-10-23）**：对账线程每个周期先检查 DHHC-1 密钥年龄（`rotated_at`，缺省回落到
+`updated_at` / `created_at`），超过 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS`（默认 90 天，`<=0` 关闭）
+即轮换：生成新密钥 → 推送到该 Worker 的全部目标 Agent → **全部送达后**才在
+`state/credentials.yml` 切换（`rotated_at` / `updated_at` 更新，审计 `credential.rotate`）。
+任一目标失败则把已送达目标回推旧密钥、台账不动，下个周期重试；没有 nvmet 目标的条目跳过。
+切换前 `/boot-vars` 投影的仍是旧密钥，宿主改新密钥的窗口只覆盖推送本身。
 
 静态存储边界（2026-10-05 裁定）：密钥明文按链路必要范围落盘四处——控制面 `state/credentials.yml`、
 Agent 容器凭据缓存（含派生的 TLS PSK，均 0600）、存储节点 configfs（内核 hosts 矩阵 `dhchap_key`）、
@@ -2495,9 +2728,25 @@ curl "$BASE_URL/devices?state=pooled" \
 
 **409**：设备已绑定 Worker（须先解绑）或已吊销。
 
+### 16.5.1 DELETE /devices/revoked
+
+清除已吊销设备（`revoked` → 删除条目）；`dry_run=true` 只返回将被清除的 MAC，不改台账。
+只清理已吊销项，`pooled` / `bound` 不受影响；无可清除项时返回空列表（幂等）。用于清理探测残留或误吊销的设备。
+`mac` 可重复给出以限定范围（形如 `?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa`；未吊销的 MAC 忽略），缺省清除全部 revoked。
+
+```bash
+curl -s -X DELETE "$BASE_URL/devices/revoked?dry_run=true" -H "Authorization: Bearer $TOKEN"
+curl -s -X DELETE "$BASE_URL/devices/revoked?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "purged": ["02:00:00:00:00:01", "02:00:00:00:00:aa"], "count": 2, "dry_run": false }
+```
+
 ### 16.6 GET /devices/report
 
-iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启、放行额度未用尽且带有效公钥时入池。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
+iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启、放行额度未用尽且带有效公钥时入池。已有设备的 `uuid` 只允许补空，不能被上报值覆盖（绑定比对依据不由无鉴权端点改写）。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -2512,6 +2761,8 @@ iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/
 - 吊销设备：忽略（不更新、不复活）
 - 未知 MAC + 注册窗口开启 + 额度未用尽 + 带有效公钥：入池（`state=pooled`，`key_hash` 填充，`source=ipxe`）
 - 未知 MAC + 窗口关闭 / 额度用尽 / 无公钥：只更新指纹不入池（注册只在窗口期且受放行额度约束，见 5.1）
+
+**限速**：按来源 IP（nginx 覆盖写入 `X-Real-IP`）滑动窗口限速，默认 120 次/分钟；超限返回 `429`（带 `Retry-After`）并写 `boot_rate_limited` 告警。阈值可用 `KURRENT_CP_RATE_LIMIT_REPORT` 覆盖，`<=0` 关闭。限速只是扫描抑制，不是身份边界。
 
 **curl**（模拟 iPXE 上报；引导链走**裸路径**，不经 `/api/cp` 前缀，且无鉴权）：
 
@@ -2645,7 +2896,7 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
 #### 控制面宿主
 - dnsmasq: `53`（DNS 默认监听）、`67`（DHCP）、`69`（TFTP）
 - nginx: `80`（仅 301 升级到 443）、`443`（唯一对外入口：WebUI / 管理面 API / 引导链 / 文件下载）
-- Control_Plane: `4839`（仅绑 `127.0.0.1`，供 `kurrent init` 健康检查与调试，不在请求路径上）
+- Control_Plane: 无 TCP 端口（容器内 unix socket `/run/kurrent/cp.sock`，仅 nginx 与容器健康检查可访问）
 
 #### 存储节点
 - Agent: `4840`（mTLS，控制面调用）

@@ -2,6 +2,8 @@
 
 import pytest
 
+from control_plane.app.config import settings
+
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
 MAC_C = "00:11:22:33:44:77"
@@ -264,6 +266,52 @@ class TestDeviceRevoke:
         client.delete(f"/devices/{MAC_A}", headers=auth_headers)
         res = client.delete(f"/devices/{MAC_A}", headers=auth_headers)
         assert res.status_code == 409
+
+    def test_purge_revoked_only(self, client, auth_headers):
+        """清除已吊销设备：dry_run 只预览；pooled 不受影响；重复清除幂等。"""
+        for mac in (MAC_A, MAC_B):
+            client.post("/devices", json={"mac": mac}, headers=auth_headers)
+        client.delete(f"/devices/{MAC_A}", headers=auth_headers)
+
+        preview = client.delete("/devices/revoked", params={"dry_run": True},
+                                headers=auth_headers).json()
+        assert preview == {"purged": [MAC_A], "count": 1, "dry_run": True}
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).status_code == 200
+
+        res = client.delete("/devices/revoked", headers=auth_headers)
+        assert res.json() == {"purged": [MAC_A], "count": 1, "dry_run": False}
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).status_code == 404
+        assert client.get(f"/devices/{MAC_B}", headers=auth_headers).status_code == 200
+        assert '"device.purge"' in settings.operations_file.read_text(encoding="utf-8")
+
+        assert client.delete("/devices/revoked", headers=auth_headers).json()["count"] == 0
+
+    def test_purge_can_be_scoped_to_given_macs(self, client, auth_headers):
+        """`mac` 可重复给出以限定范围：未列出的 revoked 设备保留，未吊销的忽略。"""
+        for item in (MAC_A, MAC_B, MAC_C):
+            client.post("/devices", json={"mac": item}, headers=auth_headers)
+        for item in (MAC_A, MAC_B):
+            client.delete(f"/devices/{item}", headers=auth_headers)
+
+        res = client.delete("/devices/revoked",
+                            params=[("mac", MAC_A), ("mac", MAC_C)],
+                            headers=auth_headers)
+        assert res.json()["purged"] == [MAC_A]
+        assert client.get(f"/devices/{MAC_B}", headers=auth_headers).json()["state"] == "revoked"
+        assert client.get(f"/devices/{MAC_C}", headers=auth_headers).json()["state"] == "pooled"
+        assert client.delete("/devices/revoked", params={"mac": "zzz"},
+                             headers=auth_headers).status_code == 400
+
+    def test_purge_leaves_bound_devices(self, client, auth_headers, worker):
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
+        worker("worker-01")
+        client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"},
+                    headers=auth_headers)
+        client.delete(f"/devices/{MAC_B}", headers=auth_headers)
+
+        assert client.delete("/devices/revoked", headers=auth_headers).json()["purged"] == [MAC_B]
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).json()["state"] == "bound"
 
     def test_revoked_cannot_bind(self, client, auth_headers, worker):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)

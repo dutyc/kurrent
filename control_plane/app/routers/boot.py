@@ -2,24 +2,30 @@
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+
+from .. import audit, ratelimit
+from ..principal import PrincipalRouter, principal
 
 from ..config import settings
 from ..stores import agents, credentials, devices, dnsmasq, record, store
 from ..trust import (
     admission_allowed,
-    device_auth_blocked,
+    consume_nonce,
     device_for_boot,
     issue_nonce,
     parse_pubkey,
     sha256_hex,
+    verify_boot_identity,
+    verify_rotate_signature,
     window_open,
 )
 from ..utils import (
     canonical_hostname,
     clean_str,
     client_host,
+    client_source,
     default_disk_for,
     normalize_boot_mac,
     now_iso,
@@ -27,22 +33,39 @@ from ..utils import (
 )
 from .workers import MENU_NAV_ITEMS, _base_nqn_from_target, _host_nqn_for
 
-router = APIRouter()
+router = PrincipalRouter()
 
 
 @router.get("/healthz")
+@principal("anonymous")
 def healthz():
     return {"status": "ok"}
 
 
+def _enforce_rate(scope: str, request: Request, route: str = "") -> None:
+    """匿名引导端点限速：超限 429 + 告警；按来源 IP（见 ratelimit 模块）。"""
+    source = client_source(request)
+    retry = ratelimit.check(scope, source)
+    if retry is None:
+        return
+    audit.alarm("boot_rate_limited", severity="medium",
+                detail=f"{scope} from {source}", route=route or f"/devices/{scope}",
+                client_ip=source)
+    raise HTTPException(status_code=429, detail="too many requests",
+                        headers={"Retry-After": str(int(retry))})
+
+
 @router.get("/boot-vars")
+@principal("anonymous")
 def boot_vars(
+    request: Request,
     mac: str | None = None,
     hostname: str | None = None,
     nonce: str | None = None,
     sig: str | None = None,
     output_format: str = Query("ipxe", alias="format"),
 ):
+    _enforce_rate("boot_vars", request, route="/boot-vars")
     if output_format not in {"ipxe", "json"}:
         raise HTTPException(400, "format must be ipxe or json")
     # iPXE 脚本拼 URL 时不做百分号编码：base64 签名（DER）中的 '+' 原样进入 query，
@@ -57,6 +80,7 @@ def boot_vars(
 
 
 @router.get("/devices/report")
+@principal("anonymous")
 def device_report(
     request: Request,
     mac: str,
@@ -77,6 +101,7 @@ def device_report(
     注册只在窗口期（2026-08-21 裁定）：未知 MAC 仅在窗口开启、额度未用尽且带有效公钥时入池；
     存量设备窗口期内带公钥上报 = 密钥认领（key_hash 填充，不占放行额度）。
     返回空响应（chain 无脚本副作用）。"""
+    _enforce_rate("report", request)
     normalized = normalize_boot_mac(mac)
     if not normalized:
         return Response("#!ipxe\n", media_type="text/plain", status_code=200)  # 非法 MAC 忽略，不阻断引导
@@ -104,8 +129,9 @@ def device_report(
             if existing.get("state") == "revoked":
                 return Response("#!ipxe\n", media_type="text/plain", status_code=200)  # 吊销设备不更新、不复活
             existing.setdefault("fingerprint", {}).update(fingerprint)
+            # 无鉴权上报只能补空：已有 UUID 是绑定比对依据，不允许被自报值覆盖
             clean_uuid = clean_str(uuid)
-            if clean_uuid:
+            if clean_uuid and not existing.get("uuid"):
                 existing["uuid"] = clean_uuid
             existing["last_seen"] = now
             if window_open_ and key_hex:
@@ -149,18 +175,62 @@ def device_report(
 
 
 @router.get("/devices/challenge")
-def device_challenge(mac: str):
+@principal("anonymous")
+def device_challenge(mac: str, request: Request):
     """挑战端点（不鉴权）：一次性 nonce，短 TTL、绑定 mac。nonce 本身无秘密，仅防重放。
-    设备不存在/未认领 → 404（无法走验签链路）。
+    设备不存在/未认领/已吊销 → 404（吊销设备不得进入验签链路，也不给 nonce）。
     响应 #!ipxe 脚本体 set nonce <64hex>（iPXE chain 直接消费为 ${nonce}）。"""
+    _enforce_rate("challenge", request)
     normalized = normalize_boot_mac(mac)
     if not normalized:
         raise HTTPException(400, "invalid mac")
     device = device_for_boot(normalized)
-    if not device or not device.get("key_hash"):
+    if not device or not device.get("key_hash") or device.get("state") == "revoked":
         raise HTTPException(404, "device not registered or not claimed")
     nonce = issue_nonce(normalized)
     return Response(f"#!ipxe\nset nonce {nonce}\n", media_type="text/plain")
+
+
+@router.post("/devices/rotate")
+@principal("anonymous")
+def device_rotate(request: Request, mac: str, pubkey: str, nonce: str, sig: str):
+    """设备密钥轮换（不鉴权，凭旧密钥签名）：签名串 = rotate||mac||new_pubkey||nonce。
+
+    nonce 由 /devices/challenge 签发（一次性消费）。成功后 key_hash 换成新公钥，
+    旧密钥在 /devices/boot-vars 的验签链路上立即失效；不发新证书、不重开注册窗口。
+    """
+    _enforce_rate("rotate", request)
+    normalized = normalize_boot_mac(mac)
+    if not normalized:
+        raise HTTPException(400, "invalid mac")
+    new_key = parse_pubkey(pubkey)
+    if not new_key:
+        raise HTTPException(400, "invalid pubkey")
+    if not nonce or not sig:
+        raise HTTPException(400, "nonce and sig required")
+    with devices.locked():
+        data = devices.load()
+        device = data["devices"].get(normalized)
+        if not device:
+            raise HTTPException(404, "device not found")
+        if device.get("state") == "revoked":
+            raise HTTPException(403, "device revoked")
+        old_key = device.get("key_hash")
+        if not old_key:
+            raise HTTPException(409, "device has no key; claim it during the registration window first")
+        if not consume_nonce(normalized, nonce):
+            raise HTTPException(401, "nonce invalid, expired, or replayed")
+        if not verify_rotate_signature(normalized, nonce, new_key, sig, old_key):
+            raise HTTPException(401, "invalid signature for the current device key")
+        device["key_hash"] = new_key
+        device["key_rotated_at"] = now_iso()
+        devices.save(data)
+    record("device.key.rotate", "ok", mac=normalized)
+    audit.emit("credential", principal_class="device", principal=normalized,
+               route="POST /devices/rotate", decision="allow", reason="key_rotated",
+               client_ip=client_source(request),
+               fingerprint_sha256=sha256_hex(new_key.encode()))
+    return {"mac": normalized, "rotated": True}
 
 
 def _boot_vars_payload(
@@ -177,12 +247,16 @@ def _boot_vars_payload(
     match = _find_worker_for_boot(mac=mac, hostname=hostname)
     if match:
         if _boot_binding_ok(match[0], mac):
-            if device_auth_blocked(mac, nonce, sig, match[0]):
+            allowed, verified = verify_boot_identity(mac, nonce, sig, match[0])
+            if not allowed:
                 return {}  # 第 4 条不通过 → 拒绝下发
-            payload = _worker_boot_payload(match)
-            # NVMe-oF 凭据注入审计（C2，不记密钥本体，只记 injected 布尔）
+            payload = _worker_boot_payload(match, include_credentials=verified)
+            # NVMe-oF 凭据注入审计（C2，不记密钥本体，只记 injected/verified 布尔）
+            injected = bool(payload.get("nbft_secret"))
             record("boot_vars.credential", "ok", mac=mac or "", hostname=hostname or "",
-                   worker_id=match[0], injected=bool(payload.get("nbft_secret")))
+                   worker_id=match[0], injected=injected, verified=verified)
+            audit.boot_credential_observed(injected=injected, verified=verified,
+                                           worker_id=match[0], mac=mac or "")
             return payload
         return {}  # 冒领/未绑定设备请求 → 拒绝下发
     device = device_for_boot(mac)
@@ -194,8 +268,12 @@ def _boot_vars_payload(
     return {}  # 未注册：无注册通道（注册只在窗口期，走 report）
 
 
-def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
-    """按已识别 worker 投影启动变量（原 _boot_vars_payload 识别后主体）。"""
+def _worker_boot_payload(
+    match: tuple[str, dict[str, Any]],
+    *,
+    include_credentials: bool,
+) -> dict[str, Any]:
+    """按已识别 worker 投影启动变量。凭据仅在设备身份验签通过后注入。"""
     worker_id, record_ = match
     disk = default_disk_for(record_)
     agent_id = disk.get("agent") if disk else None
@@ -248,7 +326,7 @@ def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
     # NVMe-oF 认证密钥注入（C2，按 Worker 跟盘裁定）：绑定 worker 在密钥库有条目时注入。
     # 固件侧消费：menu 拼 nvme://...?secret=${nbft-secret}（C3 已启用，secret 条件化拼装）；
     # 无条目 → 不注入，固件走明文连接（兼容未启用认证的 target）。
-    secret = _credential_secret_for(worker_id)
+    secret = _credential_secret_for(worker_id) if include_credentials else None
     if secret:
         payload["nbft_secret"] = secret
     # NVMe/TCP 传输加密（默认全链路，无明文回退）：PSK 是认证密钥的纯函数
@@ -257,6 +335,9 @@ def _worker_boot_payload(match: tuple[str, dict[str, Any]]) -> dict[str, Any]:
     # nvmet 后端必须同时具备认证密钥与就绪的数据面端口——任一缺失即拒绝下发引导变量
     # （记审计），因为明文口已撤除，放行只会得到一条连不上的 root-path。
     if agent_id and _backend_for(agent_id) == "nvmet":
+        if not include_credentials:
+            record("boot_vars.encryption", "denied", worker_id=worker_id, reason="unverified")
+            return {}
         tls_port = _nvmet_data_port_for(agent_id)
         if not (secret and tls_port):
             record("boot_vars.encryption", "denied", worker_id=worker_id,

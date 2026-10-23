@@ -9,7 +9,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,17 +101,17 @@ func initRun(o initOpts) error {
 	if wait == 0 {
 		wait = 30 * time.Second
 	}
-	if !waitControlPlaneHealthz(wait) {
-		fmt.Fprintln(os.Stderr, "kurrent: warning: 控制面未在 30s 内就绪（GET http://127.0.0.1:4839/healthz）——docker compose ps / logs 查看")
+	if !waitControlPlaneHealthy(wait) {
+		fmt.Fprintln(os.Stderr, "kurrent: warning: 控制面未在 30s 内就绪（容器健康检查 kurrent-control-plane）——docker compose ps / logs 查看")
 	}
 	if err := composeRun(repoRoot, "restart", "kurrent-dnsmasq"); err != nil {
 		return err
 	}
 	fmt.Println("==> kurrent init: done. 控制面已按声明运行：")
-	fmt.Println("    WebUI: https://<host>/（唯一入口 443）；本机健康检查 http://127.0.0.1:4839/healthz")
+	fmt.Println("    WebUI: https://<host>/（唯一入口 443）；控制面管理面只监听 unix socket（无 TCP 端口）")
 	fmt.Println("    管理凭据：control_plane/state/admin.conf（kurrent 自动发现，admin 证书走 443 mTLS）")
 	fmt.Println("    任意目录使用：kurrent credentials install（凭据快照到 ~/.kurrent，供 PATH 安装的二进制）")
-	fmt.Println("    下一步：kurrent token create 签发节点加入凭据")
+	fmt.Println("    下一步：kurrent token create --agent-id <节点 id> 签发节点加入凭据（省略则生成随机 id）")
 	return nil
 }
 
@@ -127,16 +126,17 @@ func composeRun(dir string, args ...string) error {
 	return nil
 }
 
-// waitControlPlaneHealthz 轮询控制面 /healthz（免鉴权；容器 4839:8080），
-// 就绪返回 true；超时返回 false（调用方降级为警告，不阻断收敛流程）。
-func waitControlPlaneHealthz(timeout time.Duration) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
+// waitControlPlaneHealthy 轮询控制面容器的健康状态（healthcheck 经 unix socket
+// 请求 /healthz）；ready 返回 true，超时返回 false（调用方降级为警告，不阻断收敛）。
+func waitControlPlaneHealthy(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://127.0.0.1:4839/healthz")
+		out, err := exec.Command("docker", "inspect", "--format",
+			"{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+			"kurrent-control-plane").Output()
 		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			status := strings.TrimSpace(string(out))
+			if status == "healthy" || status == "running" {
 				return true
 			}
 		}

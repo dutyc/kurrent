@@ -30,8 +30,6 @@ spec:
     dhcpRange: 192.168.80.50,192.168.80.100
     gateway: 192.168.80.2
     dns: 223.5.5.5
-  dnsmasq:
-    reload: false
 """,
     encoding="utf-8",
 )
@@ -50,12 +48,17 @@ cp_cfg.DEFAULT_DNSMASQ_HOSTS_FILE = str(_STATE_DIR / "dhcp-hosts.conf")
 cp_cfg.DEFAULT_DNSMASQ_CONF = str(_STATE_DIR / "dnsmasq.conf")
 cp_cfg.DEFAULT_PKI_DIR = str(_STATE_DIR / "pki")
 cp_cfg.DEFAULT_MASTERS_FILE = str(_STATE_DIR / "masters.yml")
+cp_cfg.DEFAULT_USERS_FILE = str(_STATE_DIR / "users.yml")
+cp_cfg.DEFAULT_SESSIONS_FILE = str(_STATE_DIR / "sessions.yml")
+cp_cfg.DEFAULT_AUDIT_FILE = str(_STATE_DIR / "audit.jsonl")
 cp_cfg.DEFAULT_CREDENTIAL_PUSH_FILE = str(_STATE_DIR / "credential-push.yml")
 cp_cfg.DEFAULT_ADMIN_CONF = str(_STATE_DIR / "admin.conf")
 cp_cfg.DEFAULT_SESSION_KEY_FILE = str(_STATE_DIR / "session.key")
-# 测试环境不触达真实 dnsmasq 容器（spec.dnsmasq.reload=false）
+# 测试环境不触达真实 dnsmasq 容器（dnsmasq 自己监听 dhcp-hostsfile，控制面不通知）
 # 控制面认证：测试统一走开发模式放行（KURRENT_CP_INSECURE=1）；认证器链行为由
 # tests/control_plane/test_auth.py 以隔离 env 单独覆盖
 os.environ["KURRENT_CP_INSECURE"] = "1"
 # 凭据对账线程禁用（测试直接调用 reconcile_credentials_once()，避免后台线程与夹具竞态）
 os.environ["KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL"] = "0"
+# CRL 定期重签线程禁用（单元测试直接调用 refresh_crl_once）
+os.environ["KURRENT_CP_CRL_REFRESH_INTERVAL"] = "0"

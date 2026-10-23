@@ -4,6 +4,7 @@ nvmet 节点上建系统盘即由控制面自动签发密钥（见 _issue_creden
 
 import base64
 import copy
+import datetime as dt
 import hashlib
 import hmac
 import logging
@@ -13,7 +14,7 @@ import time
 import zlib
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 
 from ..agent_client import AgentAPIError
 from ..auth import authenticate, authorize_request
@@ -70,7 +71,12 @@ MENU_NAV_ITEMS = {"menu-diag", "menu-install", "config", "shell", "reboot", "exi
 # OS_ITEMS 已退役（2026-08-30 裁定）：os 为备注性质（人类理解用），唯一性由 os_tag 随机标识保证；
 # 建盘不再白名单校验，os 合法集合不再存在
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 @router.get("/workers")
@@ -326,16 +332,8 @@ def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Requ
             record("worker.mac.update", "failed", worker_id=worker_id, client=client_ip,
                    error=f"no dnsmasq binding for hostname: {hostname}")
             raise HTTPException(409, f"no dnsmasq binding for hostname: {hostname}")
-        try:
-            dnsmasq_result = dnsmasq.reload()
-        except Exception as exc:
-            record("worker.mac.update", "failed", worker_id=worker_id, client=client_ip,
-                   old_mac=old_mac, new_mac=new_mac, error=f"dnsmasq reload failed: {exc}")
-            raise HTTPException(500, f"dnsmasq reload failed: {exc}") from exc
-
         record("worker.mac.update", "ok", worker_id=worker_id, hostname=hostname,
                old_mac=old_mac, new_mac=new_mac, changed=True, client=client_ip)
-        record("dnsmasq.reload", "ok", worker_id=worker_id, result=dnsmasq_result)
         if old_released:
             record("device.unbind", "ok", mac=old_released, worker_id=worker_id,
                    reason="worker.mac.update", client=client_ip)
@@ -804,8 +802,6 @@ def delete_worker(
 
             removed = dnsmasq.remove_hostname(hostname)
             record("dnsmasq.hosts.delete", "ok", worker_id=worker_id, hostname=hostname, removed=removed)
-            dnsmasq_result = dnsmasq.reload()
-            record("dnsmasq.reload", "ok", worker_id=worker_id, result=dnsmasq_result)
 
             record("delete_worker", "succeeded", worker_id=worker_id, client=client_ip)
             return {"deleted": worker_id, "delete_disk": delete_disk, "dnsmasq_removed": removed}
@@ -885,8 +881,6 @@ def batch_delete_workers(req: BatchDeleteWorkersRequest, request: Request):
             for hostname in removed_hostnames:
                 removed = dnsmasq.remove_hostname(hostname)
                 record("dnsmasq.hosts.delete", "ok", hostname=hostname, removed=removed)
-            dnsmasq_result = dnsmasq.reload()
-            record("dnsmasq.reload", "ok", batch=len(removed_hostnames), result=dnsmasq_result)
 
     return {"succeeded": succeeded, "failed": failed}
 
@@ -1199,6 +1193,77 @@ def _push_credentials(worker_id: str, secret: object = _UNSET) -> None:
 _reconcile_thread_started = False
 
 
+def _rotation_due(entry: dict, now: dt.datetime) -> bool:
+    """密钥条目是否到达轮换周期（rotated_at > updated_at > created_at 取最新可用基准）。"""
+    days = settings.credential_rotation_days
+    if days <= 0:
+        return False
+    for key in ("rotated_at", "updated_at", "created_at"):
+        raw = str(entry.get(key) or "")
+        if raw:
+            try:
+                return (now - dt.datetime.fromisoformat(raw)).total_seconds() >= days * 86400
+            except ValueError:
+                continue
+    return False
+
+
+def rotate_due_credentials(now: dt.datetime | None = None) -> dict[str, int]:
+    """到期 DHHC-1 轮换：先推送到全部目标 Agent，全部送达才在台账切换密钥。
+
+    推送失败（或部分送达）时把已送达目标回推旧密钥、台账保持不变，下个周期重试——
+    切换前引导投影仍是旧密钥，宿主改新密钥的窗口只覆盖推送本身。没有 nvmet 目标的
+    worker 跳过（无法证明新密钥已送达）。用户手工设置过的密钥同样按 updated_at 参与
+    轮换；轮换周期 <=0 时整体关闭。
+    """
+    now = now or dt.datetime.now().astimezone()
+    with credentials.locked():
+        entries = copy.deepcopy(credentials.load()["credentials"])
+    with store.locked():
+        workers = store.load_workers()["workers"]
+    registered = _registered_agent_ids()
+    rotated = failed = skipped = 0
+    for worker_id, entry in entries.items():
+        if not isinstance(entry, dict) or not _rotation_due(entry, now):
+            continue
+        old_secret = str(entry.get("secret") or "")
+        record_ = workers.get(worker_id)
+        targets = _sync_targets(record_, registered) if record_ else {}
+        if not old_secret or not targets:
+            skipped += 1
+            continue
+        new_secret = _generate_dhhc1()
+        delivered: list[str] = []
+        for agent_id, sub_nqns in targets.items():
+            if _push_one(worker_id, agent_id, sub_nqns, new_secret,
+                         audit_always=False) == PUSH_FAILED:
+                break
+            delivered.append(agent_id)
+        if len(delivered) != len(targets):
+            for agent_id in delivered:
+                _push_one(worker_id, agent_id, targets[agent_id], old_secret,
+                          audit_always=False)
+            record("credential.rotate", "failed", worker_id=worker_id,
+                   delivered=len(delivered), targets=len(targets))
+            failed += 1
+            continue
+        with credentials.locked():
+            creds = credentials.load()
+            current = creds["credentials"].get(worker_id) or {}
+            if current.get("secret") != old_secret:
+                skipped += 1  # 推送期间被手工改写：以台账为准，下个周期再判
+                continue
+            current["secret"] = new_secret
+            current["secret_hash"] = _secret_hash(new_secret)
+            current["updated_at"] = now.isoformat()
+            current["rotated_at"] = now.isoformat()
+            creds["credentials"][worker_id] = current
+            credentials.save(creds)
+        record("credential.rotate", "ok", worker_id=worker_id, targets=len(targets))
+        rotated += 1
+    return {"rotated": rotated, "failed": failed, "skipped": skipped}
+
+
 def reconcile_credentials_once() -> dict[str, int]:
     """对账全量重放（周期线程调用；可测核心）。
 
@@ -1256,6 +1321,9 @@ def start_credential_reconciler() -> None:
         while True:
             time.sleep(interval)
             try:
+                rotation = rotate_due_credentials()
+                if rotation["rotated"] or rotation["failed"]:
+                    log.info(f"credential rotation: {rotation}")
                 summary = reconcile_credentials_once()
                 if summary["failed"] or summary["pushed"]:
                     log.info(f"credential reconcile: {summary}")

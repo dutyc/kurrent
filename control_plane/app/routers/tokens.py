@@ -1,11 +1,9 @@
 """token 端点：bootstrap 引导凭据 + 管理 token 的签发 / 列表 / 吊销。
 
-不带任何节点信息（不绑节点）：节点身份由节点自决——kurrent join
-自动生成随机短标识（人工输入归属声明 metadata.remark，备注），enroll 自动登记。
-每次调用新签（明文不可恢复，登记只存 sha256 hash）；TTL 内可被多次使用
-（不限制使用次数），任意存储节点可用同一 bootstrap token 引导。
-usage=admin 的管理 token 不绑组件，供认证器链 Bearer（CLI --token / 脚本）与 WebUI
-登录使用（groups 携带授权组）。
+bootstrap token 必须绑定 component + agent_id：签发时指定节点身份，enroll 只接受
+同一 agent_id 的请求（不再有「任意节点可用」的通用 token）。TTL 内可复用（一次性
+模式见认证蓝图 P3）。usage=admin 的管理 token 不绑组件，供认证器链 Bearer
+（CLI --token / 脚本）与 WebUI 登录使用（groups 携带授权组）。
 GET 列出未过期条目（台账可视，不返回明文/hash）；DELETE 吊销 = 删条目
 （删除即失效；留痕在操作审计）。吊销为写操作，经 authorize_request 要求 admin 组。
 nvmet-host 组件凭据不在此签发：agent enroll 上报 backend=nvmet 时控制面派生
@@ -14,44 +12,85 @@ nvmet-host 组件凭据不在此签发：agent enroll 上报 backend=nvmet 时�
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import config, pki
+from .. import audit, config, pki
 from ..auth import authenticate, authorize_request
 from ..stores import record
 from ..utils import client_host
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_request)])
+from ..principal import PrincipalRouter
+
+router = PrincipalRouter(
+    dependencies=[Depends(authenticate), Depends(authorize_request)],
+    principal={"human", "automation"},
+)
 
 
 class IssueTokenRequest(BaseModel):
-    """签发参数：bootstrap（节点引导，默认）| admin（管理 token，认证器链 Bearer 用）。"""
+    """签发参数：bootstrap（节点引导，需绑 agent_id）| admin（管理 token）。
+
+    admin token 可用 scopes 收窄权限（admin/readonly/enroll）与 ttl_hours
+    （默认 24h，上限 720h）。readonly/enroll token 不得签发 admin token。
+    """
     usage: Literal["bootstrap", "admin"] = "bootstrap"
+    agent_id: str = ""
+    component: Literal["agent", "nvmet-host"] = "agent"
+    scopes: list[str] = []
+    ttl_hours: int | None = None
+    max_uses: int = 1
 
 
 @router.post("/pki/tokens", status_code=201)
 def issue_token(request: Request, req: IssueTokenRequest | None = None):
     """签发 token，返回明文（仅本次响应可见）。
 
-    响应含 token / expires_at / usage / groups；join 命令示例由 CLI 侧组装（kurrent token create）。
+    响应含 token / expires_at / usage / groups / scopes / agent_id；join 命令示例
+    由 CLI 侧组装（kurrent token create --agent-id）。
     """
+    ident = request.state.identity
     if req and req.usage == "admin":
-        token = pki.issue_bootstrap_token(
-            config.settings.pki_dir, component="", usage=["admin"],
-            groups=[config.ADMIN_GROUP], name="admin",
-        )
+        if ident.method == "token" and not ident.is_admin:
+            raise HTTPException(403, "only an admin token may issue admin tokens")
+        try:
+            token = pki.issue_bootstrap_token(
+                config.settings.pki_dir, component="", usage=["admin"],
+                scopes=req.scopes, ttl_hours=req.ttl_hours, name="admin",
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     else:
-        token = pki.issue_bootstrap_token(config.settings.pki_dir)
+        agent_id = (req.agent_id if req else "").strip()
+        if not agent_id:
+            raise HTTPException(400, "bootstrap token requires agent_id")
+        try:
+            token = pki.issue_bootstrap_token(
+                config.settings.pki_dir, agent_id=agent_id,
+                component=req.component if req else "agent",
+                max_uses=req.max_uses if req else 1,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     token_id = token.split(".", 1)[0]
     info = pki.get_bootstrap_token(config.settings.pki_dir, token_id) or {}
     record("pki.token", "ok", client=client_host(request), token_id=token_id,
            usage=info.get("usage", []))
+    audit.emit("credential", principal_class=ident.principal_class, principal=ident.name,
+               issuer=ident.issuer or "session", route="POST /pki/tokens",
+               decision="allow", reason="token_issued", token_id=token_id,
+               request_id=getattr(request.state, "request_id", ""),
+               client_ip=client_host(request))
     return {
         "token": token,
         "expires_at": info.get("expires_at", ""),
         "usage": info.get("usage", []),
         "groups": info.get("groups", []),
+        "scopes": info.get("scopes", []),
+        "uses": info.get("uses", 0),
+        "max_uses": info.get("max_uses", 0),
+        "agent_id": info.get("agent_id", ""),
+        "component": info.get("component", ""),
     }
 
 
@@ -75,6 +114,12 @@ def revoke_token(token_id: str, request: Request):
     if not pki.revoke_bootstrap_token(config.settings.pki_dir, token_id):
         record("pki.token.revoke", "failed", client=client_host(request), token_id=token_id,
                error="token not found")
+        audit.emit("credential", route="DELETE /pki/tokens/{token_id}", decision="deny",
+                   reason="token_not_found", token_id=token_id,
+                   request_id=getattr(request.state, "request_id", ""))
         raise HTTPException(404, f"token not found: {token_id}")
     record("pki.token.revoke", "ok", client=client_host(request), token_id=token_id)
+    audit.emit("credential", route="DELETE /pki/tokens/{token_id}", decision="allow",
+               reason="token_revoked", token_id=token_id,
+               request_id=getattr(request.state, "request_id", ""))
     return {"revoked": token_id}

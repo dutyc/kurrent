@@ -39,10 +39,11 @@ This guide follows Kurrent's declarative-configuration model: the control-plane 
 | 67 / 69 | UDP | DHCP / TFTP (host network) | Controller server |
 | 80 | TCP | HTTP → 443 automatic 301 upgrade (carries no content or credentials) | Controller server |
 | 443 | TCP | The only entry: HTTPS (WebUI + `/api/cp` reverse proxy to the control plane + component enroll/renew + boot chain) | Controller server |
-| 4839 | TCP | Control-plane API (localhost loopback only: `kurrent init` health check / debugging; not exposed) | Controller server |
 | 4840 | TCP | Storage Agent HTTPS (controller → Agent) | Storage node |
 | 4841 | TCP | nvmet-host management service (host network; reached only by the Agent container via `host.docker.internal`, should not be exposed to the LAN) | Storage node |
 | 4421 | TCP | NVMe/TCP data plane, single port with **TLS 1.3** (shared by the firmware and kernel boot stages) | Storage node |
+
+The boot chain behind 443 only proxies three read-only endpoints: `/boot-vars`, `/devices/report` and `/devices/challenge`. The remaining `/devices/*` management endpoints are not exposed. The control-plane management plane publishes no TCP port; it listens on an in-container unix socket (`/run/kurrent/cp.sock`) that nginx reaches through a shared volume, and the container health check uses the same socket. nginx clears the identity headers by default for every proxied location and injects DN/issuer/serial/fingerprint only when mTLS verification succeeds on `/api/cp/`. The interactive control-plane API docs (`/openapi.json`, `/docs`) are off by default and can be enabled for debugging with `KURRENT_CP_OPENAPI=1`.
 
 ## Prerequisites
 
@@ -69,6 +70,20 @@ sudo systemctl enable --now tlshd
 ```
 
 > `host-prepare.sh` only checks the nvmet modules and configfs; the TLS kernel options and tlshd from step 3 must currently be verified by hand. If the `4421` port cannot be created, the node reports the port as not ready and the control plane **refuses the boot** — there is no plaintext fallback.
+
+**Host baseline (a precondition for the auth model)**: read-only by default — checks public TCP listeners, Docker exposure and credential-file permissions; the only automatic fix is `--fix-4841` (explicit opt-in).
+
+```bash
+bash control_plane/host-baseline.sh
+sudo bash control_plane/host-baseline.sh --fix-4841   # optional: idempotent iptables rules for 4841
+```
+
+- A controller host should expose only 22 (ops), 53/67/69 (dnsmasq) and 80/443 (nginx); storage nodes add 4840/4421, and `4841` must bind loopback only
+- `--fix-4841` adds three commented INPUT rules (ACCEPT for `lo` and `172.16.0.0/12`, DROP for everything else) and is safe to re-run; it masks the port rather than changing the listen address, so the service should still be bound to `127.0.0.1`
+- ufw does not filter Docker-published ports: constrain them in the `DOCKER-USER` chain (the script warns when ufw is active but that chain is empty)
+- The controller container does not mount `docker.sock` (dnsmasq watches `dhcp-hostsfile`; nginx reloads itself via an in-container watcher)
+- CA private keys, `users.yml`, `sessions.yml`, `admin.conf` and `audit.jsonl` should be mode 600
+- Treat FAIL items as blockers: host root or a compromised nginx process is equivalent to a compromised management plane
 
 ## Step 1: Controller Server
 
@@ -110,7 +125,7 @@ On startup the controller automatically: renders `dnsmasq/dnsmasq.conf` from `sp
 ### 1.4 Verify
 
 ```bash
-curl http://127.0.0.1:4839/healthz          # {"status":"ok"}
+curl -k https://127.0.0.1/healthz           # {"status":"ok"} (via 443; the management plane has no TCP port)
 head -5 dnsmasq/dnsmasq.conf                # interface=ens33 ... (rendered from yml)
 ```
 
@@ -132,7 +147,7 @@ See API docs 1.3 for the authenticator chain / sessions / RBAC.
 
 1. **Management token (login page)**: issue with
    `kurrent token create --usage admin`, paste it on the login page → an HttpOnly
-   session cookie is issued (7-day sliding TTL; survives refresh and browser
+   session cookie is issued (12-hour TTL, sliding renewal only in the second half; survives refresh and browser
    restarts; sign out from the sidebar footer).
 2. **Admin certificate (automatic)**: convert the admin certificate to PKCS#12
    and import it into the system trust store — the browser then authenticates
@@ -155,21 +170,21 @@ sudo ufw allow 67,69/udp && sudo ufw allow 80,443/tcp && sudo ufw reload
 ### 1.5 Issue the storage-node bootstrap credentials
 
 ```bash
-kurrent token create --cp-url https://192.168.1.10
+kurrent token create --agent-id node-01 --cp-url https://192.168.1.10
+# omitting --agent-id generates a random 12-hex node identity; the command carries it either way
 ```
 
-`--cp-url` must be the **HTTPS entry of the control plane as reachable from the storage node** (port 443 `/api/cp` reverse proxy — Agents enroll/renew through it; derived from the `--server` host otherwise). Output resembles (the join command carries the address and is ready to paste):
+`--cp-url` must be the **HTTPS entry of the control plane as reachable from the storage node** (port 443 `/api/cp` reverse proxy — Agents enroll/renew through it; derived from the `--server` host otherwise). `--agent-id` is the node identity (= the declaration `metadata.name`), and the token is bound to it. Output resembles (the join command carries the address and node id, and is ready to paste):
 
 ```
-bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，TTL 内可被多次 enroll 复用）
+bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，绑定节点 node-01，0/1）
 
-# Run on the storage node (the command carries the control-plane URL,
-# so running it auto-generates/updates the declaration):
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
+# Run on the bound node (--agent-id is written into the declaration metadata.name):
+kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
 # After joining, verify: kurrent agents list (or WebUI → Agents, health=ok)
 ```
 
-> The token is a **cluster-wide bootstrap credential**: not bound to any node, reusable across multiple enrolls within its TTL, so any storage node can join with the same token; TTL is 7 days (`spec.pki.bootstrapTokenTtlDays`) — re-issue when expired. **No nvmet-host credential needs issuing**: it is derived by the control plane when the agent enrolls with `backend=nvmet`.
+> The token is **bound to the node identity and single-use by default**: enroll only accepts that `agent_id`; an allowance is reserved atomically before issuance and released if issuance fails. TTL defaults to 60 minutes with a 24-hour cap (`spec.pki.bootstrapTokenTtlMinutes`); for bulk onboarding use `kurrent token create --agent-id ... --uses N` (max 100). Re-issue after expiry or revocation. **No nvmet-host credential needs issuing**: it is derived by the control plane when the agent enrolls with `backend=nvmet`.
 
 ## Step 2: Storage Node
 
@@ -185,16 +200,16 @@ sudo install -m 0755 cli/kurrent /usr/local/bin/kurrent   # install the CLI as i
 
 ### 2.2 Declare the node config and join the cluster
 
-The node declaration file is `storager/kurrent.yaml` (the yml is the declaration). **No file preparation on the node**: the issued command already carries the control-plane URL — paste and run:
+The node declaration file is `storager/kurrent.yaml` (the yml is the declaration). **No file preparation on the node**: the issued command already carries the control-plane URL and the node id — paste and run:
 
 ```bash
 cd /path/to/kurrent
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
+kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
 ```
 
 `kurrent join` does three things (idempotent, safe to re-run):
-1. Generates/updates `storager/kurrent.yaml` (when missing, generated from defaults: `metadata.name` is a randomly generated short id, the command address synced into `spec.controlPlane.url`; when present, read in and merged — non-forbid, hand edits are kept. The only hand-written field is `metadata.remark` — a human label registered into the control-plane ledger on first enroll, shown on the WebUI card and editable in the edit form)
-2. Writes the generic bootstrap credential `storager/bootstrap/agent.token` (given via `--token`; otherwise the file must already be in place. `nvmet-host.token` is derived automatically by the agent's enroll — nothing to provide by hand)
+1. Generates/updates `storager/kurrent.yaml` (when missing, generated from defaults: `metadata.name` = `--agent-id`, the command address synced into `spec.controlPlane.url`; when present, read in and merged — non-forbid, hand edits are kept; a declared identity that differs from `--agent-id` is rejected. The only hand-written field is `metadata.remark` — a human label registered into the control-plane ledger on first enroll, shown on the WebUI card and editable in the edit form)
+2. Writes the node-bound bootstrap credential `storager/bootstrap/agent.token` (given via `--token`; otherwise the file must already be in place. `nvmet-host.token` is derived automatically by the agent's enroll — nothing to provide by hand)
 3. Syncs the `.env` interpolation keys (component PKI host paths such as `KURRENT_AGENT_PKI_HOST`) and starts/restarts the agent container (the backend picks the orchestration: nvmet → `storager/nvmeof`, stgt/lio → `storager/iscsi`)
 
 Pre-declaring (optional): to customize business keys such as backend/diskDir/advertiseUrl, first generate the annotated template with `kurrent config print node-defaults > storager/kurrent.yaml` and edit it, then run join (the declaration is read in and merged; hand edits are kept).
@@ -247,7 +262,7 @@ Expected chain: the client gets an address via DHCP → pulls the boot firmware 
 | Symptom | Check |
 | --- | --- |
 | `agents list` HEALTH not ok | Can the controller reach `spec.agent.advertiseUrl` (storage 4840 / firewall)? Storage `docker logs storager-agent` (cert-renewal failures usually relate to PKI dir permissions) |
-| join: token invalid / expired | Token TTL (7 days) expired or never issued — re-run `kurrent token create`, then re-run `kurrent join --token <new-token>` (tokens are not node-bound; no node/component distinction) |
+| join: token invalid / expired | Token expired (60 minutes by default), already used (single-use by default), never issued, or the node id does not match the token binding — re-run `kurrent token create --agent-id <node id>`, then `kurrent join --token <new-token> --agent-id <node id>` |
 | No DHCP answers | Does `dnsmasq.conf` `interface=` match the real NIC (`ip a`)? Firewall 67/69 UDP |
 | Agent container restarting | `docker logs storager-agent`; usually the controller is unreachable (`controlPlane.url` 443 blocked) or the bootstrap credential file is missing (`kurrent join --token <token>` rewrites agent.token; delete nvmet-host.token and restart the agent to trigger re-derivation) |
 | Controller 503 / enroll failures | Is nginx 443 with the `/api/cp` reverse proxy healthy? `curl -k https://<cp-ip>/api/cp/healthz` |
@@ -255,7 +270,7 @@ Expected chain: the client gets an address via DHCP → pulls the boot firmware 
 
 ## Appendix: Declaration Files at a Glance
 
-**`control_plane/kurrent.yaml`** (template generated by `kurrent config print init-defaults`, edited, then validated/started by `kurrent init`): `spec.networking` five keys (interface/subnet/dhcpRange/gateway/dns) plus default blocks `pki`/`serverCert`/`boot`/`agentTimeoutSec`/`dnsmasq.reload` — the authoritative controller file; `dnsmasq.conf` is derived from it.
+**`control_plane/kurrent.yaml`** (template generated by `kurrent config print init-defaults`, edited, then validated/started by `kurrent init`): `spec.networking` five keys (interface/subnet/dhcpRange/gateway/dns) plus default blocks `pki`/`serverCert`/`boot`/`agentTimeoutSec` — the authoritative controller file; `dnsmasq.conf` is derived from it. The controller container does not mount `docker.sock`: dnsmasq watches the DHCP binding file itself, and nginx reloads its own CRL via an in-container watcher (confirmed by the controller through a shared-volume sentinel).
 
 **`storager/kurrent.yaml`** (template generated by `kurrent config print node-defaults`, edited, then validated/converged by `kurrent join`): `spec.agent` (backend/advertiseUrl/diskDir/nqnBase) + `spec.controlPlane.url` — the authoritative node file. The NQN namespace is owned solely by its `nqnBase` (the controller discovers it via the capabilities report, so Host NQNs and disk NQNs stay in one domain automatically).
 

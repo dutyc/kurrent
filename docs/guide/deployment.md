@@ -39,10 +39,11 @@
 | 67 / 69 | UDP | DHCP / TFTP（host 网络） | 控制面服务器 |
 | 80 | TCP | HTTP → 443 自动 301 升级（不承载内容/凭据） | 控制面服务器 |
 | 443 | TCP | 唯一入口：HTTPS（WebUI + `/api/cp` 反代控制面 + 组件 enroll/renew + 引导链） | 控制面服务器 |
-| 4839 | TCP | 控制面 API（仅本机回环：`kurrent init` 健康检查 / 调试；不对外开放） | 控制面服务器 |
 | 4840 | TCP | 存储 Agent HTTPS（控制面 → Agent） | 存储节点 |
 | 4841 | TCP | nvmet-host 管理服务（host 网络；仅 Agent 容器经 `host.docker.internal` 访问，不应向局域网开放） | 存储节点 |
 | 4421 | TCP | NVMe/TCP 数据面，单口 **TLS 1.3**（固件引导段与内核段共用） | 存储节点 |
+
+443 的引导链只反代 `/boot-vars`、`/devices/report`、`/devices/challenge` 三个只读端点；其余 `/devices/*` 管理接口不对外暴露。控制面管理面不发布 TCP 端口，只监听容器内 unix socket（`/run/kurrent/cp.sock`），由 nginx 经共享卷访问，容器健康检查走同一 socket。nginx 对所有反代 location 默认清空身份头，仅在 `/api/cp/` 的 mTLS 校验通过时注入 DN/issuer/serial/fingerprint。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
 
 ## 前置条件
 
@@ -68,6 +69,20 @@ sudo systemctl enable --now tlshd
 ```
 
 > `host-prepare.sh` 只预检 nvmet 模块与 configfs；上面第 3 步的 TLS 条件与 tlshd 目前需手工确认。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
+
+**宿主基线（认证体系成立的前提）**：默认只读检查对外 TCP 监听、Docker 暴露面与凭据文件权限；唯一的自动修复是 `--fix-4841`（显式 opt-in）。
+
+```bash
+bash control_plane/host-baseline.sh
+sudo bash control_plane/host-baseline.sh --fix-4841   # 可选：为 4841 装幂等 iptables 规则
+```
+
+- 控制面宿主只应暴露 22（运维）、53/67/69（dnsmasq）、80/443（nginx）；存储节点另有 4840/4421，`4841` 必须只绑回环
+- `--fix-4841` 只在 INPUT 链加三条带注释的规则（lo 与 `172.16.0.0/12` ACCEPT，其余 DROP），可重复执行；它遮蔽端口而不改变服务监听地址，服务仍应改绑 `127.0.0.1`
+- ufw 不过滤 Docker 发布端口：需要入站限制时在 `DOCKER-USER` 链收口（脚本在 ufw 已启用但该链为空时给出 warn）
+- 控制面容器不挂载 `docker.sock`（dnsmasq 自己监听 `dhcp-hostsfile`，nginx 由容器内 watcher 自行 reload）
+- CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600
+- 脚本报 FAIL 时先处理再做安全评估：宿主 root 与 nginx 进程被攻破等同管理面沦陷
 
 ## 第 1 步：控制面服务器
 
@@ -109,7 +124,7 @@ kurrent init        # 校验 kurrent.yaml → 启动/重启控制面 → 等待 
 ### 1.4 验证
 
 ```bash
-curl http://127.0.0.1:4839/healthz          # {"status":"ok"}
+curl -k https://127.0.0.1/healthz           # {"status":"ok"}（经 443；管理面无 TCP 端口）
 head -5 dnsmasq/dnsmasq.conf                # interface=ens33 ...（已按 yml 生成）
 ```
 
@@ -127,7 +142,7 @@ head -5 dnsmasq/dnsmasq.conf                # interface=ens33 ...（已按 yml �
 **WebUI 登录方式**（二选一）：
 
 1. **管理 token（登录页）**：`kurrent token create --usage admin` 签发后在登录页粘贴
-   → 换取 HttpOnly 会话 Cookie（TTL 7 天滑动续期，刷新/重开浏览器保持登录；侧边栏
+   → 换取 HttpOnly 会话 Cookie（12 小时 TTL、剩余不足一半才滑动续期，刷新/重开浏览器保持登录；侧边栏
    底部可登出）。
 2. **管理证书（自动认证）**：将 admin 证书转为 PKCS#12 导入系统证书库，浏览器访问
    时自动完成 mTLS 认证、无需登录：
@@ -148,20 +163,21 @@ sudo ufw allow 67,69/udp && sudo ufw allow 80,443/tcp && sudo ufw reload
 ### 1.5 签发存储节点引导凭据
 
 ```bash
-kurrent token create --cp-url https://192.168.1.10
+kurrent token create --agent-id node-01 --cp-url https://192.168.1.10
+# 省略 --agent-id 则生成随机 12 位 hex 节点身份，命令同样携带
 ```
 
-`--cp-url` 指定**存储节点侧可达的控制面 HTTPS 入口**（443 `/api/cp` 反代，Agent 经此 enroll/renew；缺省按 `--server` 主机推导）。输出形如（含带地址、可直接粘贴的节点侧命令）：
+`--cp-url` 指定**存储节点侧可达的控制面 HTTPS 入口**（443 `/api/cp` 反代，Agent 经此 enroll/renew；缺省按 `--server` 主机推导）。`--agent-id` 是节点身份（= 节点声明 `metadata.name`），token 与它绑定。输出形如（含地址与节点 id、可直接粘贴的节点侧命令）：
 
 ```
-bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，TTL 内可被多次 enroll 复用）
+bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，绑定节点 node-01，0/1）
 
-# 存储节点上执行（命令已携带控制面地址，节点执行即自动生成/更新声明）：
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
+# 在绑定节点上执行（--agent-id 写入节点声明 metadata.name）：
+kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
 # 加入后验证：kurrent agents list（或 WebUI「Agent 列表」health=ok）
 ```
 
-> token 是**集群级通用引导凭据**：不绑节点、TTL 内可被多次 enroll 复用，任意存储节点可用同一 token 加入；有效期为 7 天（`spec.pki.bootstrapTokenTtlDays`），过期重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
+> token **绑定节点身份且默认一次性**：enroll 只接受该 `agent_id`，使用额度在签发前原子占用（签发失败退回），TTL 默认 60 分钟、上限 24 小时（`spec.pki.bootstrapTokenTtlMinutes`）；批量引导用 `kurrent token create --agent-id ... --uses N`（上限 100），过期或被吊销后重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
 
 ## 第 2 步：存储节点
 
@@ -177,16 +193,16 @@ sudo install -m 0755 cli/kurrent /usr/local/bin/kurrent   # 按 1.1 安装 CLI�
 
 ### 2.2 声明节点配置并加入集群
 
-节点声明式配置为 `storager/kurrent.yaml`（yml 即声明）。**节点无需预编辑任何文件**——签发命令已携带控制面地址，粘贴执行即可：
+节点声明式配置为 `storager/kurrent.yaml`（yml 即声明）。**节点无需预编辑任何文件**——签发命令已携带控制面地址与节点 id，粘贴执行即可：
 
 ```bash
 cd /path/to/kurrent
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1
+kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
 ```
 
 `kurrent join` 完成三件事（幂等可重跑）：
-1. 生成/更新 `storager/kurrent.yaml`（缺失时按模板自动生成：`metadata.name` 自动生成随机短标识、地址同步进 `spec.controlPlane.url`；已存在则读入合并——非 forbid 式，手工编辑保留。人工输入只需写 `metadata.remark` 备注——随首次 enroll 登记进控制面台账，WebUI 卡片展示、编辑表单可改）
-2. 写入通用引导凭据 `storager/bootstrap/agent.token`（`--token` 给则写入；不给则要求文件已就位。`nvmet-host.token` 由 agent enroll 按能力派生自动生成，无需手工提供）
+1. 生成/更新 `storager/kurrent.yaml`（缺失时按模板自动生成：`metadata.name` = `--agent-id`、地址同步进 `spec.controlPlane.url`；已存在则读入合并——非 forbid 式，手工编辑保留；已声明身份与 `--agent-id` 不一致即拒绝。人工输入只需写 `metadata.remark` 备注——随首次 enroll 登记进控制面台账，WebUI 卡片展示、编辑表单可改）
+2. 写入绑定身份的引导凭据 `storager/bootstrap/agent.token`（`--token` 给则写入；不给则要求文件已就位。`nvmet-host.token` 由 agent enroll 按能力派生自动生成，无需手工提供）
 3. 同步 `.env` 插值键（组件 PKI 宿主路径 `KURRENT_AGENT_PKI_HOST` 等）并拉起/重启 agent 容器（backend 决定编排：nvmet → `storager/nvmeof`，stgt/lio → `storager/iscsi`）
 
 预置声明（可选）：自定义 backend/diskDir/advertiseUrl 等业务键时，先 `kurrent config print node-defaults > storager/kurrent.yaml` 生成带注释模板并按环境编辑，再执行 join（声明读入合并，手工字段保留）。
@@ -239,7 +255,7 @@ docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 | 症状 | 排查 |
 | --- | --- |
 | `agents list` HEALTH 非 ok | 控制面能否访问 `spec.agent.advertiseUrl`（存储节点 4840 端口/防火墙）；存储节点 `docker logs storager-agent`（证书轮换失败多与 PKI 目录权限有关） |
-| join 报 token 无效/已过期 | token TTL（7 天）过期或从未签发——控制面重新 `kurrent token create` 后重跑 `kurrent join --token <新token>`（token 不绑节点，不区分节点/组件） |
+| join 报 token 无效/已过期 | token 已过期（默认 60 分钟）、已被使用（默认一次性）、从未签发，或节点 id 与 token 绑定不一致——控制面重新 `kurrent token create --agent-id <节点 id>` 后重跑 `kurrent join --token <新token> --agent-id <节点 id>` |
 | DHCP 无应答 | `dnsmasq.conf` 的 `interface=` 是否对应真实网卡（`ip a` 核对）；防火墙 67/69 UDP |
 | Agent 容器反复重启 | `docker logs storager-agent`；多为控制面不可达（`controlPlane.url` 443 未放通）或引导凭据文件缺失（`kurrent join --token <token>` 重写 agent.token；nvmet-host.token 可删后重启 agent 容器触发重新派生） |
 | 控制面 503 / enroll 失败 | nginx 443 与 `/api/cp` 反代是否正常；控制面 `curl -k https://<cp-ip>/api/cp/healthz` |
@@ -247,7 +263,7 @@ docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 
 ## 附录：声明配置速查
 
-**`control_plane/kurrent.yaml`**（`kurrent config print init-defaults` 生成模板后编辑，`kurrent init` 校验启动）：`spec.networking` 五键（interface/subnet/dhcpRange/gateway/dns）+ `pki`/`serverCert`/`boot`/`agentTimeoutSec`/`dnsmasq.reload` 默认块——控制面权威文件，dnsmasq.conf 由其派生。
+**`control_plane/kurrent.yaml`**（`kurrent config print init-defaults` 生成模板后编辑，`kurrent init` 校验启动）：`spec.networking` 五键（interface/subnet/dhcpRange/gateway/dns）+ `pki`/`serverCert`/`boot`/`agentTimeoutSec` 默认块——控制面权威文件，dnsmasq.conf 由其派生。控制面容器不挂载 `docker.sock`：dhcp 绑定文件由 dnsmasq 自己监听，nginx 的 CRL 重载由容器内 watcher 自己完成（控制面经共享卷哨兵确认）。
 
 **`storager/kurrent.yaml`**（`kurrent config print node-defaults` 生成模板后编辑，`kurrent join` 校验收敛）：`spec.agent`（backend/advertiseUrl/diskDir/nqnBase）+ `spec.controlPlane.url`——节点权威文件，NQN 命名域以本文件的 `nqnBase` 为唯一来源（控制面经 capabilities 上报发现，Host NQN 与盘 NQN 自动同域）。
 

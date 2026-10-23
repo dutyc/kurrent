@@ -46,9 +46,9 @@ spec:
     dhcpRange: 192.168.80.50,192.168.80.100   # DHCP 池起止
     gateway: 192.168.80.2              # dhcp-option=3
     dns: 223.5.5.5                     # dhcp-option=6
-  # 组件 PKI 策略（内部 CA + bootstrap token 引导 + 证书轮换）
+  # 组件 PKI 策略（三分根 CA users/nodes/control + 绑 agent_id 的 bootstrap token 引导 + 证书轮换）
   pki:
-    bootstrapTokenTtlDays: 7
+    bootstrapTokenTtlMinutes: 60
     componentCertDays: 90
     renewThreshold: 0.2
   # TOFU 引导链服务器证书（自签，启动时幂等生成；nginx 只读挂载 state/certs）
@@ -62,9 +62,6 @@ spec:
     autoBootTimeoutSec: 1
   # 调用存储 Agent 超时（秒）
   agentTimeoutSec: 10
-  # dnsmasq 集成：hosts 台账变更后是否自动 reload 容器（需 docker.sock 挂载）
-  dnsmasq:
-    reload: false
 `
 
 // nodeDefaultsTemplate 节点声明模板（与 storager/kurrent.yaml.example 同源）。
@@ -72,16 +69,16 @@ const nodeDefaultsTemplate = `# 节点声明式配置
 #
 # 权威配置来源：模板与 ` + "`" + `kurrent config print node-defaults` + "`" + ` 输出同源——生成或复制
 # 本文件为 storager/kurrent.yaml 后编辑（kurrent.yaml 不入库）；kurrent join
-# <cp-url> --token <token> 校验并收敛启动 agent（地址随
+# <cp-url> --token <token> --agent-id <id> 校验并收敛启动 agent（地址与节点 id 随
 # 签发命令携带，kurrent.yaml 缺失时由 join 自动生成）。agent 与 nvmet-host 容器
 # 挂载同一份文件（/etc/kurrent/kurrent.yaml，只读），各自加载自己的 spec 子块。
 #
 # 分层职责：本文件只声明节点级业务配置（身份/数据面参数）；
 # - 容器内路径（pki/cp-ca/日志/缓存/盘目录挂载点）与监听/内部通讯地址属部署清单
 #   docker-compose.yml 职责（compose 硬编码挂载目标，应用侧以模块常量固化）
-# - 引导凭据在独立文件 storager/bootstrap/：agent.token（集群级通用 token：
-#   join 写入、TTL 内可复用）；nvmet-host.token 由 agent
-#   enroll 上报 backend=nvmet 时控制面派生随响应下发并落盘（签发不绑节点、不预知后端）
+# - 引导凭据在独立文件 storager/bootstrap/：agent.token（绑节点身份的 token：
+#   join 写入、默认一次性、60 分钟）；nvmet-host.token 由 agent
+#   enroll 上报 backend=nvmet 时控制面派生随响应下发并落盘（绑 agent_id、不预知后端）
 # - diskDir = 宿主存储路径（数据目录声明；
 #   join 同步为 .env 的 KURRENT_DISK_DIR 插值键，compose 挂载源）
 #
@@ -92,8 +89,9 @@ apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
   # 节点身份 = agent_id（控制面 agents.yml 登记键、组件证书 CN）：机器身份——由
-  # kurrent join 自动生成（12 位 hex 随机标识，与盘 os_tag 同构）并持久化，勿手工
-  # 输入；留空时 join 自动补，多节点各自生成、天然不冲突
+  # bootstrap token 绑定（kurrent token create --agent-id；省略则生成 12 位 hex 随机
+  # 标识，与盘 os_tag 同构），join 写入并持久化，勿手工改写；身份须稳定，多节点
+  # 各自一个、天然不冲突
   name: ""
   # 备注（可选，人类识别用）：手工输入的唯一字段（如 storage-nvmet-01 / 生产存储）。
   # 随首次 enroll 登记进控制面台账（WebUI Agent 卡片展示、编辑表单可改），

@@ -1,15 +1,15 @@
 """nvmet 宿主管理服务（NVMe-oF 存储接入 C4：宿主原生 nvmet + Agent HTTP 调用）。
 
 运行形态：容器 `kurrent-nvmet-host`（`storager/nvmeof/docker-compose.yml`）——host 网络模式，
-监听 4841（`config.DEFAULT_HOST_PORT`），只对外提供 mTLS（内部 CA，与 agent 同构：派生
-bootstrap token 引导 + 证书轮换 + 客户端证书鉴权；token TTL 内可复用、不消耗）；因 Ubuntu
+监听 4841（`config.DEFAULT_HOST_PORT`），只对外提供 mTLS（nodes CA，与 agent 同构：派生
+bootstrap token 引导 + 证书轮换 + 客户端证书鉴权；token 绑 agent_id、TTL 内可复用）；因 Ubuntu
 docker-default AppArmor 会拒绝 configfs 写入，容器需豁免 AppArmor（见 nvmet-host README）。
 直接操作内核 configfs（/sys/kernel/config/nvmet）——subsystem/namespace/port/hosts(dhchap_key)。
 数据面单端口：NVMe/TCP TLS 1.3（默认 4421，`addr_tsas=tls1.3`，内核同时把 `treq` 置
 required）——默认全链路加密，固件段（iPXE sanboot）与内核段（GRUB 之后）共用本口；
 历史明文口（4420）已撤除，升级时由启动清理收敛。
 TLS 端不需要 configfs 侧密钥配置，只需把 psk key 注入内核全局 `.nvme` keyring（见 NvmePskKeyring）。
-Agent 是唯一调用方（持有内部 CA 签发的 client cert，经 https://host.docker.internal:4841）。
+Agent 是唯一调用方（持有 nodes CA 签发的 client cert，经 https://host.docker.internal:4841）。
 盘文件的创建/管理归 Agent（本服务不建盘、不删盘），但**必须能看见同一份盘目录**——
 configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，故 compose 把宿主盘目录
 挂到 `/srv/nvmet-disks`，device_path 按该前缀重拼（`config.DEFAULT_HOST_DISK_DIR`）。
@@ -472,13 +472,11 @@ class TlsKeySet(BaseModel):
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（内部 CA 信任模型）。
+    """mTLS 客户端证书鉴权（nodes CA 信任模型）。
 
-    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=内部 CA 起服：TLS 层
-    强制客户端证书且校验链到内部 CA（无证书/链不符握手即被拒）；身份边界 =
-    内部 CA 签发范围（bootstrap token 一次性引导 + CSR CN 校验 + 组件登记，
-    签发受控制面管控）。uvicorn 不透传客户端证书到 ASGI scope
-    （Kludex/uvicorn#745），应用层无法做 CN 白名单。
+    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=ca-nodes.crt 起服：
+    只接受 nodes 域签发的同伴组件证书（agent 是唯一调用方）；控制面证书由
+    control 域签发，不会在 4841 端被接受。
     """
     if request.client is None:
         raise HTTPException(401, "unauthorized")
@@ -621,13 +619,13 @@ if __name__ == "__main__":
     except OSError as exc:
         log.error("历史明文口拆除失败（手工处理: 摘 ports/%s/subsystems/* 后 rmdir）: %s",
                   LEGACY_PLAIN_PORT_ID, exc)
-    # mTLS：serving cert + 内部 CA 校验客户端证书链（CERT_REQUIRED），
+    # mTLS：serving cert + nodes CA 校验客户端证书链（CERT_REQUIRED；只信同伴组件），
     # 与 storager-agent 的 uvicorn 参数一致；host 网络直连（无 docker-proxy），协议版本不限
     pki_dir = DEFAULT_PKI_DIR
     uvicorn.run(
         app, host=host, port=port, log_level="info",
         ssl_keyfile=os.path.join(pki_dir, "serving.key"),
         ssl_certfile=os.path.join(pki_dir, "serving.crt"),
-        ssl_ca_certs=os.path.join(pki_dir, "ca.crt"),
+        ssl_ca_certs=os.path.join(pki_dir, "ca-nodes.crt"),
         ssl_cert_reqs=2,
     )

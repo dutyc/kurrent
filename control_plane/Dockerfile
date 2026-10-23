@@ -25,5 +25,9 @@ RUN pip install --no-cache-dir \
 
 COPY app ./app
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+COPY healthcheck.py /app/healthcheck.py
+
+# 管理面只暴露 unix socket（与 nginx 共享卷），容器内不监听 TCP：
+# 同网容器与 host 网络进程都无法直连，身份头只可能由 nginx 写入。
+CMD ["sh", "-c", "mkdir -p /run/kurrent && exec uvicorn app.main:app --uds /run/kurrent/cp.sock"]
 

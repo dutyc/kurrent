@@ -5,13 +5,14 @@ mTLS → /renew），并把 CA/证书落盘到 pki_dir。调用时机：uvicorn 
 时），证书未就绪则进程退出（无证书不启动）。
 
 证书布局（pki_dir 由容器挂载持久化）：
-  ca.crt           内部 CA（校验对端证书链）
-  client.crt/key   client cert（本组件身份：向 cp renew、向 nvmet-host 认证）
+  ca-control.crt  控制面客户端证书的信任锚（agent 调用本服务时反向校验用）
+  ca-nodes.crt    同伴组件证书的信任锚（uvicorn --ssl-ca-certs，校验 agent 客户端）
+  client.crt/key   client cert（本组件身份：向 cp renew、向 agent 证明同伴身份）
   serving.crt/key  serving cert（本组件 TLS 服务端）
 
 enroll 凭据 = nvmet-host 派生 bootstrap token（agent enroll 按 backend=nvmet 能力签发
 随响应下发并落盘 nvmet-host.token，绑 agent_id 防串用）；
-renew 凭据 = 现有 client cert（mTLS，nginx 校验后透传 DN 给控制面）。
+renew 凭据 = 现有 client cert（mTLS，nginx 按 issuer 判定 class=component）。
 """
 
 import datetime as _dt
@@ -93,9 +94,11 @@ class PkiClient:
         self.bootstrap_token = bootstrap_token
 
     def ready(self) -> bool:
-        """证书就绪且剩余生命周期高于阈值。"""
+        """证书就绪、剩余生命周期高于阈值，且两个信任锚都已落盘。"""
         ratio = _cert_remaining_ratio(self.pki_dir / "client.crt")
-        return ratio is not None and ratio > RENEW_THRESHOLD
+        return (ratio is not None and ratio > RENEW_THRESHOLD
+                and (self.pki_dir / "ca-control.crt").is_file()
+                and (self.pki_dir / "ca-nodes.crt").is_file())
 
     def ensure(self) -> None:
         """引导或轮换证书（进程启动时调用）。已就绪则跳过。"""
@@ -103,8 +106,15 @@ class PkiClient:
             log.info("pki: client cert ok (cn=%s)", self.cn)
             return
         if (self.pki_dir / "client.crt").exists():
-            log.warning("pki: client cert expired or near expiry, renewing (cn=%s)", self.cn)
-            self._enroll(renew=True)
+            log.warning("pki: renewing client cert (cn=%s)", self.cn)
+            try:
+                self._enroll(renew=True)
+            except RuntimeError as exc:
+                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+                    log.warning("pki: renew rejected (%s); falling back to bootstrap enroll", exc)
+                    self._enroll(renew=False)
+                else:
+                    raise
         else:
             log.info("pki: no client cert, enrolling (cn=%s)", self.cn)
             self._enroll(renew=False)
@@ -142,6 +152,9 @@ class PkiClient:
         certs = data.get("certificates", {})
         if "client.crt" not in certs or "serving.crt" not in certs:
             raise RuntimeError(f"pki enroll: unexpected response: {sorted(data.keys())}")
+        for field in ("ca_nodes_crt", "ca_control_crt"):
+            if not data.get(field):
+                raise RuntimeError(f"pki enroll: missing trust anchor {field}")
         _write_pem(self.pki_dir / "client.key", key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.TraditionalOpenSSL,
@@ -152,7 +165,8 @@ class PkiClient:
             encryption_algorithm=serialization.NoEncryption()))
         _write_pem(self.pki_dir / "client.crt", certs["client.crt"].encode())
         _write_pem(self.pki_dir / "serving.crt", certs["serving.crt"].encode())
-        _write_pem(self.pki_dir / "ca.crt", data["ca_crt"].encode())
+        _write_pem(self.pki_dir / "ca-nodes.crt", data["ca_nodes_crt"].encode())
+        _write_pem(self.pki_dir / "ca-control.crt", data["ca_control_crt"].encode())
         log.info("pki: %s done (cn=%s)", "renew" if renew else "enroll", self.cn)
 
     def _cp_context(self, with_client_cert: bool) -> ssl.SSLContext:

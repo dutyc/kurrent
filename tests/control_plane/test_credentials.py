@@ -172,7 +172,9 @@ def _bind_existing_worker(client, auth_headers, register_claimed_device, worker_
     return worker_id
 
 
-def test_boot_vars_injects_nbft_secret(client, auth_headers, register_claimed_device, mock_agent_client):
+def test_boot_vars_injects_nbft_secret(
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
+):
     _bound_worker(client, auth_headers, register_claimed_device)
     # 建盘（Host NQN 与盘 NQN 同域派生需盘 NQN：base = agent 上报的 capabilities.base_nqn）
     client.post("/agents", json={
@@ -186,14 +188,14 @@ def test_boot_vars_injects_nbft_secret(client, auth_headers, register_claimed_de
     secret = make_secret()
     client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert res.status_code == 200
     assert f"set nbft-secret {secret}" in res.text
     # Host NQN 与盘 NQN 同域派生（_host_nqn_for，base = 盘 NQN 前缀），与 nvmet hosts/ 登记值一致
     assert "set hostnqn nqn.2026-07.com.test:host.worker-01" in res.text
 
     # JSON 格式同样投影 nbft_secret / hostnqn
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01", "format": "json"})
+    res = signed_boot_vars(MAC_A, "worker-01", format_="json")
     assert res.json()["nbft_secret"] == secret
     assert res.json()["hostnqn"] == "nqn.2026-07.com.test:host.worker-01"
 
@@ -230,7 +232,7 @@ def _setup_worker_with_disk(
 
 
 def test_boot_vars_injects_nbft_tls_when_data_port_ready(
-    client, auth_headers, register_claimed_device, mock_agent_client,
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
 ):
     """nvmet 后端 + 数据面端口就绪 → 下发 nbft-tls-psk（密钥纯函数派生）与 nbft-tls-port。"""
     secret = _setup_worker_with_disk(
@@ -239,18 +241,18 @@ def test_boot_vars_injects_nbft_tls_when_data_port_ready(
         port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
     )
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert res.status_code == 200
     assert f"set nbft-tls-psk {_derive_tls_psk(secret)}" in res.text
     assert "set nbft-tls-port 4421" in res.text
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01", "format": "json"})
+    res = signed_boot_vars(MAC_A, "worker-01", format_="json")
     assert res.json()["nbft_tls_psk"] == _derive_tls_psk(secret)
     assert res.json()["nbft_tls_port"] == "4421"
 
 
 def test_boot_vars_denies_boot_when_port_not_ready(
-    client, auth_headers, register_claimed_device, mock_agent_client,
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
 ):
     """nvmet 后端但数据面端口未就绪（ready=False）→ 拒绝下发引导变量（默认全链路加密，
     明文口已撤除，放行只会得到一条连不上的 root-path）。"""
@@ -260,7 +262,7 @@ def test_boot_vars_denies_boot_when_port_not_ready(
         port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": False},
     )
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert res.status_code == 200
     assert "no per-worker boot vars found" in res.text
     assert "nbft-tls-port" not in res.text
@@ -268,7 +270,7 @@ def test_boot_vars_denies_boot_when_port_not_ready(
 
 
 def test_boot_vars_denies_boot_without_credential(
-    client, auth_headers, register_claimed_device, mock_agent_client,
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
 ):
     """nvmet 后端但无认证密钥（未绑定/已吊销）→ 同样拒绝引导：无密钥即无 PSK，
     也就没有任何可用的加密路径。"""
@@ -278,13 +280,13 @@ def test_boot_vars_denies_boot_without_credential(
         port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
     )
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert "no per-worker boot vars found" in res.text
     assert "nbft-secret" not in res.text
 
 
 def test_boot_vars_no_tls_for_non_nvmet_backend(
-    client, auth_headers, register_claimed_device, mock_agent_client,
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
 ):
     """非 nvmet 后端（stgt/lio 无 NVMe-oF TLS）→ 不下发 TLS 变量（即使上报了端口也忽略）。"""
     _setup_worker_with_disk(
@@ -293,37 +295,96 @@ def test_boot_vars_no_tls_for_non_nvmet_backend(
         port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
     )
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert "nbft-tls-psk" not in res.text
     assert "nbft-tls-port" not in res.text
 
 
-def test_boot_vars_no_secret_without_credential(client, auth_headers, register_claimed_device):
+def test_boot_vars_no_secret_without_credential(
+    client, auth_headers, register_claimed_device, signed_boot_vars,
+):
     _bound_worker(client, auth_headers, register_claimed_device)
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert "nbft-secret" not in res.text
 
 
-def test_boot_vars_no_secret_unbound(client, auth_headers, register_claimed_device):
+def test_boot_vars_no_secret_unbound(
+    client, auth_headers, register_claimed_device, signed_boot_vars,
+):
     """设备入池未绑定：即使 worker 有密钥，带 mac 请求被冒领拒绝（空脚本，无注入）。"""
     register_claimed_device(MAC_A)
     client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
 
-    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    res = signed_boot_vars(MAC_A, "worker-01")
     assert "nbft-secret" not in res.text
 
 
-def test_boot_vars_credential_audit(client, auth_headers, register_claimed_device):
+def test_boot_vars_credential_audit(
+    client, auth_headers, register_claimed_device, signed_boot_vars,
+):
     _bound_worker(client, auth_headers, register_claimed_device)
     secret = make_secret()
     client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
-    client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    signed_boot_vars(MAC_A, "worker-01")
 
     ops = settings.operations_file.read_text(encoding="utf-8")
     assert "boot_vars.credential" in ops
     assert '"injected": true' in ops
     assert secret not in ops  # 审计不记密钥本体
+    # I10：injected && !verified 必须为零（注入只发生在验签通过时）
+    for line in ops.splitlines():
+        if "boot_vars.credential" not in line:
+            continue
+        entry = json.loads(line)
+        assert not (entry.get("injected") and not entry.get("verified")), entry
+
+
+def test_boot_vars_withholds_credentials_without_signature(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """冒领回归：有 mac 但无 nonce/sig → nvmet 凭据不下发，引导被拒绝。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert res.status_code == 200
+    assert "nbft-secret" not in res.text
+    assert "nbft-tls-psk" not in res.text
+    assert "no per-worker boot vars found" in res.text
+
+
+def test_boot_vars_hostname_only_withholds_credentials(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """报告 F-01 回归：仅 hostname 的请求不得拿到 CHAP 密钥或 TLS PSK。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    res = client.get("/boot-vars", params={"hostname": "worker-01", "format": "json"})
+    assert res.status_code == 200
+    assert "nbft_secret" not in res.text
+    assert "nbft_tls_psk" not in res.text
+
+
+def test_boot_vars_transitional_omits_secret_for_non_nvmet(
+    client, auth_headers, register_claimed_device, mock_agent_client,
+):
+    """过渡期允许下发菜单变量，但未验签请求仍不得注入 CHAP 密钥。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client, backend="stgt",
+    )
+
+    res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
+    assert res.status_code == 200
+    assert "set menu-default" in res.text
+    assert "nbft-secret" not in res.text
 
 
 # ============================ C4：控制面推送驱动（Agent 转调宿主服务） ============================

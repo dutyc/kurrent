@@ -16,7 +16,7 @@ from cryptography.x509.oid import NameOID
 
 
 def gen_pki_dir(target: Path) -> Path:
-    """在 target 下生成 ca.crt + client.crt + client.key（自签，有效期 1 年）。"""
+    """在 target 下生成 ca.crt / ca-control.crt / ca-nodes.crt + client.crt/key。"""
     target.mkdir(parents=True, exist_ok=True)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "kurrent-test-ca")])
@@ -32,7 +32,11 @@ def gen_pki_dir(target: Path) -> Path:
            .not_valid_before(now - datetime.timedelta(days=1))
            .not_valid_after(now + datetime.timedelta(days=365))
            .sign(key, hashes.SHA256()))
-    (target / "ca.crt").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    ca_pem = ca.public_bytes(serialization.Encoding.PEM)
+    (target / "ca.crt").write_bytes(ca_pem)
+    # 三分根后节点侧的两个信任锚（单测占位同一张 CA，只要求文件存在且可建 SSLContext）
+    (target / "ca-control.crt").write_bytes(ca_pem)
+    (target / "ca-nodes.crt").write_bytes(ca_pem)
     (target / "client.crt").write_bytes(cli.public_bytes(serialization.Encoding.PEM))
     (target / "client.key").write_bytes(key.private_bytes(
         encoding=serialization.Encoding.PEM,

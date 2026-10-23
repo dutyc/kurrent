@@ -111,6 +111,15 @@ class TestDeviceReport:
         assert dev["fingerprint"]["mem_total"] == 4096  # 0x1000 宽松解析
         assert dev["last_seen"] is not None
 
+    def test_report_cannot_overwrite_uuid(self, client, auth_headers):
+        """无鉴权上报只能补空 UUID，不能覆盖已有绑定比对依据。"""
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.get("/devices/report", params={"mac": MAC_A, "uuid": "first-uuid"})
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).json()["uuid"] == "first-uuid"
+
+        client.get("/devices/report", params={"mac": MAC_A, "uuid": "spoofed-uuid"})
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).json()["uuid"] == "first-uuid"
+
     def test_report_requires_no_token(self, client, auth_headers, ec_keypair):
         # boot 域不鉴权：无 Authorization 也能上报
         client.post("/settings/registration-window", json={"ttl_minutes": 30}, headers=auth_headers)

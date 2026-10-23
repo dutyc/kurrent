@@ -2,14 +2,16 @@
 
 分层（认证/授权/审计分离）：
 - 认证（authenticate 路由依赖）：三种凭据串行短试（首个成功即止），产出 Identity；全失败 401
-  1. X-Client-Cert-DN：nginx 443 mTLS 校验后透传的客户端证书 DN（CN=用户名、O=组）
+  1. X-Client-Cert-DN + X-Client-Class=human：nginx 443 mTLS 校验后按 issuer 注入；
+     CN 必须存在于 state/users.yml，组来自该文件（证书字段不承载组）
   2. Authorization: Bearer：管理 token（pki 台账校验，usage=admin）
   3. Cookie kurrent_session：HMAC-SHA256 签名会话（滑动续期），浏览器登录态
 - 授权（authorize_request 路由依赖）：读请求 viewer 组即可，写请求需 admin 组
+- 主体类（principal.py）：路由声明允许类，全局依赖在认证前比对并拒绝越类访问
 - 审计：authenticate 把身份写入 state.current_actor，OperationLog 自动附加 actor
 
-信任前提：X-Client-Cert-DN 由 nginx mTLS 校验后注入，因此 4839 必须只绑 127.0.0.1
-（443 唯一对外入口）——否则可绕过 nginx 直接伪造身份头冒充已认证用户。
+信任前提：X-Client-Class 只由 nginx 在 mTLS SUCCESS 时按 issuer 注入；控制面只监听
+unix socket，客户端无法自带头绕过（P1）。证书不再解析 O 字段。
 
 开发模式：KURRENT_CP_INSECURE=1 显式放行（Identity=insecure/admin 组），生产严禁；
 不存在"未配置凭据即放行"的空放行路径。
@@ -21,35 +23,51 @@ import hmac
 import json
 import logging
 import time
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, Response
 
-from . import pki, state
-from .config import (ADMIN_GROUP, CLIENT_CERT_DN_HEADER, SESSION_TTL_DAYS,
-                     VIEWER_GROUP, settings)
+from . import pki, sessions, state, users
+from .config import (ADMIN_GROUP, CLIENT_CERT_DN_HEADER, CLIENT_CLASS_HEADER,
+                     SESSION_TTL_SECONDS, settings)
 
 log = logging.getLogger("control-plane")
 
-SESSION_COOKIE = "kurrent_session"
+# __Host- 前缀：Secure + Path=/ + 无 Domain（浏览器强制约束，防子域注入）
+SESSION_COOKIE = "__Host-kurrent_session"
+LEGACY_SESSION_COOKIE = "kurrent_session"  # 无状态旧会话：仅用于登出时清除
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 class Identity:
-    """认证结果：name = 用户名/凭据标识，groups = 组列表。"""
+    """认证结果：name = 用户名/凭据标识，groups = 组列表，principal_class = 主体类。
 
-    __slots__ = ("name", "groups", "method")
+    scopes 仅自动化 token 使用（admin / readonly / enroll）；证书与会话为空。
+    """
 
-    def __init__(self, name: str, groups: list[str], method: str):
+    __slots__ = ("name", "groups", "method", "principal_class",
+                 "issuer", "serial", "fingerprint", "scopes")
+
+    def __init__(self, name: str, groups: list[str], method: str, *,
+                 principal_class: str = "human", issuer: str = "",
+                 serial: str = "", fingerprint: str = "",
+                 scopes: list[str] | None = None):
         self.name = name
         self.groups = groups
         self.method = method
+        self.principal_class = principal_class
+        self.issuer = issuer
+        self.serial = serial
+        self.fingerprint = fingerprint
+        self.scopes = list(scopes or [])
 
     @property
     def is_admin(self) -> bool:
         return ADMIN_GROUP in self.groups
 
     def __repr__(self) -> str:
-        return f"Identity(name={self.name!r}, groups={self.groups!r}, method={self.method!r})"
+        return (f"Identity(name={self.name!r}, groups={self.groups!r}, "
+                f"method={self.method!r}, class={self.principal_class!r})")
 
 
 # ============================ 证书 DN 解析 ============================
@@ -70,13 +88,17 @@ def parse_dn(dn: str) -> tuple[str, list[str]]:
     return cn, orgs
 
 
-def _identity_from_dn(dn: str) -> Identity:
-    cn, orgs = parse_dn(dn)
+def _identity_from_dn(dn: str, *, issuer: str = "", serial: str = "",
+                      fingerprint: str = "") -> Identity:
+    """证书身份：CN 必须在 users.yml 中，组只来自该文件（未知用户 403）。"""
+    cn, _ = parse_dn(dn)
     if not cn:
         raise HTTPException(status_code=401, detail="unauthorized: empty client certificate DN")
-    # 组取证书 O 字段；旧证书无 O 时按 CN 兜底（admin 视为管理组）
-    groups = orgs or ([ADMIN_GROUP] if cn == settings.admin_cn else [])
-    return Identity(name=cn, groups=groups, method="cert")
+    groups = users.user_groups(settings.users_file, cn)
+    if groups is None:
+        raise HTTPException(status_code=403, detail=f"forbidden: unknown user {cn}")
+    return Identity(name=cn, groups=groups, method="cert", principal_class="human",
+                    issuer=issuer, serial=serial, fingerprint=fingerprint)
 
 
 # ============================ 会话签名 ============================
@@ -88,11 +110,14 @@ def _session_key() -> bytes:
         return b""
 
 
-def sign_session(name: str, groups: list[str]) -> str:
-    """签发会话票据：base64url(payload).base64url(hmac)。payload = {name, groups, exp}。"""
+def sign_session(jti: str, exp: int, epoch: int) -> str:
+    """签发会话票据：base64url(payload).base64url(hmac)。
+
+    payload 只含 {jti, exp, epoch}——身份与组以服务端登记为准，票据不承载权限。
+    """
     payload = json.dumps(
-        {"name": name, "groups": groups, "exp": int(time.time()) + SESSION_TTL_DAYS * 86400},
-        separators=(",", ":"), ensure_ascii=False,
+        {"jti": jti, "exp": int(exp), "epoch": int(epoch)},
+        separators=(",", ":"),
     ).encode()
     body = base64.urlsafe_b64encode(payload).rstrip(b"=")
     sig = hmac.new(_session_key(), body, hashlib.sha256).digest()
@@ -128,17 +153,34 @@ def session_cookie_kwargs() -> dict:
         "secure": True,
         "samesite": "lax",
         "path": "/",
-        "max_age": SESSION_TTL_DAYS * 86400,
+        "max_age": SESSION_TTL_SECONDS,
     }
+
+
+def start_session(ident: Identity) -> tuple[str, int, int]:
+    """按当前身份登记服务端会话，返回 (cookie_value, exp, epoch)。"""
+    cert_fp = ident.fingerprint if ident.method in {"cert", "session"} else ""
+    jti, exp, epoch = sessions.create(ident.name, ident.groups,
+                                      ttl_seconds=SESSION_TTL_SECONDS, cert_fp=cert_fp,
+                                      scopes=ident.scopes)
+    return sign_session(jti, exp, epoch), exp, epoch
 
 
 # ============================ 认证器链 ============================
 
 def _cert_authenticator(request: Request) -> Identity | None:
-    dn = request.headers.get(CLIENT_CERT_DN_HEADER, "")
-    if not dn.strip():
+    dn = request.headers.get(CLIENT_CERT_DN_HEADER, "").strip()
+    cls = request.headers.get(CLIENT_CLASS_HEADER, "").strip().lower()
+    # 只有 nginx 按 issuer 判定的 human 证书进入管理身份；component/control 类
+    # 即使带了 DN 头也不被当作人类用户（越类访问由 principal 矩阵返回 403）
+    if not dn or cls != "human":
         return None
-    return _identity_from_dn(dn)
+    return _identity_from_dn(
+        dn,
+        issuer=request.headers.get("X-Client-Cert-Issuer", ""),
+        serial=request.headers.get("X-Client-Cert-Serial", ""),
+        fingerprint=request.headers.get("X-Client-Cert-Fingerprint", ""),
+    )
 
 
 def _bearer_authenticator(request: Request) -> Identity | None:
@@ -154,7 +196,15 @@ def _bearer_authenticator(request: Request) -> Identity | None:
         log.info("auth: bearer rejected: %s", exc)
         raise HTTPException(status_code=401, detail="unauthorized: invalid token") from None
     token_id = token.partition(".")[0]
-    return Identity(name=f"token:{token_id}", groups=list(entry.get("groups") or []), method="token")
+    scopes = list(entry.get("scopes") or ["admin"])
+    groups = list(entry.get("groups") or [])
+    # scope 是权限上限：台账里的组不得越过 scope（readonly/enroll token 永不当 admin）
+    if "admin" not in scopes:
+        groups = [group for group in groups if group != ADMIN_GROUP]
+    pki.touch_token(settings.pki_dir, token_id)
+    return Identity(name=f"token:{token_id}", groups=groups,
+                    method="token", principal_class="automation",
+                    scopes=scopes, issuer="token", fingerprint=token_id)
 
 
 def _session_authenticator(request: Request) -> Identity | None:
@@ -164,7 +214,29 @@ def _session_authenticator(request: Request) -> Identity | None:
     data = verify_session(raw)
     if data is None:
         raise HTTPException(status_code=401, detail="unauthorized: invalid session")
-    return Identity(name=str(data.get("name", "")), groups=list(data.get("groups") or []), method="session")
+    resolved = sessions.resolve(str(data.get("jti", "")))
+    if resolved is None:
+        raise HTTPException(status_code=401, detail="unauthorized: session revoked or expired")
+    key, entry = resolved
+    if int(data.get("epoch", -1)) != sessions.epoch():
+        raise HTTPException(status_code=401, detail="unauthorized: session epoch changed")
+    name = str(entry.get("user") or "")
+    if name.startswith("token:"):
+        # 自动化 token 派生会话：组与 scope 来自登记（签发时的 token 快照）
+        groups = list(entry.get("groups") or [])
+        principal, scopes = "automation", list(entry.get("scopes") or [])
+    else:
+        # 人类会话：每次请求重查 users.yml——删用户立即失效，改组立即生效
+        groups = users.user_groups(settings.users_file, name)
+        if groups is None:
+            sessions.revoke_user(name)
+            raise HTTPException(status_code=401, detail="unauthorized: session user no longer exists")
+        principal, scopes = "human", []
+    sessions.touch(key)
+    request.state.session_key = key
+    return Identity(name=name, groups=groups, method="session", principal_class=principal,
+                    fingerprint=str(entry.get("cert_fp") or ""), scopes=scopes,
+                    issuer="session")
 
 
 async def authenticate(request: Request, response: Response) -> Identity:
@@ -177,7 +249,8 @@ async def authenticate(request: Request, response: Response) -> Identity:
     if ident is not None:
         return ident
     if settings.insecure:
-        ident = Identity(name="insecure", groups=[ADMIN_GROUP], method="insecure")
+        ident = Identity(name="insecure", groups=[ADMIN_GROUP], method="insecure",
+                         principal_class="human")
     else:
         ident = None
         for authn in (_cert_authenticator, _bearer_authenticator, _session_authenticator):
@@ -186,26 +259,56 @@ async def authenticate(request: Request, response: Response) -> Identity:
                 break
     if ident is None:
         raise HTTPException(status_code=401, detail="unauthorized")
+    if ident.method == "session" and request.method in WRITE_METHODS:
+        _check_origin(request)
     request.state.identity = ident
     state.current_actor.set(ident.name)
     if ident.method == "session":
-        _refresh_session(request, response, ident)
+        _refresh_session(request, response)
     return ident
 
 
-def _refresh_session(request: Request, response: Response, ident: Identity) -> None:
-    """会话滑动续期：剩余不足一半 TTL 时刷新 Cookie（其余认证器无会话状态）。"""
-    data = verify_session(request.cookies.get(SESSION_COOKIE, ""))
+def _check_origin(request: Request) -> None:
+    """Cookie 认证的写请求必须同源：Origin 与 Host 不一致即拒绝（CSRF 防线）。"""
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return
+    host = request.headers.get("host", "").strip()
+    if urlparse(origin).netloc != host:
+        raise HTTPException(status_code=403, detail="forbidden: cross-origin write")
+
+
+def _refresh_session(request: Request, response: Response) -> None:
+    """会话滑动续期：剩余不足一半 TTL 时续写登记与 Cookie（其余认证器无会话状态）。"""
+    raw = request.cookies.get(SESSION_COOKIE, "")
+    data = verify_session(raw)
     if not data:
         return
-    if int(data.get("exp", 0)) - time.time() < SESSION_TTL_DAYS * 86400 / 2:
-        response.set_cookie(value=sign_session(ident.name, ident.groups), **session_cookie_kwargs())
+    if int(data.get("exp", 0)) - time.time() >= SESSION_TTL_SECONDS / 2:
+        return
+    key = getattr(request.state, "session_key", None)
+    if not key:
+        return
+    exp = sessions.renew(key, SESSION_TTL_SECONDS)
+    response.set_cookie(value=sign_session(str(data.get("jti", "")), exp, sessions.epoch()),
+                        **session_cookie_kwargs())
 
 
 def authorize_request(request: Request) -> None:
-    """FastAPI 依赖（挂在 authenticate 之后）：读请求 viewer 组；写请求需 admin 组。"""
+    """FastAPI 依赖（挂在 authenticate 之后）：读请求只需已认证；写请求需 admin 组。
+
+    enroll scope 的自动化 token 是唯一例外：只能 POST /pki/tokens（签发节点引导
+    token），读请求与其他写操作一律拒绝——scope 语义是「仅签发」，不能借读接口
+    枚举设备、Worker、凭据台账与会话。
+    """
     ident: Identity | None = getattr(request.state, "identity", None)
     if ident is None:
         raise HTTPException(status_code=401, detail="unauthorized")
-    if request.method in WRITE_METHODS and not ident.is_admin:
-        raise HTTPException(status_code=403, detail=f"forbidden: {request.method} requires admin group")
+    if "enroll" in ident.scopes and not ident.is_admin:
+        if request.method == "POST" and request.url.path == "/pki/tokens":
+            return
+        raise HTTPException(status_code=403,
+                            detail="forbidden: enroll scope permits only POST /pki/tokens")
+    if request.method not in WRITE_METHODS or ident.is_admin:
+        return
+    raise HTTPException(status_code=403, detail=f"forbidden: {request.method} requires admin group")
