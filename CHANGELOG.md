@@ -21,6 +21,7 @@
 
 ### 变更
 
+- **WebUI 标签页图标**：与文档站一致（`favicon.ico` + `logo.svg`），入口页声明两种图标格式
 - **WebUI 路由兜底**：修复失效或已删除路由（如旧书签 `#/files`）与畸形百分号编码导致的空白页——未匹配路由回退概览，启动前清理畸形 hash；路由内容增加渲染错误边界，单页异常只替换内容区并保留侧边栏，切换页面即可恢复
 - **dnsmasq 引导规则收窄为 UEFI x64**：删除 `tag:bios` 匹配与 `undionly.kpxe` 下发；项目早已以 UEFI-only 为基线，该规则只会把引导文件交给不支持的固件
 - **管理面边缘加固**：443 由仅 TLS 1.2 改为 `TLSv1.2 TLSv1.3`（iPXE mbedTLS 只支持 1.2，按上限协商，不受影响）；`server_tokens off` 不再回显 nginx 版本；所有响应增加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy: no-referrer`
