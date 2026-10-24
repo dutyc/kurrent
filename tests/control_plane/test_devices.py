@@ -252,6 +252,12 @@ class TestDeviceRevoke:
         assert res.status_code == 200
         assert res.json()["state"] == "revoked"
         assert client.get(f"/devices/{MAC_A}", headers=auth_headers).json()["state"] == "revoked"
+        assert f"{MAC_A},ignore" in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+
+    def test_report_clears_stale_dhcp_block(self, client, auth_headers, register_claimed_device):
+        settings.dnsmasq_hosts_file.write_text(f"{MAC_A},ignore\n", encoding="utf-8")
+        register_claimed_device(MAC_A)
+        assert f"{MAC_A},ignore" not in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
 
     def test_revoke_bound_409(self, client, auth_headers, worker):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+IGNORE = "ignore"
 
 
 @dataclass(frozen=True)
@@ -39,11 +40,30 @@ class DnsmasqHosts:
     def add_binding(self, mac: str, hostname: str) -> None:
         mac = normalize_mac(mac)
         self.ensure_free(mac, hostname)
-        lines = self._read_lines()
+        lines = _drop_mac(self._read_lines(), mac)
         if lines and lines[-1].strip():
             lines.append("")
         lines.append(f"{mac},{hostname}")
         self._write_lines(lines)
+
+    def block(self, mac: str) -> None:
+        """吊销设备在 DHCP 层不再拿租约：移除该 MAC 的绑定，写入 `MAC,ignore`。"""
+        mac = normalize_mac(mac)
+        lines = _drop_mac(self._read_lines(), mac)
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"{mac},{IGNORE}")
+        self._write_lines(lines)
+
+    def unblock(self, mac: str) -> bool:
+        """解除 DHCP 封禁（设备清除/重新登记时）；只移除 `MAC,ignore`，不碰真实绑定。"""
+        mac = normalize_mac(mac)
+        lines = self._read_lines()
+        kept = [line for line in lines if not _is_ignore_line(line, mac)]
+        removed = len(kept) != len(lines)
+        if removed:
+            self._write_lines(kept)
+        return removed
 
     def remove_hostname(self, hostname: str) -> bool:
         lines = self._read_lines()
@@ -73,6 +93,8 @@ class DnsmasqHosts:
                 new_lines.append(f"{new_mac},{hostname}")
             elif binding and binding.mac == new_mac:
                 raise ValueError(f"mac already bound to {binding.hostname}: {new_mac}")
+            elif _is_ignore_line(line, new_mac):
+                continue
             else:
                 new_lines.append(line)
         if old_mac is None:
@@ -116,7 +138,27 @@ def _parse_binding(line: str) -> HostBinding | None:
         return None
     mac = parts[0].lower()
     hostname = parts[1]
-    if not MAC_RE.match(mac) or not hostname:
+    if not MAC_RE.match(mac) or not hostname or hostname.lower() == IGNORE:
         return None
     return HostBinding(mac=mac, hostname=hostname)
+
+
+def _is_ignore_line(line: str, mac: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    parts = [part.strip() for part in stripped.split(",")]
+    return len(parts) >= 2 and parts[0].lower() == mac and parts[1].lower() == IGNORE
+
+
+def _drop_mac(lines: list[str], mac: str) -> list[str]:
+    kept: list[str] = []
+    for line in lines:
+        binding = _parse_binding(line)
+        if binding and binding.mac == mac:
+            continue
+        if _is_ignore_line(line, mac):
+            continue
+        kept.append(line)
+    return kept
 

@@ -164,6 +164,10 @@ def device_report(
                 "last_seen": now,
             }
             devices.save(data)
+            try:
+                dnsmasq.unblock(normalized)  # 清除历史遗留的 DHCP 封禁（清退后重新登记）
+            except Exception:
+                record("device.dhcp_unblock", "error", mac=normalized)
             updated = False
     if updated:
         record("device.report", "ok", mac=normalized, client=client_host(request), updated=True)

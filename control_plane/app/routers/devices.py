@@ -325,6 +325,13 @@ def purge_revoked_devices(request: Request, dry_run: bool = False,
             for target in targets:
                 data["devices"].pop(target)
             devices.save(data)
+            # 与绑定共享同一把台账锁：避免并发改 dnsmasq 文件时相互覆盖
+            for target in targets:
+                try:
+                    dnsmasq.unblock(target)
+                except Exception:
+                    log.exception("device.purge: dnsmasq unblock failed for %s", target)
+                    record("device.dhcp_unblock", "error", mac=target)
     if targets and not dry_run:
         record("device.purge", "ok", macs=targets, client=client_host(request))
     return {"purged": targets, "count": len(targets), "dry_run": dry_run}
@@ -348,6 +355,11 @@ def revoke_device(mac: str, request: Request):
             )
         record_["state"] = "revoked"
         devices.save(data)
+        try:
+            dnsmasq.block(mac)
+        except Exception:
+            log.exception("device.revoke: dnsmasq block failed for %s", mac)
+            record("device.dhcp_block", "error", mac=mac)
     record("device.revoke", "ok", mac=mac, client=client_host(request))
     return copy.deepcopy(record_)
 
