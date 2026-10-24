@@ -90,6 +90,56 @@ def test_create_disk_accepts_4k_gpt(agent_client, monkeypatch):
     assert ("create_subsystem", NQN_UBUNTU, backing) in calls
 
 
+# ============================ 路径穿越拒绝（F-18） ============================
+
+
+def test_create_disk_rejects_master_and_filename_traversal(agent_client, monkeypatch):
+    """master/filename 只能是盘目录内的裸文件名：`..` 与分隔符一律 400，且不建子系统。"""
+    import app.main as agent_main
+
+    client, backend, calls = agent_client
+    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    for body in (
+        {"iqn": IQN_UBUNTU, "master": "../../etc/hostname"},
+        {"iqn": IQN_UBUNTU, "master": "/etc/hostname"},
+        {"iqn": IQN_UBUNTU, "size": "1M", "filename": "../../tmp/pwn.img"},
+        {"iqn": IQN_UBUNTU, "size": "1M", "filename": "sub/pwn.img"},
+    ):
+        assert client.post("/lun/disk", json=body).status_code == 400, body
+    assert not calls
+
+
+def test_create_disk_rejects_iqn_traversal(agent_client, monkeypatch):
+    """IQN 后缀会派生宿主 NQN 并拼进 configfs 路径：`..`/分隔符一律 400。"""
+    import app.main as agent_main
+
+    client, backend, calls = agent_client
+    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    for iqn in (
+        "iqn.2026-07.com.test:../../probe",
+        "iqn.2026-07.com.test:..",
+        "iqn.evil:../../probe",
+    ):
+        res = client.post("/lun/disk", json={"iqn": iqn, "size": "1M"})
+        assert res.status_code == 400, iqn
+    assert not calls
+
+
+def test_create_cd_rejects_iso_traversal(agent_client):
+    client, _, calls = agent_client
+    for iso in ("../../etc/hostname", "sub/boot.iso"):
+        assert client.post("/lun/cd", json={"iso": iso}).status_code == 400, iso
+    assert not calls
+
+
+def test_delete_rejects_identifier_traversal(agent_client):
+    client, _, calls = agent_client
+    for ident in ("nqn.2026-07.com.test:../../probe", "../probe", "/etc/hostname"):
+        res = client.delete("/lun", params={"iqn": ident})
+        assert res.status_code == 400, ident
+    assert not calls
+
+
 # ============================ 母盘判定（大小写不敏感） ============================
 
 

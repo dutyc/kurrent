@@ -332,6 +332,40 @@ def test_delete_subsystem_404(client, configfs):
     assert res.status_code == 404
 
 
+# ============================ 路径穿越拒绝（F-18） ============================
+
+
+def test_subsystem_nqn_traversal_rejected(client, configfs):
+    """NQN 直接拼进 configfs 路径：非 nqn. 形态、含 `..` 或分隔符一律 400。"""
+    for nqn in ("nqn.2026-07.com.test:../../probe", "nqn.2026-07.com.test:..",
+                "nqn.2026-07.com.test/a", "probe"):
+        res = client.post("/subsystems", json={"nqn": nqn, "backing": BACKING})
+        assert res.status_code == 400, nqn
+    base = configfs / "subsystems"
+    assert not base.exists() or list(base.iterdir()) == []
+    assert client.delete("/subsystems/nqn.2026-07.com.test:..").status_code == 400
+
+
+def test_backing_traversal_rejected(client, configfs):
+    """backing 必须是绝对路径且不含 `..`：拒绝而不是静默按 basename 重拼。"""
+    for backing in ("../../etc/hostname", "/srv/../etc/hostname", "sub/x.img", ""):
+        res = client.post("/subsystems", json={"nqn": NQN, "backing": backing})
+        assert res.status_code == 400, backing
+    assert not (configfs / "subsystems" / NQN).exists()
+
+
+def test_host_nqn_traversal_rejected(client, configfs, keyring, tls_port):
+    """hostnqn 拼进 hosts/<hostnqn> 与 keyring identity：含 `..`/分隔符一律 400，且不落盘。"""
+    client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    bad = "nqn.2026-07.com.test:../../hosts"
+    assert client.put(f"/subsystems/{NQN}/hosts",
+                      json={"hostnqn": bad, "secret": SECRET}).status_code == 400
+    assert not (configfs / "hosts").exists()
+    assert client.put(f"/subsystems/{NQN}/tls",
+                      json={"hostnqn": bad, "psk": PSK_HEX}).status_code == 400
+    assert keyring.keys == {}
+
+
 def test_key_serials_scoped_to_nvme_keyring(nvmet, tmp_path, monkeypatch):
     """回归：只认 .nvme 内挂载的 key，忽略 /proc/keys 里其它 keyring 的同名条目。
 

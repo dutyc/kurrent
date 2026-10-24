@@ -70,6 +70,45 @@ KEYS_FILE = os.getenv("NVMET_KEYS_FILE", "/proc/keys")
 HOST_DISK_DIR = DEFAULT_HOST_DISK_DIR
 
 
+class InvalidInput(ValueError):
+    """标识/路径参数未通过白名单校验（路由层映射 400；与「已存在/未找到」区分）。"""
+
+
+_SAFE_NQN_RE = re.compile(r"^nqn\.[a-z0-9._:-]+$")
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._:-]*$")
+
+
+def _safe_nqn(value: str, field: str = "nqn") -> str:
+    """NQN 白名单：不允许路径分隔符、`..`、空字节；configfs 路径拼接与 keyring identity 共用。"""
+    v = (value or "").strip().lower()
+    if (not v or len(v) > 300 or "/" in v or "\\" in v or ".." in v
+            or "\x00" in v or not _SAFE_NQN_RE.fullmatch(v)):
+        raise InvalidInput(f"invalid {field}")
+    return v
+
+
+def _safe_name(value: str, field: str) -> str:
+    v = (value or "").strip()
+    if (not v or len(v) > 255 or v in (".", "..") or ".." in v
+            or "/" in v or "\\" in v or "\x00" in v
+            or not _SAFE_NAME_RE.fullmatch(v)):
+        raise InvalidInput(f"invalid {field}")
+    return v
+
+
+def _host_disk_path(backing: str) -> str:
+    """Agent 容器内 backing 路径 → 本容器盘目录路径（按 basename 重拼 + realpath 限定在根内）。"""
+    raw = (backing or "").strip()
+    if not raw or "\x00" in raw or ".." in raw.split("/") or not os.path.isabs(raw):
+        raise InvalidInput("invalid backing")
+    name = _safe_name(os.path.basename(raw), "backing")
+    root = os.path.realpath(HOST_DISK_DIR)
+    path = os.path.realpath(os.path.join(root, name))
+    if not path.startswith(root + os.sep):
+        raise InvalidInput("backing escapes disk directory")
+    return path
+
+
 # ===================== TLS-PSK 目标端供给（内核全局 .nvme keyring） =====================
 
 
@@ -226,6 +265,8 @@ class NvmetManager:
 
     def create_subsystem(self, nqn: str, backing: str) -> None:
         """创建子系统 + namespace/1（backing 盘文件）+ 严格模式（allow_any_host=0）。"""
+        nqn = _safe_nqn(nqn)
+        device_path = _host_disk_path(backing)
         sub = self._sub_path(nqn)
         if os.path.isdir(sub):
             raise ValueError(f"subsystem exists: {nqn}")
@@ -234,10 +275,6 @@ class NvmetManager:
             self._write(sub, "attr_allow_any_host", "0")
             ns = os.path.join(sub, "namespaces", "1")
             os.makedirs(ns, exist_ok=True)
-            device_path = (
-                os.path.join(HOST_DISK_DIR, os.path.basename(backing))
-                if HOST_DISK_DIR else backing
-            )
             self._write(ns, "device_path", device_path)
             self._write(ns, "enable", "1")
         except Exception:
@@ -246,6 +283,7 @@ class NvmetManager:
 
     def delete_subsystem(self, nqn: str) -> None:
         """删除子系统：先摘除各端口挂载，再逐个禁用/删除 namespace，最后移除 hosts 与本体。"""
+        nqn = _safe_nqn(nqn)
         sub = self._sub_path(nqn)
         if not os.path.isdir(sub):
             raise ValueError(f"subsystem not found: {nqn}")
@@ -304,6 +342,7 @@ class NvmetManager:
         sub = self._sub_path(nqn)
         if not os.path.isdir(sub):
             raise ValueError(f"subsystem not found: {nqn}")
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
         host_dir = os.path.join(self.root, "hosts", hostnqn)
         os.makedirs(host_dir, exist_ok=True)
         self._write(host_dir, "dhchap_key", secret, newline=False)
@@ -316,6 +355,8 @@ class NvmetManager:
         """移除 host 认证：先摘子系统 allowed_hosts 链接（configfs symlink
         用 unlink，同 diag teardown 的 rm -f 语义），再回收全局 hosts/<hostnqn>
         ——仅当没有任何子系统仍链接它（见 _gc_host）。"""
+        nqn = _safe_nqn(nqn)
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
         sub = self._sub_path(nqn)
         link = os.path.join(sub, "allowed_hosts", hostnqn)
         if os.path.lexists(link):
@@ -414,6 +455,7 @@ class NvmetManager:
         configfs 的 symlink 目标由内核 kern_path 按进程 cwd 解析，必须用绝对路径
         （相对路径会相对 uvicorn 的 cwd 解析而 ENOENT）。"""
         pid = port_id or self.tls_port_id
+        nqn = _safe_nqn(nqn)
         link = os.path.join(self.root, "ports", pid, "subsystems", nqn)
         os.makedirs(os.path.dirname(link), exist_ok=True)
         if not os.path.islink(link):
@@ -424,6 +466,7 @@ class NvmetManager:
         pid = port_id or self.tls_port_id
         if not pid:
             return
+        nqn = _safe_nqn(nqn)
         link = os.path.join(self.root, "ports", pid, "subsystems", nqn)
         if os.path.islink(link):
             os.unlink(link)
@@ -432,13 +475,21 @@ class NvmetManager:
         """登记目标端 PSK（= 该 hostnqn 连该子系统的凭据），返回 key serial。"""
         if not self.tls_enabled:
             raise ValueError("TLS port disabled (NVMET_TLS_PORT_ID 为空)")
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
+        nqn = _safe_nqn(nqn)
         return self.keyring.set_key(hostnqn, nqn, psk)
 
     def delete_tls_key(self, hostnqn: str, nqn: str) -> bool:
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
+        nqn = _safe_nqn(nqn)
         return self.keyring.delete_key(hostnqn, nqn)
 
     def _sub_path(self, nqn: str) -> str:
-        return os.path.join(self.root, "subsystems", nqn)
+        base = os.path.join(self.root, "subsystems")
+        path = os.path.join(base, _safe_nqn(nqn))
+        if not path.startswith(base + os.sep):
+            raise InvalidInput("invalid nqn")
+        return path
 
     @staticmethod
     def _write(path: str, attr: str, value: str, newline: bool = True) -> None:
@@ -530,17 +581,20 @@ def list_subsystems():
 @app.post("/subsystems", status_code=201, dependencies=[Depends(verify_client_cert)])
 def create_subsystem(req: SubsystemCreate):
     try:
-        manager.create_subsystem(req.nqn, req.backing)
+        nqn = _safe_nqn(req.nqn)
+        manager.create_subsystem(nqn, req.backing)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     try:
         # 数据面端口未就绪时暂不挂载（挂载会指向未配置的端口）；PSK 供给
         # （PUT /subsystems/{nqn}/tls）时会补挂，且此时端口必然已就绪。
         if manager.tls_ready:
-            manager.attach_port(req.nqn)
+            manager.attach_port(nqn)
     except Exception as exc:
         raise HTTPException(500, f"attach port failed: {exc}") from exc
-    return {"nqn": req.nqn, "backing": req.backing,
+    return {"nqn": nqn, "backing": req.backing,
             "tls_port": manager.tls_port_id if manager.tls_ready else None}
 
 
@@ -548,24 +602,35 @@ def create_subsystem(req: SubsystemCreate):
 def delete_subsystem(nqn: str):
     try:
         manager.delete_subsystem(nqn)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return {"deleted": nqn}
+    return {"deleted": _safe_nqn(nqn)}
 
 
 @app.put("/subsystems/{nqn}/hosts", dependencies=[Depends(verify_client_cert)])
 def set_host(nqn: str, req: HostSet):
     """登记/更新 host 认证（DHHC-1 密钥）。Agent 按绑定关系同步调用。"""
     try:
-        manager.set_host(nqn, req.hostnqn, req.secret)
+        nqn = _safe_nqn(nqn)
+        hostnqn = _safe_nqn(req.hostnqn, "hostnqn")
+        manager.set_host(nqn, hostnqn, req.secret)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return {"nqn": nqn, "hostnqn": req.hostnqn, "set": True}
+    return {"nqn": nqn, "hostnqn": hostnqn, "set": True}
 
 
 @app.delete("/subsystems/{nqn}/hosts/{hostnqn}", dependencies=[Depends(verify_client_cert)])
 def delete_host(nqn: str, hostnqn: str):
-    manager.delete_host(nqn, hostnqn)
+    try:
+        nqn = _safe_nqn(nqn)
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
+        manager.delete_host(nqn, hostnqn)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"nqn": nqn, "hostnqn": hostnqn, "deleted": True}
 
 
@@ -573,6 +638,11 @@ def delete_host(nqn: str, hostnqn: str):
 def set_tls_key(nqn: str, req: TlsKeySet):
     """登记目标端 TLS-PSK（psk key 注入内核全局 `.nvme`），并把子系统挂到 TLS 端口。
     Agent 按 worker 凭据同步调用；identity = `NVMe0R01 <hostnqn> <nqn>`。"""
+    try:
+        nqn = _safe_nqn(nqn)
+        hostnqn = _safe_nqn(req.hostnqn, "hostnqn")
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not manager.exists(nqn):
         raise HTTPException(404, f"subsystem not found: {nqn}")
     try:
@@ -582,20 +652,24 @@ def set_tls_key(nqn: str, req: TlsKeySet):
     if len(psk) != 32:
         raise HTTPException(400, f"psk must be 32 bytes (64 hex chars): got {len(psk)}")
     try:
-        serial = manager.set_tls_key(req.hostnqn, nqn, psk)
+        serial = manager.set_tls_key(hostnqn, nqn, psk)
         manager.attach_port(nqn)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except OSError as exc:
         raise HTTPException(500, f"keyring inject failed: {exc}") from exc
-    return {"nqn": nqn, "hostnqn": req.hostnqn, "key_serial": serial,
+    return {"nqn": nqn, "hostnqn": hostnqn, "key_serial": serial,
             "tls_port": manager.tls_port_id}
 
 
 @app.delete("/subsystems/{nqn}/tls/{hostnqn}", dependencies=[Depends(verify_client_cert)])
 def delete_tls_key(nqn: str, hostnqn: str):
     try:
+        nqn = _safe_nqn(nqn)
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
         removed = manager.delete_tls_key(hostnqn, nqn)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
     except OSError as exc:
         raise HTTPException(500, f"keyring delete failed: {exc}") from exc
     return {"nqn": nqn, "hostnqn": hostnqn, "deleted": removed}
@@ -604,9 +678,15 @@ def delete_tls_key(nqn: str, hostnqn: str):
 if __name__ == "__main__":
     import uvicorn
 
-    # 监听地址/端口为部署细节（host 网络，同机固定拓扑；agent 经 DEFAULT_NVMET_HOST_URL 访问）
-    host = DEFAULT_HOST_ADDR
-    port = DEFAULT_HOST_PORT
+    # 管理面只走共享卷 UDS：无 TCP 监听，局域网不可达；目录 0700 限制同机非 root 访问
+    sock = DEFAULT_HOST_SOCKET
+    sock_dir = os.path.dirname(sock)
+    os.makedirs(sock_dir, mode=0o700, exist_ok=True)
+    os.chmod(sock_dir, 0o700)
+    if os.path.exists(sock):
+        if not stat.S_ISSOCK(os.stat(sock).st_mode):
+            raise RuntimeError(f"refusing to replace non-socket path: {sock}")
+        os.unlink(sock)
     # 启动即配置数据面端口（幂等）：裸端口不允许挂子系统，须先写全 addr_* 属性。
     # 宿主前置未满足（nvmet 模块/configfs 挂载）时给出可操作报错——宿主侧由
     # nvmeof/host-prepare.sh 就位（见 README）

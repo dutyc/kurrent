@@ -221,10 +221,56 @@ def _iqn_to_filename(iqn: str) -> str:
     return f"{ident}.img"
 
 
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._:-]*$")
+_SAFE_ID_RE = re.compile(r"^[a-z0-9._:-]+$")
+
+
+def _safe_name(value: str, field: str) -> str:
+    """文件名/母盘名白名单：拒绝路径分隔符、`..`、隐藏名与超长名。"""
+    v = (value or "").strip()
+    if (not v or len(v) > 255 or v in (".", "..") or ".." in v
+            or "/" in v or "\\" in v or "\x00" in v
+            or not _SAFE_NAME_RE.fullmatch(v)):
+        raise HTTPException(400, f"invalid {field}")
+    return v
+
+
+def _disk_path(name: str, field: str) -> str:
+    """把名称限定在 DISK_DIR 内（realpath 解析后仍在根目录下）。"""
+    name = _safe_name(name, field)
+    root = os.path.realpath(DISK_DIR)
+    path = os.path.realpath(os.path.join(root, name))
+    if not path.startswith(root + os.sep):
+        raise HTTPException(400, f"invalid {field}: path escapes disk directory")
+    return path
+
+
 def _check_iqn(iqn: str) -> None:
     prefix = f"{IQN_BASE}:"
-    if not iqn.startswith(prefix):
+    value = (iqn or "").strip().lower()
+    if not value.startswith(prefix):
         raise HTTPException(400, f"iqn base mismatch: expect prefix '{prefix}', got '{iqn}'")
+    suffix = value[len(prefix):]
+    if (not suffix or len(suffix) > 200 or "/" in suffix or "\\" in suffix
+            or ".." in suffix or not _SAFE_ID_RE.fullmatch(suffix)):
+        raise HTTPException(400, "invalid iqn")
+
+
+def _safe_nqn(value: str, field: str) -> str:
+    v = (value or "").strip().lower()
+    if (not v or len(v) > 300 or "/" in v or "\\" in v or ".." in v
+            or not v.startswith("nqn.") or not _SAFE_ID_RE.fullmatch(v)):
+        raise HTTPException(400, f"invalid {field}")
+    return v
+
+
+def _safe_identifier(value: str, field: str = "iqn") -> str:
+    """盘标识（iqn./nqn. 任一形态）白名单：不允许路径分隔符与 `..`，防止拼进宿主 URL 后穿越。"""
+    v = (value or "").strip().lower()
+    if (not v or len(v) > 300 or "/" in v or "\\" in v or ".." in v
+            or not v.startswith(("iqn.", "nqn.")) or not _SAFE_ID_RE.fullmatch(v)):
+        raise HTTPException(400, f"invalid {field}")
+    return v
 
 
 # ============================ 框架层：操作日志 ============================
@@ -688,9 +734,11 @@ def push_credential(req: CredentialPushReq, request: Request):
                 "sub_nqns": req.sub_nqns, "host_nqns": req.host_nqns,
                 "tls": bool(req.tls_psk)}
     with logged("credential", req_dict, request.client.host):
+        sub_nqns = [_safe_nqn(x, "sub_nqns") for x in req.sub_nqns]
+        host_nqns = [_safe_nqn(x, "host_nqns") for x in req.host_nqns]
         try:
-            return backend.cache.apply(req.worker_id, req.secret, req.sub_nqns,
-                                       req.host_nqns, req.tls_psk)
+            return backend.cache.apply(req.worker_id, req.secret, sub_nqns,
+                                       host_nqns, req.tls_psk)
         except NvmetHostError as exc:
             raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
 
@@ -702,13 +750,13 @@ def create_disk(req: DiskReq, request: Request):
         _check_iqn(req.iqn)
         iqn = req.iqn.lower()
         filename = req.filename or _iqn_to_filename(iqn)
-        backing = f"{DISK_DIR}/{filename}"
+        backing = _disk_path(filename, "filename")
         if _file_exists(backing):
-            raise HTTPException(409, f"file exists: {backing}")
+            raise HTTPException(409, f"file exists: {filename}")
         if req.master:
-            master_path = f"{DISK_DIR}/{req.master}"
+            master_path = _disk_path(req.master, "master")
             if not _file_exists(master_path):
-                raise HTTPException(404, f"master not found: {master_path}")
+                raise HTTPException(404, f"master not found: {req.master}")
             backend.validate_disk_file(master_path)
             _clone_master(master_path, backing)
         elif req.size:
@@ -727,10 +775,11 @@ def create_disk(req: DiskReq, request: Request):
 def create_cd(req: CdReq, request: Request):
     req_dict = {"iso": req.iso, "iqn": req.iqn}
     with logged("cd", req_dict, request.client.host):
-        iso_path = f"{DISK_DIR}/{req.iso}"
+        iso_name = _safe_name(req.iso, "iso")
+        iso_path = _disk_path(iso_name, "iso")
         if not _file_exists(iso_path):
-            raise HTTPException(404, f"iso not found: {iso_path}")
-        iqn = (req.iqn or f"{IQN_BASE}:{req.iso}").lower()
+            raise HTTPException(404, f"iso not found: {iso_name}")
+        iqn = (req.iqn or f"{IQN_BASE}:{iso_name}").lower()
         _check_iqn(iqn)
         backend.create_target(iqn, iso_path, cd=True)
         return {"iqn": iqn, "backing": iso_path}
@@ -752,7 +801,7 @@ def scan(request: Request):
 def delete(iqn: str, request: Request, delete_file: bool = False):
     req_dict = {"iqn": iqn, "delete_file": delete_file}
     with logged("delete", req_dict, request.client.host):
-        iqn = iqn.lower()
+        iqn = _safe_identifier(iqn)
         backings = []
         # nvmet 后端 list_targets 的 iqn 键实际为子系统 NQN（nqn. 前缀），
         # stgt/lio 后端则为 iqn. 前缀：请求可能是任一形态，前缀互转后双匹配
@@ -778,11 +827,11 @@ def delete(iqn: str, request: Request, delete_file: bool = False):
 
 
 def _agent_disk_path(backing: str) -> str:
-    """宿主服务视角的 backing 路径 → agent 容器内路径（同一宿主机目录）。"""
-    name = os.path.basename(backing)
-    if name and not backing.startswith(DISK_DIR):
-        return os.path.join(DISK_DIR, name)
-    return backing
+    """宿主服务视角的 backing 路径 → agent 容器内路径（同一宿主机目录）。
+
+    configfs 里的 backing 可能被手工写入任意路径；按 basename 重拼到 DISK_DIR
+    并做 realpath 越界检查，保证 delete_file 只删盘目录内的文件。"""
+    return _disk_path(os.path.basename(backing), "backing")
 
 
 @app.get("/lun", dependencies=[Depends(verify_client_cert)])

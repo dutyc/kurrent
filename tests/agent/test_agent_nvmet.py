@@ -317,11 +317,28 @@ def test_push_credential_revoke(agent_client):
     assert "worker-01" not in backend.cache._entries
 
 
+def test_push_credential_rejects_nqn_traversal(agent_client):
+    """sub_nqns/host_nqns 会拼进宿主 URL 与 configfs 路径：非 NQN 形态或含 `..` 一律 400。"""
+    client, backend, calls = agent_client
+    for field in ("sub_nqns", "host_nqns"):
+        res = client.post("/credential", json={
+            "worker_id": "worker-01", "secret": SECRET,
+            "sub_nqns": [NQN_UBUNTU], "host_nqns": [HOST_NQN],
+            **{field: ["nqn.2026-07.com.test:../../probe"]},
+        })
+        assert res.status_code == 400, field
+    assert not calls
+    assert "worker-01" not in backend.cache._entries
+
+
 def test_healthz_backend_ready(agent_client):
     """/healthz：nvmet 后端带数据面就绪度（宿主服务可达 + configfs 就绪 → backend_ready=true）。"""
     client, backend, calls = agent_client
     body = client.get("/healthz").json()
-    assert body == {"status": "ok", "backend": "nvmet", "backend_ready": True}
+    assert body["status"] == "ok"
+    assert body["backend"] == "nvmet"
+    assert body["backend_ready"] is True
+    assert body["crl"] == {}
 
 
 def test_healthz_backend_unreachable_degraded(agent_client):
