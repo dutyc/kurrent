@@ -21,9 +21,12 @@ from .config import CHALLENGE_NONCE_TTL_SECONDS
 from .stores import devices, record, runtime_settings
 from .utils import normalize_boot_mac
 
-# 挑战 nonce 存储：进程内存（单容器单进程），绑定 mac、短 TTL、一次性（取出即删）
-_nonce_store: dict[str, dict[str, Any]] = {}
+# 挑战 nonce 存储：进程内存（单容器单进程），绑定 mac、短 TTL、一次性（消费即删）。
+# 每个 MAC 可同时有多个未消费 nonce（上限见 NONCE_MAX_OUTSTANDING_PER_MAC），
+# 防止无鉴权的 challenge 抢占唯一槽位、使真实设备的签名失效。
+_nonce_store: dict[str, dict[str, float]] = {}
 _nonce_lock = threading.Lock()
+NONCE_MAX_OUTSTANDING_PER_MAC = 8
 
 
 def device_for_boot(mac: str | None) -> dict[str, Any] | None:
@@ -155,27 +158,40 @@ def enforcement_enabled() -> bool:
 
 
 def issue_nonce(mac: str) -> str:
-    """签发一次性 nonce（32B，64 hex），绑定 mac、短 TTL；懒清理过期项。"""
+    """签发一次性 nonce（32B，64 hex），绑定 mac、短 TTL。
+
+    每个 MAC 保留多个未消费的 nonce（上限 NONCE_MAX_OUTSTANDING_PER_MAC）：
+    challenge 是无鉴权端点，若只保留单槽，任何局域网主机都能反复挑战把它顶掉，
+    使真实设备已签好的 nonce 失效（引导 DoS）。消费只删除命中的那一项。
+    """
     nonce = secrets.token_hex(32)
     with _nonce_lock:
         now = time.time()
-        expired = [m for m, e in _nonce_store.items() if now > e["expires"]]
+        expired = [m for m, e in _nonce_store.items() if not e or now > max(e.values())]
         for m in expired:
             del _nonce_store[m]
-        _nonce_store[mac] = {"nonce": nonce, "expires": now + CHALLENGE_NONCE_TTL_SECONDS}
+        entries = _nonce_store.setdefault(mac, {})
+        if len(entries) >= NONCE_MAX_OUTSTANDING_PER_MAC:
+            # 丢最早到期的一项（所有项 TTL 相同，即最早签发）；不按请求顺序影响其它设备
+            del entries[min(entries, key=entries.get)]
+        entries[nonce] = now + CHALLENGE_NONCE_TTL_SECONDS
     return nonce
 
 
 def consume_nonce(mac: str, nonce: str) -> bool:
-    """消费 nonce（一次性：取出即删，无论成败）；不存在/不匹配/过期 → False。"""
+    """消费 nonce（一次性）；不存在/不匹配/过期 → False。
+
+    只删除命中的那一项：不匹配时保留其它 nonce，无鉴权请求不能借错误 nonce
+    清空设备的待用槽位。
+    """
     with _nonce_lock:
-        entry = _nonce_store.get(mac)
-        if not entry:
+        entries = _nonce_store.get(mac)
+        if not entries:
             return False
-        del _nonce_store[mac]
-        if entry["nonce"] != nonce:
-            return False
-        return time.time() <= entry["expires"]
+        expires = entries.pop(nonce, None)
+        if not entries:
+            _nonce_store.pop(mac, None)
+        return expires is not None and time.time() <= expires
 
 
 def parse_pubkey(value: str | None) -> str | None:

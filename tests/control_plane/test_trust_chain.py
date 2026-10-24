@@ -79,6 +79,32 @@ class TestSignatureChain:
         assert any(e["op"] == "boot_vars.credential" and e["status"] == "rejected"
                    and e.get("reason") == "nonce_invalid" for e in ops)
 
+    def test_new_challenge_keeps_outstanding_nonce_valid(self, client, auth_headers, ec_keypair):
+        """无鉴权 challenge 不能再顶掉设备已持有的 nonce（引导 DoS 回归）。"""
+        hostname = _claim_and_bind(client, auth_headers, ec_keypair)
+        first = _challenge(client)
+        second = _challenge(client)
+        assert first != second
+        # 第一次挑战拿到的 nonce 仍然可用
+        sig = ec_keypair["sign"](MAC_A, first)
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=first, sig=sig)
+        assert "set menu-default reboot" in res.text
+        # 第二次挑战的 nonce 未被牵连
+        sig2 = ec_keypair["sign"](MAC_A, second)
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=second, sig=sig2)
+        assert "set menu-default reboot" in res.text
+
+    def test_bogus_nonce_does_not_clear_pending_nonce(self, client, auth_headers, ec_keypair):
+        """错误 nonce 只失败自身，不得清空设备的待用 nonce。"""
+        hostname = _claim_and_bind(client, auth_headers, ec_keypair)
+        nonce = _challenge(client)
+        bogus = "00" * 32
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=bogus, sig="AA==")
+        assert EMPTY_SCRIPT in res.text
+        sig = ec_keypair["sign"](MAC_A, nonce)
+        res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
+        assert "set menu-default reboot" in res.text
+
     def test_wrong_signature_rejected(self, client, auth_headers, ec_keypair):
         hostname = _claim_and_bind(client, auth_headers, ec_keypair)
         nonce = _challenge(client)
