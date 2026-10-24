@@ -20,97 +20,109 @@ SECRET = "DHHC-1:01:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo="
 TLS_PSK = "ab" * 32
 
 
-# ============================ NvmetHostClient（mock urllib） ============================
+# ============================ NvmetHostClient（mock UDS 连接） ============================
 
 
 class _FakeResponse:
-    def __init__(self, payload: bytes):
+    def __init__(self, payload: bytes, status: int = 200):
         self._payload = payload
+        self.status = status
 
     def read(self):
         return self._payload
 
+
+class _FakeConnection:
+    """替代 _UnixHTTPSConnection：记录请求，返回预设响应。"""
+
+    last = None
+    default_payload = b'{"ok": true}'
+    default_status = 200
+    request_error: Exception | None = None
+
+    def __init__(self, socket_path, context, timeout):
+        self.socket_path = socket_path
+        self.context = context
+        self.timeout = timeout
+        self.request_args = None
+        self.response = None
+        self.closed = False
+        _FakeConnection.last = self
+
+    def request(self, method, path, body=None, headers=None):
+        if _FakeConnection.request_error is not None:
+            raise _FakeConnection.request_error
+        self.request_args = {"method": method, "path": path,
+                             "body": body, "headers": headers or {}}
+
+    def getresponse(self):
+        return _FakeResponse(_FakeConnection.default_payload, _FakeConnection.default_status)
+
     def close(self):
-        pass  # Python 3.14 HTTPError 以 tempfile 包装 fp，__del__ 时会调用 close
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
+        self.closed = True
 
 
 def test_host_client_request(monkeypatch, pki_dir):
-    """请求构造：mTLS 上下文（pki_dir 证书）+ JSON body + 路径 URL 编码；响应 JSON 解析。"""
-    from app.nvmet import NvmetHostClient
+    """请求构造：共享卷 UDS + mTLS 上下文 + JSON body + 路径 URL 编码；响应 JSON 解析。"""
+    from app import nvmet
 
-    captured = {}
-
-    def fake_urlopen(req, *, context=None, timeout=None):
-        captured["url"] = req.full_url
-        captured["method"] = req.get_method()
-        captured["header"] = req.get_header("Authorization")
-        captured["body"] = req.data
-        return _FakeResponse(b'{"ok": true}')
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = NvmetHostClient("https://127.0.0.1:4841", pki_dir)
+    _FakeConnection.default_payload = b'{"ok": true}'
+    _FakeConnection.default_status = 200
+    _FakeConnection.request_error = None
+    monkeypatch.setattr(nvmet, "_UnixHTTPSConnection", _FakeConnection)
+    client = nvmet.NvmetHostClient("/run/kurrent/nvmet/nvmet-host.sock", pki_dir)
     result = client.create_subsystem("iqn.2026-07.com.test:worker-01.ubuntu", "/srv/x.img")
     assert result == {"ok": True}
-    assert captured["url"] == "https://127.0.0.1:4841/subsystems"
-    assert captured["method"] == "POST"
-    assert captured["header"] is None  # mTLS：客户端证书由 TLS 层承载，无 Authorization 头
-    assert json.loads(captured["body"]) == {"nqn": "iqn.2026-07.com.test:worker-01.ubuntu",
-                                            "backing": "/srv/x.img"}
+    conn = _FakeConnection.last
+    assert conn.socket_path == "/run/kurrent/nvmet/nvmet-host.sock"
+    assert conn.request_args["method"] == "POST"
+    assert conn.request_args["path"] == "/subsystems"
+    assert conn.request_args["headers"]["Content-Type"] == "application/json"
+    assert json.loads(conn.request_args["body"]) == {
+        "nqn": "iqn.2026-07.com.test:worker-01.ubuntu", "backing": "/srv/x.img"}
+    assert conn.closed
 
 
 def test_host_client_path_quoting(monkeypatch, pki_dir):
     """NQN 含冒号/点：路径段必须 URL 编码（宿主服务路由才能正确解析）。"""
-    from app.nvmet import NvmetHostClient
+    from app import nvmet
 
-    captured = {}
-
-    def fake_urlopen(req, *, context=None, timeout=None):
-        captured["url"] = req.full_url
-        return _FakeResponse(b"{}")
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = NvmetHostClient("https://127.0.0.1:4841", pki_dir)
+    _FakeConnection.default_payload = b"{}"
+    _FakeConnection.default_status = 200
+    _FakeConnection.request_error = None
+    monkeypatch.setattr(nvmet, "_UnixHTTPSConnection", _FakeConnection)
+    client = nvmet.NvmetHostClient("/run/kurrent/nvmet/nvmet-host.sock", pki_dir)
     client.set_host(IQN_UBUNTU, HOST_NQN, SECRET)
-    assert captured["url"] == (
-        "https://127.0.0.1:4841/subsystems/"
-        "iqn.2026-07.com.test%3Aworker-01.ubuntu/hosts"
+    assert _FakeConnection.last.request_args["path"] == (
+        "/subsystems/iqn.2026-07.com.test%3Aworker-01.ubuntu/hosts"
     )
 
 
 def test_host_client_http_error(monkeypatch, pki_dir):
-    """HTTPError → NvmetHostError(status, detail)；detail 取响应 JSON 的 detail 字段。"""
-    import urllib.error
+    """非 2xx → NvmetHostError(status, detail)；detail 取响应 JSON 的 detail 字段。"""
+    from app import nvmet
 
-    from app.nvmet import NvmetHostClient, NvmetHostError
-
-    def fake_urlopen(req, *, context=None, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 409, "conflict", {}, _FakeResponse(b'{"detail":"subsystem exists"}'))
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    with pytest.raises(NvmetHostError) as exc_info:
-        NvmetHostClient("https://127.0.0.1:4841", pki_dir).create_subsystem("nqn:x", "/srv/x.img")
+    _FakeConnection.default_payload = b'{"detail":"subsystem exists"}'
+    _FakeConnection.default_status = 409
+    _FakeConnection.request_error = None
+    monkeypatch.setattr(nvmet, "_UnixHTTPSConnection", _FakeConnection)
+    with pytest.raises(nvmet.NvmetHostError) as exc_info:
+        nvmet.NvmetHostClient("/run/kurrent/nvmet/nvmet-host.sock", pki_dir) \
+            .create_subsystem("nqn:x", "/srv/x.img")
     assert exc_info.value.status == 409
     assert "subsystem exists" in exc_info.value.detail
 
 
 def test_host_client_unreachable(monkeypatch, pki_dir):
-    """URLError（宿主服务停机）→ NvmetHostError(status=0)。"""
-    import urllib.error
+    """UDS 连接失败（宿主服务停机）→ NvmetHostError(status=0)。"""
+    from app import nvmet
 
-    from app.nvmet import NvmetHostClient, NvmetHostError
-
-    def fake_urlopen(req, *, context=None, timeout=None):
-        raise urllib.error.URLError("connection refused")
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    with pytest.raises(NvmetHostError) as exc_info:
-        NvmetHostClient("https://127.0.0.1:4841", pki_dir).healthz()
+    _FakeConnection.default_payload = b"{}"
+    _FakeConnection.default_status = 200
+    _FakeConnection.request_error = ConnectionRefusedError("socket missing")
+    monkeypatch.setattr(nvmet, "_UnixHTTPSConnection", _FakeConnection)
+    with pytest.raises(nvmet.NvmetHostError) as exc_info:
+        nvmet.NvmetHostClient("/run/kurrent/nvmet/nvmet-host.sock", pki_dir).healthz()
     assert exc_info.value.status == 0
     assert "unreachable" in exc_info.value.detail
 
@@ -334,19 +346,22 @@ def test_healthz_configfs_not_ready_degraded(agent_client):
     assert "configfs" in body["backend_detail"]
 
 
-def test_verify_client_cert():
-    """mTLS 鉴权：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制，
-    应用层 verify_client_cert 仅确认连接信息存在——无连接信息（request.client=None）→ 401。"""
+def test_verify_client_cert_requires_tls():
+    """明文（scheme=http）一律 401；TLS 路径在单测放行（CN/CRL 由 component 测试覆盖）。"""
     from fastapi import HTTPException
 
     import app.main as agent_main
 
-    class _NoPeer:
-        client = None
+    class _Plain:
+        scope = {"scheme": "http"}
+
+    class _TLS:
+        scope = {"scheme": "https"}
 
     with pytest.raises(HTTPException) as exc_info:
-        agent_main.verify_client_cert(_NoPeer())
+        agent_main.verify_client_cert(_Plain())
     assert exc_info.value.status_code == 401
+    agent_main.verify_client_cert(_TLS())  # insecure 测试模式放行
 
 
 def test_push_credential_requires_nvmet_backend(monkeypatch):
@@ -356,7 +371,7 @@ def test_push_credential_requires_nvmet_backend(monkeypatch):
     from app import main as agent_main
 
     monkeypatch.setattr(agent_main, "backend", object())
-    client = TestClient(agent_main.app)
+    client = TestClient(agent_main.app, base_url="https://testserver")
     res = client.post("/credential", json={"worker_id": "w"})
     assert res.status_code == 400
     assert "nvmet" in res.json()["detail"]

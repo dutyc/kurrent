@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -64,6 +65,27 @@ type joinOpts struct {
 	cpURL      string // 控制面 HTTPS 入口（必填）
 	token      string // 引导凭据（可选：给则写入 agent.token；不给要求文件已就位）
 	agentID    string // 节点身份（可选：写入声明 metadata.name；绑定 token 时必须与之一致）
+}
+
+var (
+	nvmetTokenWaitTimeout  = 60 * time.Second
+	nvmetTokenPollInterval = 1 * time.Second
+	nvmetTokenWaiter       = waitForTokenFile
+)
+
+// waitForTokenFile 等待 agent 完成 enroll 并写出派生凭据。调用前 join 已删除旧文件，
+// 因此文件重新出现即代表本次 enroll 产生了新 token。
+func waitForTokenFile(path string, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等待 %s 超时（%s）", path, timeout)
+		}
+		time.Sleep(interval)
+	}
 }
 
 // resolveStoragerDir 定位 storager 目录：--dir 优先；否则 cwd 下 storager/；cwd 已是 storager 时用 cwd。
@@ -259,7 +281,6 @@ func joinRun(o joinOpts) error {
 			return fmt.Errorf("清除旧 %s: %w", filepath.Join(bootstrapDir, "nvmet-host.token"), err)
 		}
 	}
-
 	// .env 仅保留 compose 插值键（业务键已收敛到 kurrent.yaml，旧键自动清空）
 	projectRoot := filepath.Dir(o.dir)
 	entries := []envEntry{
@@ -293,6 +314,19 @@ func joinRun(o joinOpts) error {
 	fmt.Println("==> kurrent join: restarting storager-agent (apply declaration & token)")
 	if err := composeRun(composeDir, "--env-file", "../.env", "restart", "storager-agent"); err != nil {
 		return err
+	}
+	if backend == "nvmet" {
+		nvmetTokenPath := filepath.Join(bootstrapDir, "nvmet-host.token")
+		fmt.Println("==> kurrent join: waiting for agent enroll -> nvmet-host bootstrap token")
+		if err := nvmetTokenWaiter(nvmetTokenPath, nvmetTokenWaitTimeout, nvmetTokenPollInterval); err != nil {
+			return fmt.Errorf(
+				"agent did not complete enroll: %v；检查 docker logs storager-agent，待其写出 %s 后执行 "+
+					"docker compose --env-file ../.env restart nvmet-host", err, nvmetTokenPath)
+		}
+		fmt.Println("==> kurrent join: restarting nvmet-host (consumes derived token)")
+		if err := composeRun(composeDir, "--env-file", "../.env", "restart", "nvmet-host"); err != nil {
+			return err
+		}
 	}
 	fmt.Println("==> kurrent join: done. 容器首次启动会自动引导证书；")
 	fmt.Println("    控制面侧验证: kurrent agents list（或 WebUI「Agent 列表」看 health=ok）")

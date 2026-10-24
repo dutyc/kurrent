@@ -30,7 +30,7 @@ DEFAULT_NVMET_CACHE_FILE = "/var/log/kurrent/nvmet-credentials.json"
 DEFAULT_ISCSI_CONTAINER = "storager-iscsi"                     # compose 服务名（docker.sock 调度，仅 stgt|lio）
 DEFAULT_PKI_DIR = "/etc/kurrent/pki"                           # compose: ${KURRENT_AGENT_PKI_HOST} → /etc/kurrent/pki
 DEFAULT_CP_CA = "/etc/kurrent/cp-ca.crt"                       # compose: server.crt → /etc/kurrent/cp-ca.crt:ro
-DEFAULT_NVMET_HOST_URL = "https://host.docker.internal:4841"    # 内部组件通讯地址（同机固定拓扑，部署事实）
+DEFAULT_NVMET_HOST_SOCKET = "/run/kurrent/nvmet/nvmet-host.sock"  # 共享卷 UDS（同机固定拓扑，无 TCP 面）
 DEFAULT_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/agent.token"  # 通用引导凭据（TTL 内可复用，
                                                                      # compose: ../bootstrap → /etc/kurrent/bootstrap，join 写入）
 DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/nvmet-host.token"  # nvmet-host 派生凭据（agent enroll 按能力

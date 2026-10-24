@@ -21,6 +21,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "tests"))  # pki_testkit 共享工具
 
 from pki_testkit import gen_pki_dir  # noqa: E402
 
+# TestClient 没有 TLS peer cert；单测跳过 CN/CRL 闸门（闸门本身由 test_component_security 覆盖）
+os.environ["KURRENT_COMPONENT_INSECURE"] = "1"
+# 单测不连控制面：关闭启动吊销自检（自检本身由 tests/component/test_pki_selfcheck 覆盖）
+os.environ["KURRENT_PKI_SELF_CHECK"] = "0"
+
 _STATE = Path(tempfile.mkdtemp(prefix="storager-agent-test-"))
 _PKI_DIR = gen_pki_dir(_STATE / "pki")
 _CONF_FILE = _STATE / "kurrent.yaml"
@@ -158,7 +163,7 @@ def agent_client(monkeypatch, fake_host, tmp_path):
     fake = NvmetBackend(host, cache, str(disk_dir), "nqn.2026-07.com.test")
     monkeypatch.setattr(agent_main, "backend", fake)
     agent_main._backend_probe_cache.update(ts=0.0, value=None)  # healthz 探针缓存跨用例不残留
-    client = TestClient(agent_main.app)
+    client = TestClient(agent_main.app, base_url="https://testserver")
     return client, fake, calls
 
 

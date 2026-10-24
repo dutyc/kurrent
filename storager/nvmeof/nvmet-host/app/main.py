@@ -1,7 +1,7 @@
 """nvmet 宿主管理服务（NVMe-oF 存储接入 C4：宿主原生 nvmet + Agent HTTP 调用）。
 
 运行形态：容器 `kurrent-nvmet-host`（`storager/nvmeof/docker-compose.yml`）——host 网络模式，
-监听 4841（`config.DEFAULT_HOST_PORT`），只对外提供 mTLS（nodes CA，与 agent 同构：派生
+管理面只监听共享卷 UDS（`config.DEFAULT_HOST_SOCKET`，无 TCP 面），提供 mTLS（nodes CA，与 agent 同构：派生
 bootstrap token 引导 + 证书轮换 + 客户端证书鉴权；token 绑 agent_id、TTL 内可复用）；因 Ubuntu
 docker-default AppArmor 会拒绝 configfs 写入，容器需豁免 AppArmor（见 nvmet-host README）。
 直接操作内核 configfs（/sys/kernel/config/nvmet）——subsystem/namespace/port/hosts(dhchap_key)。
@@ -9,7 +9,7 @@ docker-default AppArmor 会拒绝 configfs 写入，容器需豁免 AppArmor（�
 required）——默认全链路加密，固件段（iPXE sanboot）与内核段（GRUB 之后）共用本口；
 历史明文口（4420）已撤除，升级时由启动清理收敛。
 TLS 端不需要 configfs 侧密钥配置，只需把 psk key 注入内核全局 `.nvme` keyring（见 NvmePskKeyring）。
-Agent 是唯一调用方（持有 nodes CA 签发的 client cert，经 https://host.docker.internal:4841）。
+Agent 是唯一调用方（持有 nodes CA 签发的 client cert，经共享卷 UDS 访问）。
 盘文件的创建/管理归 Agent（本服务不建盘、不删盘），但**必须能看见同一份盘目录**——
 configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，故 compose 把宿主盘目录
 挂到 `/srv/nvmet-disks`，device_path 按该前缀重拼（`config.DEFAULT_HOST_DISK_DIR`）。
@@ -32,17 +32,22 @@ import logging
 import os
 import re
 import shutil
+import stat
 import struct
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .config import (  # noqa: E402
-    CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_HOST_ADDR, DEFAULT_HOST_DISK_DIR,
-    DEFAULT_HOST_PORT, DEFAULT_PKI_DIR,
+    CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_HOST_DISK_DIR,
+    DEFAULT_HOST_SOCKET, DEFAULT_PKI_DIR,
 )
-from .pki_client import ensure_pki
+from .pki_client import build_client, ensure_pki
+from . import security
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # 组件 PKI 引导/轮换：证书未就绪抛错阻断启动（与 storager-agent 同语义）
 ensure_pki()
@@ -472,14 +477,19 @@ class TlsKeySet(BaseModel):
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（nodes CA 信任模型）。
+    """mTLS 客户端证书鉴权（nodes CA 信任模型 + 应用层 CRL/CN）。
 
-    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=ca-nodes.crt 起服：
-    只接受 nodes 域签发的同伴组件证书（agent 是唯一调用方）；控制面证书由
-    control 域签发，不会在 4841 端被接受。
+    TLS 层强制客户端证书链；应用层校验 issuer、CN（agent-<id>，健康检查自检
+    另允许 nvmet-<id>）与 nodes CRL（可热更新，无需重启）。
     """
-    if request.client is None:
-        raise HTTPException(401, "unauthorized")
+    allowed = {f"agent-{CONFIG.metadata.name}", f"nvmet-{CONFIG.metadata.name}"}
+    security.verify_peer(
+        request.scope,
+        allowed_cns=allowed,
+        issuer_cn=security.ca_subject_cn(str(Path(DEFAULT_PKI_DIR) / "ca-nodes.crt")),
+        crl_kind="nodes",
+        store=security.CRL_STORE,
+    )
 
 
 app = FastAPI(title="nvmet-host")
@@ -487,8 +497,8 @@ app = FastAPI(title="nvmet-host")
 
 @app.get("/healthz")
 def healthz():
-    """唯一不鉴权端点（探活）：configfs 就绪则 ok。"""
-    return {"status": "ok", "configfs": manager.ready()}
+    """唯一不鉴权端点（探活）：configfs 就绪则 ok；附 CRL 快照供灰度排查。"""
+    return {"status": "ok", "configfs": manager.ready(), "crl": security.CRL_STORE.describe()}
 
 
 @app.get("/capabilities", dependencies=[Depends(verify_client_cert)])
@@ -619,13 +629,15 @@ if __name__ == "__main__":
     except OSError as exc:
         log.error("历史明文口拆除失败（手工处理: 摘 ports/%s/subsystems/* 后 rmdir）: %s",
                   LEGACY_PLAIN_PORT_ID, exc)
-    # mTLS：serving cert + nodes CA 校验客户端证书链（CERT_REQUIRED；只信同伴组件），
-    # 与 storager-agent 的 uvicorn 参数一致；host 网络直连（无 docker-proxy），协议版本不限
+    # mTLS：serving cert + nodes CA 校验客户端证书链（CERT_REQUIRED；只信同伴组件）；
+    # issuer/CN 与 nodes CRL 在应用层校验（可热更新，见 security.py）
+    security.install_peer_cert_hook()
+    if os.environ.get(security.INSECURE_ENV) == "1":
+        log.warning("component security disabled: %s=1", security.INSECURE_ENV)
     pki_dir = DEFAULT_PKI_DIR
+    context = security.build_server_context(Path(pki_dir), "ca-nodes.crt")
+    security.start_refresh_thread(build_client(), Path(pki_dir), security.CRL_STORE)
     uvicorn.run(
-        app, host=host, port=port, log_level="info",
-        ssl_keyfile=os.path.join(pki_dir, "serving.key"),
-        ssl_certfile=os.path.join(pki_dir, "serving.crt"),
-        ssl_ca_certs=os.path.join(pki_dir, "ca-nodes.crt"),
-        ssl_cert_reqs=2,
+        app, uds=sock, http="h11", log_level="info", proxy_headers=False,
+        ssl_context_factory=lambda _config, _default: context,
     )

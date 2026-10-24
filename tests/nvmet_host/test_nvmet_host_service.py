@@ -58,7 +58,10 @@ def test_healthz_no_auth(nvmet, client, configfs):
     """healthz 是唯一不鉴权端点；configfs 未就绪（无 subsystems）→ false。"""
     res = client.get("/healthz")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "configfs": False}
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["configfs"] is False
+    assert body["crl"] == {}
 
 
 def test_healthz_configfs_ready(nvmet, client, configfs):
@@ -67,18 +70,30 @@ def test_healthz_configfs_ready(nvmet, client, configfs):
 
 
 def test_requires_auth(nvmet):
-    """mTLS 鉴权：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制
-    （TestClient 无法模拟 TLS 层），应用层 verify_client_cert 仅确认连接信息存在——
-    无连接信息（request.client=None）→ 401。"""
+    """mTLS 鉴权：TLS 层由 uvicorn CERT_REQUIRED + 内部 CA 强制。
+    UDS 无 TCP 对端，request.client 恒 None，应用层以 scheme=https 断言 TLS 已生效——
+    scheme=http（明文启动）→ 401。"""
     import pytest
     from fastapi import HTTPException
 
-    class _NoPeer:
-        client = None
+    class _Plain:
+        scope = {"scheme": "http"}
+
+    class _TLS:
+        scope = {"scheme": "https"}
 
     with pytest.raises(HTTPException) as exc_info:
-        nvmet.verify_client_cert(_NoPeer())
+        nvmet.verify_client_cert(_Plain())
     assert exc_info.value.status_code == 401
+    nvmet.verify_client_cert(_TLS())  # 不抛异常 = TLS 路径放行
+
+
+def test_plain_http_rejected(nvmet):
+    """明文起服（或代理未走 TLS）时受保护端点必须 401，防止断言空转。"""
+    from fastapi.testclient import TestClient
+
+    plain = TestClient(nvmet.app, base_url="http://testserver")
+    assert plain.get("/capabilities").status_code == 401
 
 
 def test_capabilities(client, nvmet):

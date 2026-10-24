@@ -17,9 +17,7 @@ RUN pip install --no-cache-dir \
     && python -m pip uninstall -y pip setuptools wheel
 
 COPY app ./app
+COPY healthcheck.py /app/healthcheck.py
 
-# 仅供文档提示；实际为 host 网络模式，服务直接监听宿主 4841
-EXPOSE 4841
-
-# 监听地址为模块常量（0.0.0.0:4841，host 网络即宿主栈），compose 不注入
+# 管理面只走共享卷 UDS（/run/kurrent/nvmet/nvmet-host.sock），无 TCP 监听；数据面 4421 由内核提供
 CMD ["python", "-m", "app.main"]

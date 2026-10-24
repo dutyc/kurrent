@@ -21,8 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 DEFAULT_CONFIG_FILE = "/etc/kurrent/kurrent.yaml"
 
 # ── 部署细节常量（docker-compose.yml 职责，不在 yml 声明）──
-DEFAULT_HOST_ADDR = "0.0.0.0"              # 监听地址（host 网络，agent 经 DEFAULT_NVMET_HOST_URL 访问）
-DEFAULT_HOST_PORT = 4841
+# 管理面只经共享卷 UDS 暴露（与 agent 同机固定拓扑）：无 TCP 监听，局域网不可达。
+DEFAULT_HOST_SOCKET = "/run/kurrent/nvmet/nvmet-host.sock"
 DEFAULT_HOST_DISK_DIR = "/srv/nvmet-disks"   # compose: 宿主盘目录 → 本路径（device_path 重拼前缀）
 DEFAULT_PKI_DIR = "/etc/kurrent/pki"         # compose: ${KURRENT_NVMET_PKI_HOST} → /etc/kurrent/pki
 DEFAULT_CP_CA = "/etc/kurrent/cp-ca.crt"     # compose: server.crt → /etc/kurrent/cp-ca.crt:ro

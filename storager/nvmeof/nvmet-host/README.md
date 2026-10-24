@@ -34,11 +34,9 @@ kurrent join <cp-url> --token <bootstrap-token>   # token: kurrent token create 
 cd storager/nvmeof
 docker compose --env-file ../.env up -d
 
-# 4. 验证（宿主 loopback 映射；mTLS：须带本组件 client cert 访问）
-curl -sk --cert ../../control_plane/state/pki/components/nvmet-<agent_id>/client.crt \
-        --key  ../../control_plane/state/pki/components/nvmet-<agent_id>/client.key \
-        https://127.0.0.1:4841/healthz
-# → {"status":"ok","configfs":true}
+# 4. 验证（共享卷 UDS；mTLS 健康检查脚本在容器内执行）
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
+# → 0（configfs 就绪）
 ```
 
 > **本组件无独立配置**：身份（`metadata.name` = agent_id，证书 CN=`nvmet-<agent_id>`）与 enroll
@@ -46,9 +44,14 @@ curl -sk --cert ../../control_plane/state/pki/components/nvmet-<agent_id>/client
 > 一次性引导凭据读 `storager/bootstrap/nvmet-host.token`（由 Agent enroll 上报 `backend=nvmet` 时
 > 控制面派生下发，**不手工签发**）。
 
+> **证书吊销与恢复**：启动时若本地 client / serving 序列号命中公开 nodes CRL
+> （`GET /crl/nodes.crl`），本服务用上面的派生凭据重新 enroll 并覆盖本地证书；凭据缺失时
+> 启动失败并提示等待 Agent 重新 enroll。吊销后的恢复在节点执行 `kurrent join` 即可——join 会
+> 等待派生凭据写出并重启本容器，**不需要手工删除证书**。
+
 > 容器无 privileged：configfs bind mount 后容器内 root 写操作是普通文件写 + symlink 创建，无需特权。
-> 本服务 host 网络模式直监宿主 4841（局域网不可达不成立——请自行用防火墙限制 4421/4841 暴露面）；
-> Agent 经 `https://host.docker.internal:4841`（bridge 网络 extra_hosts host-gateway）访问，mTLS 客户端证书鉴权。
+> 本服务管理面只监听共享卷 UDS `/run/kurrent/nvmet/nvmet-host.sock`（目录 0700），无 TCP 监听、局域网不可达；
+> Agent 经同一共享卷访问，mTLS 客户端证书鉴权。数据面 4421 仍为宿主监听，暴露面自行用防火墙约束。
 
 > **宿主前置（TLS 数据面，缺任一即数据面不可用）**：内核带 `CONFIG_NVME_TCP_TLS` /
 > `CONFIG_NVME_TARGET_TCP_TLS` / `CONFIG_NVME_KEYRING`，且宿主常驻 **tlshd**（ktls-utils，内核 TLS 握手
@@ -71,8 +74,9 @@ curl -sk --cert ../../control_plane/state/pki/components/nvmet-<agent_id>/client
 | `NVMET_PLAIN_PORT_ID` | `1` | 历史明文口 ID——**仅启动迁移用**：存在即拆除（先摘挂载再删口），不再创建/挂载 |
 | `NVMET_PLAIN_TRSVCID` | `4420` | 历史明文口 trsvcid（仅用于迁移日志措辞） |
 | `NVMET_KEYS_FILE` | `/proc/keys` | 定位内核 `.nvme` keyring serial 用（测试注入） |
+| `KURRENT_PKI_SELF_CHECK` | `1` | 启动吊销自检开关（`0` = 关闭，排障用） |
 
-监听地址/端口为模块常量（`0.0.0.0:4841`，host 网络即宿主栈），compose 不注入。
+管理面为共享卷 UDS 常量（`/run/kurrent/nvmet/nvmet-host.sock`，目录 0700），无监听地址/端口；compose 不注入。
 
 以下变量**此前**以 env 下发，现已收敛（`.env` 里若残留，`kurrent join` 会主动清掉）：
 
@@ -159,7 +163,7 @@ nvmet file backend 的逻辑块大小跟随底层 FS 块（典型 4096 B，对 f
 
 ## 安全边界
 
-- 本服务监听宿主网络栈 4841：mTLS（uvicorn `ssl_cert_reqs=2` + `ssl_ca_certs=ca-nodes.crt`）强制客户端证书且校验链；
+- 本服务管理面只监听共享卷 UDS（目录 0700）：mTLS（uvicorn `ssl_cert_reqs=2` + `ssl_ca_certs=ca-nodes.crt`）强制客户端证书且校验链，无 TCP 面；
   身份边界 = nodes CA 签发范围（签发受控于绑定 agent_id 的派生 token + CSR CN 校验 + 组件登记）
 - 容器 `security_opt`：`apparmor:unconfined`（Ubuntu docker-default profile 拒 configfs 写入）、
   `seccomp=unconfined` + `systempaths=unconfined`（写内核 `.nvme` keyring 所需，见「传输加密」节）——

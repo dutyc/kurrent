@@ -252,6 +252,29 @@ if docker inspect storager-agent >/dev/null 2>&1; then
     fi
 fi
 
+# ── nvmet-host 管理面收口：共享卷 UDS，无 TCP 监听 ──
+if ss -H -lnt 2>/dev/null | grep -q ':4841 '; then
+    fail "宿主 4841 仍有 TCP 监听"
+else
+    pass "宿主 4841 无 TCP 监听"
+fi
+if docker exec kurrent-nvmet-host test -S /run/kurrent/nvmet/nvmet-host.sock; then
+    pass "nvmet-host UDS 已创建"
+else
+    fail "nvmet-host 容器缺少 /run/kurrent/nvmet/nvmet-host.sock"
+fi
+if docker exec storager-agent test -S /run/kurrent/nvmet/nvmet-host.sock; then
+    pass "Agent 可见同一 UDS"
+else
+    fail "Agent 容器看不到 nvmet-host UDS"
+fi
+UDS_MODE=$(docker exec kurrent-nvmet-host stat -c '%a' /run/kurrent/nvmet 2>/dev/null)
+if [ "$UDS_MODE" = "700" ]; then
+    pass "UDS 目录仅 root 可进入（0700）"
+else
+    fail "UDS 目录权限异常（期望 700，实际 ${UDS_MODE:-?}）"
+fi
+
 # ── 引导链状态与静态文件 ──
 check_code 401 "引导链状态需认证" "$(code "$BASE/api/cp/boot-assets")"
 BOOT_ASSETS=$(curl -sk --max-time 5 --cert "$CERT" --key "$KEY" "$BASE/api/cp/boot-assets")

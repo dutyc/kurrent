@@ -1,7 +1,7 @@
 """NVMe-oF 后端（C4，2026-08-22 裁定：宿主原生 nvmet + Agent HTTP 调用）。
 
 组件（按依赖顺序）：
-- NvmetHostClient：urllib 标准库 HTTPS 客户端（不加依赖），mTLS 用本组件 client cert 认证
+- NvmetHostClient：stdlib UDS + mTLS 客户端（共享卷 socket，无 TCP 面；不加依赖）
 - NvmetCredentialCache：按 Worker 跟盘的凭据缓存（JSON 落盘 0600）+ hosts 矩阵同步与幂等重放
 - NvmetBackend：Backend 接口的第三实现（不继承基类——基类 __init__ 初始化 docker 客户端，
   本后端无 docker 依赖，且直接继承会与 main 循环 import；接口契约与 StgtBackend/LioBackend 一致：
@@ -15,18 +15,20 @@ reconcile() 幂等重放：Agent 启动（scan 后）+ 周期后台线程，覆�
 契约：blueprint/nvmeof-credential-design.md 第 6 节。
 """
 
+import datetime as _dt
+import http.client
 import json
 import logging
 import os
+import socket
 import ssl
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
+from cryptography import x509
 from fastapi import HTTPException
 
 log = logging.getLogger("agent")
@@ -45,29 +47,63 @@ def _quote(part: str) -> str:
     return urllib.parse.quote(part, safe="")
 
 
-def _http_detail(exc: urllib.error.HTTPError) -> str:
+def _http_detail(payload: bytes, status: int) -> str:
     try:
-        payload = json.loads(exc.read().decode("utf-8", errors="replace"))
-        if isinstance(payload, dict) and payload.get("detail"):
-            return str(payload["detail"])
-    except (ValueError, OSError):
+        doc = json.loads(payload.decode("utf-8", errors="replace"))
+        if isinstance(doc, dict) and doc.get("detail"):
+            return str(doc["detail"])
+    except ValueError:
         pass
-    return f"HTTP {exc.code}"
+    return f"HTTP {status}"
+
+
+class _UnixHTTPSConnection(http.client.HTTPConnection):
+    """AF_UNIX + TLS 连接：同机 UDS，无 TCP 面；服务端身份仍按 nodes CA + SAN 校验。"""
+
+    def __init__(self, socket_path: str, context: ssl.SSLContext, timeout: float):
+        super().__init__("127.0.0.1", timeout=timeout)
+        self._socket_path = socket_path
+        self._context = context
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            sock.connect(self._socket_path)
+            self.sock = self._context.wrap_socket(sock, server_hostname="127.0.0.1")
+        except BaseException:
+            sock.close()
+            raise
 
 
 class NvmetHostClient:
-    """nvmet-host 宿主服务 HTTPS 客户端（urllib 标准库，避免加依赖）。
+    """nvmet-host 宿主服务客户端（共享卷 UDS + mTLS，stdlib，不新增依赖）。
 
     本组件是宿主服务的唯一调用方：mTLS——
     用本组件的 client cert（pki_dir/client.{crt,key}）向 nvmet-host 认证，
-    服务端证书由 nodes CA（pki_dir/ca-nodes.crt）校验链 + SAN 校验。"""
+    服务端证书由 nodes CA（pki_dir/ca-nodes.crt）校验链 + SAN 校验。
+    UDS 路径由 compose 共享卷提供；无 TCP 监听，局域网不可达。"""
 
-    def __init__(self, base_url: str, pki_dir: Path, timeout: float = 10.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, socket_path: str, pki_dir: Path, timeout: float = 10.0):
+        self.socket_path = str(socket_path)
+        self.pki_dir = Path(pki_dir)
         self.timeout = timeout
-        ctx = ssl.create_default_context(cafile=str(pki_dir / "ca-nodes.crt"))
-        ctx.load_cert_chain(str(pki_dir / "client.crt"), str(pki_dir / "client.key"))
-        self.ctx = ctx
+
+    def _context(self) -> ssl.SSLContext:
+        """每次请求新建上下文：CRL 刷新后立即生效；缺失/过期 fail-closed。"""
+        crl_path = self.pki_dir / "nodes.crl"
+        try:
+            crl = x509.load_pem_x509_crl(crl_path.read_bytes())
+        except (OSError, ValueError):
+            raise NvmetHostError(0, f"nodes CRL unavailable: {crl_path}") from None
+        if _dt.datetime.now(_dt.timezone.utc) >= crl.next_update_utc:
+            raise NvmetHostError(0, f"nodes CRL expired: {crl_path}")
+        ctx = ssl.create_default_context(cafile=str(self.pki_dir / "ca-nodes.crt"))
+        ctx.load_verify_locations(str(crl_path))
+        ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
+        ctx.load_cert_chain(str(self.pki_dir / "client.crt"),
+                            str(self.pki_dir / "client.key"))
+        return ctx
 
     def _request(self, method: str, path: str, body: dict | None = None,
                  timeout: float | None = None) -> Any:
@@ -76,15 +112,21 @@ class NvmetHostClient:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(f"{self.base_url}{path}", data=data, headers=headers, method=method)
+        conn = _UnixHTTPSConnection(self.socket_path, self._context(),
+                                    timeout or self.timeout)
         try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=timeout or self.timeout) as resp:
-                raw = resp.read()
-                return json.loads(raw) if raw else None
-        except urllib.error.HTTPError as exc:
-            raise NvmetHostError(exc.code, _http_detail(exc)) from None
-        except (urllib.error.URLError, OSError) as exc:
+            conn.request(method, path, body=data, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+            if resp.status >= 400:
+                raise NvmetHostError(resp.status, _http_detail(raw, resp.status))
+            return json.loads(raw) if raw else None
+        except NvmetHostError:
+            raise
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
             raise NvmetHostError(0, f"nvmet host unreachable: {exc}") from None
+        finally:
+            conn.close()
 
     def healthz(self, timeout: float | None = None) -> dict:
         """探活（configfs 就绪度）；healthz 投影用短超时，其他场景用客户端默认超时。"""

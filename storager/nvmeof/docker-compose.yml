@@ -19,9 +19,11 @@ services:
     ports:
       - "4840:8080"                    # 控制面 HTTPS（mTLS），给 Controller
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # nvmet-host 为 host 网络模式，经宿主 loopback 访问其 4841
+      - "host.docker.internal:host-gateway"   # 控制面 nginx（宿主 443）的固定拓扑地址
     volumes:
       - /etc/localtime:/etc/localtime:ro
+      # nvmet-host 管理面 UDS（共享卷）：无 TCP 监听，仅本机两组件可访问
+      - kurrent-nvmet-run:/run/kurrent/nvmet
       # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
       - ${KURRENT_DISK_DIR:-../../storager_img}:/home/iscsi_img
       - ../agent/logs:/var/log/kurrent
@@ -41,8 +43,8 @@ services:
   # 本容器只承载配置面管理进程：bind mount configfs 后普通 root 即可写入，无需 privileged。
   # host 网络模式：nvmet 监听 socket 由写 configfs 的进程（本容器）创建，绑定到该进程所在
   # 网络命名空间；host 模式下即宿主 netns，客户端（iPXE/QEMU）可直达数据面端口 4421，容器重建不丢监听。
-  # Agent 经 https://host.docker.internal:4841 访问本服务（mTLS）；该地址是部署事实常量
-  # （storager/agent/app/config.py DEFAULT_NVMET_HOST_URL），不在节点声明里——声明出现
+  # Agent 经共享卷 UDS（/run/kurrent/nvmet/nvmet-host.sock）访问本服务（mTLS）；该路径是部署事实常量
+  # （storager/agent/app/config.py DEFAULT_NVMET_HOST_SOCKET），不在节点声明里——声明出现
   # spec.agent.nvmetHostUrl 会被拒（分层职责：容器内路径/内部通讯归 compose）。
   nvmet-host:
     build:
@@ -52,12 +54,11 @@ services:
     container_name: kurrent-nvmet-host
     restart: unless-stopped
     network_mode: host
-    # 健康检查：mTLS 探活 /healthz（带本组件 client cert；configfs 就绪才报健康）——
-    # 宿主前置缺失（模块/configfs）时如实标记 unhealthy，不再是「容器在跑但数据面不可用」
+    # 健康检查：UDS + mTLS 探活 /healthz（configfs）与 /capabilities（受保护端点，证明证书被接受）
     healthcheck:
-      test: ["CMD", "python3", "-c", "import json,ssl,urllib.request as u; c=ssl.create_default_context(cafile='/etc/kurrent/pki/ca-nodes.crt'); c.load_cert_chain('/etc/kurrent/pki/client.crt','/etc/kurrent/pki/client.key'); raise SystemExit(0 if json.load(u.urlopen('https://127.0.0.1:4841/healthz', context=c, timeout=3)).get('configfs') else 1)"]
+      test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 30s
-      timeout: 5s
+      timeout: 8s
       retries: 3
       start_period: 30s
     # host 网络下无 Docker 注入的 host.docker.internal 解析：显式指到宿主 loopback，
@@ -78,6 +79,8 @@ services:
       - systempaths=unconfined
     volumes:
       - /sys/kernel/config:/sys/kernel/config
+      # 管理面 UDS 共享卷（与 agent 同挂）：socket 目录 0700，无 TCP 监听
+      - kurrent-nvmet-run:/run/kurrent/nvmet
       # 磁盘镜像目录：configfs device_path 由写入进程（本容器）所在挂载命名空间解析，
       # 须让本容器能看见盘文件（与 agent 的 KURRENT_DISK_DIR 一致，容器内路径可不同）
       - ${KURRENT_DISK_DIR:-../../storager_img}:/srv/nvmet-disks
@@ -91,3 +94,7 @@ services:
       # 引导凭据目录（只读共享）：nvmet-host.token 由 agent enroll 按能力派生写入，
       # 本组件引导时读取
       - ../bootstrap:/etc/kurrent/bootstrap:ro
+
+volumes:
+  # 管理面 UDS 载体：只有 agent 与 nvmet-host 挂载（无 TCP 监听，局域网不可达）
+  kurrent-nvmet-run:

@@ -30,8 +30,9 @@ FICLONE = 0x40049409
 # .env 仅保留 compose 插值键。文件缺失/校验失败在 import 即抛错阻断启动。
 from .config import (  # noqa: E402
     CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_DISK_DIR, DEFAULT_ISCSI_CONTAINER,
-    DEFAULT_LOG_FILE, DEFAULT_NVMET_CACHE_FILE, DEFAULT_NVMET_HOST_URL, DEFAULT_PKI_DIR,
+    DEFAULT_LOG_FILE, DEFAULT_NVMET_CACHE_FILE, DEFAULT_NVMET_HOST_SOCKET, DEFAULT_PKI_DIR,
 )
+from . import security  # noqa: E402
 
 
 def nqn_to_iqn(nqn: str) -> str:
@@ -280,19 +281,18 @@ oplog = OperationLog(LOG_FILE)
 
 
 def verify_client_cert(request: Request) -> None:
-    """mTLS 客户端证书鉴权（control CA 信任模型）。
+    """mTLS 客户端证书鉴权（control CA 信任模型 + 应用层 CRL/CN）。
 
-    uvicorn 以 ssl_cert_reqs=CERT_REQUIRED + ssl_ca_certs=ca-control.crt 起服：
-    TLS 层强制客户端证书且只认控制面 control 域（无证书/链不符握手即被拒），
-    此处只需确认连接信息存在——身份边界 = control CA 签发范围（只有控制面
-    持有该根签发的客户端证书）。
-
-    注：uvicorn 不透传客户端证书到 ASGI scope（Kludex/uvicorn#745），应用层
-    无法做 CN=control-plane 白名单；若未来 uvicorn 支持 scope 证书，可在此
-    补 CN 匹配（防 CA 下其他组件冒名控制面）。
+    TLS 层以 ssl_ca_certs=ca-control.crt + CERT_REQUIRED 强制客户端证书链；
+    应用层再从 peer cert 校验 issuer/CN 与 control CRL（可热更新，无需重启）。
     """
-    if request.client is None:
-        raise HTTPException(401, "unauthorized")
+    security.verify_peer(
+        request.scope,
+        allowed_cns={security.CONTROL_PLANE_CN},
+        issuer_cn=security.ca_subject_cn(str(Path(DEFAULT_PKI_DIR) / "ca-control.crt")),
+        crl_kind="control",
+        store=security.CRL_STORE,
+    )
 
 
 @contextmanager
@@ -560,7 +560,7 @@ def _make_backend() -> Backend:
     if BACKEND == "nvmet":
         # 宿主原生 nvmet（C4）：经 nvmet-host 服务调 configfs；配置按需读取，不影响其他后端
         from .nvmet import NvmetBackend, NvmetCredentialCache, NvmetHostClient
-        host = NvmetHostClient(DEFAULT_NVMET_HOST_URL, Path(DEFAULT_PKI_DIR))
+        host = NvmetHostClient(DEFAULT_NVMET_HOST_SOCKET, Path(DEFAULT_PKI_DIR))
         cache_path = DEFAULT_NVMET_CACHE_FILE
         cache = NvmetCredentialCache(host, cache_path)
         return NvmetBackend(host, cache, DISK_DIR, NQN_BASE)
@@ -667,7 +667,7 @@ def healthz():
 
     backend_ready=false 表示在线但存储不可用（nvmet-host 不可达或 configfs 未就绪）——
     控制面据此把节点标为 degraded，与「节点掉线（error）」区分开。"""
-    resp = {"status": "ok"}
+    resp = {"status": "ok", "crl": security.CRL_STORE.describe()}
     probe = _backend_probe()
     if probe is not None:
         resp["backend"] = BACKEND

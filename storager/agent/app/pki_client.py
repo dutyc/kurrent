@@ -33,6 +33,9 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 log = logging.getLogger("agent")
 
 RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（与控制面 config 一致）
+PUBLIC_NODES_CRL_PATH = "/crl/nodes.crl"
+CRL_FETCH_TIMEOUT = 3.0
+SELF_CHECK_ENV = "KURRENT_PKI_SELF_CHECK"
 
 # 后端 ISO 光驱能力（与各 backend capabilities() 的 cd 字段一致）：stgt 支持，lio/nvmet 不支持。
 # agent 引导时随 enroll 上报，控制面自动登记据此推导 role.cd 与标签。
@@ -114,11 +117,33 @@ class PkiClient:
 
     def ensure(self, force_renew: bool = False) -> None:
         """引导或轮换证书（进程启动时调用）。已就绪则跳过；force_renew 时证书在也重签
-        （agent 用于 nvmet-host 派生凭据缺失时主动刷新，renew 响应带新派生 token）。"""
-        if self.ready() and not force_renew:
+        （agent 用于 nvmet-host 派生凭据缺失时主动刷新，renew 响应带新派生 token）。
+
+        吊销自检：本地证书文件仍在时也不能直接信任——先读公开 nodes.crl 比对本组件
+        client/serving 序列号；命中则用本地 bootstrap token 重新 enroll（证书已被吊销，
+        renew 必然失败）。无可用 token 时快速失败并给出恢复命令。"""
+        has_cert = (self.pki_dir / "client.crt").exists()
+        # 自检先于 ready/force_renew 分支：join 删除派生凭据会触发 force_renew，
+        # 但被吊销的证书 renew 会被 nginx 在握手层拒绝（400），必须先识别吊销。
+        revoked = has_cert and self._self_revoked()
+        if revoked:
+            log.warning("pki: certificate revoked; re-enrolling (cn=%s)", self.cn)
+        elif self.ready() and not force_renew:
             log.info("pki: client cert ok (cn=%s)", self.cn)
             return
-        if (self.pki_dir / "client.crt").exists():
+        if has_cert:
+            if revoked:
+                self._bootstrap_after_revocation()
+                return
+            if self._cert_expired():
+                log.warning("pki: client cert expired; bootstrap enrolling (cn=%s)", self.cn)
+                try:
+                    self._enroll(renew=False)
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"component certificate expired; issue a new bootstrap token and "
+                        f"re-join: {exc}") from None
+                return
             log.warning("pki: renewing client cert (cn=%s, force=%s)", self.cn, force_renew)
             try:
                 self._enroll(renew=True)
@@ -133,6 +158,69 @@ class PkiClient:
         else:
             log.info("pki: no client cert, enrolling (cn=%s)", self.cn)
             self._enroll(renew=False)
+
+    def _bootstrap_after_revocation(self) -> None:
+        """证书已吊销：跳过 renew，直接用本地 bootstrap token 重新 enroll。"""
+        try:
+            self._enroll(renew=False)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "component certificate revoked; issue a new bootstrap token "
+                f"(kurrent token create --agent-id {self.agent_id}) and run "
+                "kurrent join with that token: " + str(exc)) from None
+
+    def _cert_expired(self) -> bool:
+        try:
+            cert = x509.load_pem_x509_certificate((self.pki_dir / "client.crt").read_bytes())
+        except (OSError, ValueError):
+            return False
+        return cert.not_valid_after_utc <= _dt.datetime.now(_dt.timezone.utc)
+
+    def _self_revoked(self) -> bool:
+        """读公开 nodes.crl，判断本组件任一本证书的序列号是否已被吊销。
+
+        被吊销证书无法通过 mTLS 的 /api/cp/enroll/crl 自取 CRL，故使用无客户端证书的
+        公开端点。拉取/验签/有效期任一不可信时返回 False（沿用原有启动行为），
+        仅当 CRL 可验证且命中序列号时才触发重新 enroll。"""
+        if os.environ.get(SELF_CHECK_ENV) == "0":
+            return False
+        crl = self._fetch_public_crl()
+        if crl is None:
+            return False
+        for name in ("client.crt", "serving.crt"):
+            path = self.pki_dir / name
+            try:
+                cert = x509.load_pem_x509_certificate(path.read_bytes())
+            except (OSError, ValueError):
+                continue
+            if crl.get_revoked_certificate_by_serial_number(cert.serial_number) is not None:
+                log.warning("pki: %s serial %x is revoked", name, cert.serial_number)
+                return True
+        return False
+
+    def _fetch_public_crl(self):
+        ca_path = self.pki_dir / "ca-nodes.crt"
+        try:
+            ca = x509.load_pem_x509_certificate(ca_path.read_bytes())
+        except (OSError, ValueError):
+            log.warning("pki: cannot load %s for revocation self-check", ca_path)
+            return None
+        try:
+            req = urllib.request.Request(
+                f"{self.cp_base}{PUBLIC_NODES_CRL_PATH}", method="GET")
+            with urllib.request.urlopen(
+                    req, context=self._cp_context(False), timeout=CRL_FETCH_TIMEOUT) as resp:
+                crl = x509.load_pem_x509_crl(resp.read())
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            log.warning("pki: revocation self-check skipped (%s)", exc)
+            return None
+        if crl.issuer != ca.subject or not crl.is_signature_valid(ca.public_key()):
+            log.warning("pki: public CRL issuer/signature mismatch; ignoring")
+            return None
+        if crl.next_update_utc is None or crl.next_update_utc <= _dt.datetime.now(_dt.timezone.utc):
+            log.warning("pki: public CRL is stale; ignoring")
+            return None
+        return crl
 
     # ---- 内部 ----
 
@@ -210,6 +298,23 @@ class PkiClient:
                 str(self.pki_dir / "client.crt"), str(self.pki_dir / "client.key"))
         return context
 
+    def fetch_crls(self) -> dict:
+        """拉取 nodes/control 吊销表（组件 mTLS；节点定期刷新用）。"""
+        req = urllib.request.Request(f"{self.cp_base}/api/cp/enroll/crl", method="GET")
+        try:
+            with urllib.request.urlopen(
+                    req, context=self._cp_context(True), timeout=15) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            raise RuntimeError(f"crl fetch failed: HTTP {exc.code}: {detail}") from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise RuntimeError(f"crl fetch unreachable: {exc}") from None
+        for field in ("nodes_crl", "control_crl", "next_update"):
+            if not data.get(field):
+                raise RuntimeError(f"crl fetch: missing {field}")
+        return data
+
 
 def _read_bootstrap_token(path: Path) -> str | None:
     """读取引导凭据文件（缺失/空返回 None）。"""
@@ -229,22 +334,30 @@ def _write_token(path: Path, token: str) -> None:
     os.replace(tmp, path)
 
 
+def build_client() -> PkiClient:
+    """按节点声明装配 PkiClient（不触发 enroll/renew；CRL 刷新复用同一配置）。"""
+    from .config import (CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA,
+                         DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE, DEFAULT_PKI_DIR)
+    spec = CONFIG.spec
+    backend = spec.agent.backend
+    capabilities = {"backend": backend, "cd": BACKEND_CD_CAPABILITY.get(backend, False)}
+    return PkiClient(
+        CONFIG.metadata.name, "agent", Path(DEFAULT_PKI_DIR), spec.control_plane.url,
+        Path(DEFAULT_CP_CA),
+        _read_bootstrap_token(Path(DEFAULT_BOOTSTRAP_TOKEN_FILE)),
+        spec.agent.advertise_url or None, capabilities,
+        remark=CONFIG.metadata.remark,
+        derived_token_file=Path(DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE))
+
+
 def ensure_pki() -> None:
     """模块级入口：从节点配置（kurrent.yaml）+ 引导凭据文件装配并执行引导/轮换。
 
     绑定 agent_id 的 bootstrap token 在独立凭据文件（compose 挂载，join 写入）；nvmet-host 派生
     凭据随 enroll/renew 响应下发落盘（backend=nvmet 时）；派生凭据缺失（历史部署迁移
     清除等）→ 证书在也强制 renew 一次以重新派生。"""
-    from .config import (CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA,
-                         DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE, DEFAULT_PKI_DIR)
-    spec = CONFIG.spec
-    backend = spec.agent.backend
-    capabilities = {"backend": backend, "cd": BACKEND_CD_CAPABILITY.get(backend, False)}
-    derived = Path(DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE)
-    force_renew = backend == "nvmet" and not derived.is_file()
-    PkiClient(CONFIG.metadata.name, "agent", Path(DEFAULT_PKI_DIR), spec.control_plane.url,
-              Path(DEFAULT_CP_CA),
-              _read_bootstrap_token(Path(DEFAULT_BOOTSTRAP_TOKEN_FILE)),
-              spec.agent.advertise_url or None, capabilities,
-              remark=CONFIG.metadata.remark,
-              derived_token_file=derived).ensure(force_renew=force_renew)
+    from .config import CONFIG, DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE
+    backend = CONFIG.spec.agent.backend
+    force_renew = (backend == "nvmet"
+                   and not Path(DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE).is_file())
+    build_client().ensure(force_renew=force_renew)

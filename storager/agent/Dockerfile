@@ -28,12 +28,7 @@ RUN pip install --no-cache-dir \
 COPY app ./app
 
 # 前台跑 HTTPS 服务（mTLS），监听 8080：
-# serving cert = 本组件 TLS 服务端证书；ssl-ca-certs = control CA（只信控制面客户端）；
-# ssl-cert-reqs=2（CERT_REQUIRED）：控制面必须出示其 client cert 才能访问。
-# 注：协议版本不限（默认 TLS1.2/1.3 皆可）——docker-proxy 对 TLS1.3 客户端证书握手
-# 有兼容问题，由客户端（控制面 AgentClient）强制 TLS1.2 规避，见 agent_client.py
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", \
-     "--ssl-keyfile", "/etc/kurrent/pki/serving.key", \
-     "--ssl-certfile", "/etc/kurrent/pki/serving.crt", \
-     "--ssl-ca-certs", "/etc/kurrent/pki/ca-control.crt", \
-     "--ssl-cert-reqs", "2"]
+# serving cert = 本组件 TLS 服务端证书；control CA 只信控制面客户端（CERT_REQUIRED）；
+# 应用层再从 peer cert 校 issuer/CN 与 control CRL（可热更新），见 app/security.py。
+# 入口用 python -m app.serve：uvicorn CLI 无法注入自定义 SSLContext 与 peer cert hook。
+CMD ["python", "-m", "app.serve"]

@@ -3,11 +3,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +62,10 @@ func breakHost(t *testing.T) {
 func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	t.Helper()
 	stubHostReady(t)
+	// 沙盒里没有真实 agent enroll：默认不等待派生 token；恢复路径由专门用例覆盖。
+	oldWaiter := nvmetTokenWaiter
+	nvmetTokenWaiter = func(string, time.Duration, time.Duration) error { return nil }
+	t.Cleanup(func() { nvmetTokenWaiter = oldWaiter })
 	repo = t.TempDir()
 	controlPlane = filepath.Join(repo, "control_plane")
 	storager = filepath.Join(repo, "storager")
@@ -635,5 +641,75 @@ func TestResolveStoragerDir(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if _, err := resolveStoragerDir(""); err == nil {
 		t.Fatal("期望找不到 storager 目录报错")
+	}
+}
+
+func TestJoinWaitsForNvmetTokenAndRestartsHost(t *testing.T) {
+	_, _, storager, logFile := newFakeRepo(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	nvmetTokenWaiter = func(path string, timeout, interval time.Duration) error {
+		waited = true
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("旧派生 token 应已清除，stat err = %v", err)
+		}
+		return os.WriteFile(path, []byte("derived.token\n"), 0o600)
+	}
+	if err := joinRun(joinOpts{
+		dir:        storager,
+		configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL:      "https://192.168.1.10",
+		token:      "abc123.def456",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !waited {
+		t.Fatal("join 未等待 nvmet-host 派生 token")
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "compose --env-file ../.env restart nvmet-host") {
+		t.Errorf("docker 调用缺 restart nvmet-host: %s", logData)
+	}
+}
+
+func TestJoinFailsWhenNvmetTokenNeverAppears(t *testing.T) {
+	_, _, storager, _ := newFakeRepo(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nvmetTokenWaiter = func(string, time.Duration, time.Duration) error {
+		return fmt.Errorf("等待超时")
+	}
+	err := joinRun(joinOpts{
+		dir:        storager,
+		configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL:      "https://192.168.1.10",
+		token:      "abc123.def456",
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not complete enroll") {
+		t.Fatalf("err = %v, want agent did not complete enroll", err)
+	}
+}
+
+func TestWaitForTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nvmet-host.token")
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		done <- os.WriteFile(path, []byte("token\n"), 0o600)
+	}()
+	if err := waitForTokenFile(path, time.Second, 5*time.Millisecond); err != nil {
+		t.Fatalf("waitForTokenFile = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForTokenFile(filepath.Join(t.TempDir(), "missing"), 30*time.Millisecond, 5*time.Millisecond); err == nil {
+		t.Fatal("缺失文件应超时")
 	}
 }

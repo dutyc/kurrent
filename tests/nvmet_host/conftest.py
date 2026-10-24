@@ -28,6 +28,11 @@ from pki_testkit import gen_pki_dir  # noqa: E402
 
 _SPEC_DIR = PROJECT_ROOT / "storager" / "nvmeof" / "nvmet-host" / "app"
 
+# TestClient 没有 TLS peer cert；单测跳过 CN/CRL 闸门（闸门本身由 test_component_security 覆盖）
+os.environ["KURRENT_COMPONENT_INSECURE"] = "1"
+# 单测不连控制面：关闭启动吊销自检（自检本身由 tests/component/test_pki_selfcheck 覆盖）
+os.environ["KURRENT_PKI_SELF_CHECK"] = "0"
+
 _STATE = Path(tempfile.mkdtemp(prefix="nvmet-host-test-"))
 _PKI_DIR = gen_pki_dir(_STATE / "pki")
 _CONF_FILE = _STATE / "kurrent.yaml"
@@ -94,7 +99,8 @@ def configfs(nvmet):
 @pytest.fixture()
 def client(nvmet):
     from fastapi.testclient import TestClient
-    return TestClient(nvmet.app)
+    # 生产形态是 UDS + TLS；TestClient 用 https scheme 代表 TLS 层已生效
+    return TestClient(nvmet.app, base_url="https://testserver")
 
 
 # Windows 无 SeCreateSymbolicLinkPrivilege（WinError 1314）：os.symlink 不可用。
