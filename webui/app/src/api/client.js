@@ -196,6 +196,39 @@ export function issueAdminToken() {
   return request('/pki/tokens', { method: 'POST', body: { usage: 'admin' } });
 }
 
+// ===== Certificates（身份证书台账：用户 / 组件 / 控制面） =====
+export function getUserCerts() {
+  // users CA 证书（含历史吊销/过期）：{cn, groups, serial, fingerprint, created_at,
+  // expires_at, revoked_at, reason, expired}
+  return request('/pki/users')
+}
+
+export function getComponentCerts() {
+  // nodes CA 证书：users 域字段 + agent_id + kind（agent | nvmet-host）
+  return request('/pki/components')
+}
+
+export function getControlCerts() {
+  // control CA 证书（控制面出站 mTLS 身份）
+  return request('/pki/control')
+}
+
+export function revokeUserCert(cn, reason = 'unspecified') {
+  // 省略 serial = 吊销该 CN 全部未吊销证书，并踢掉关联会话
+  return request(`/pki/users/${encodeURIComponent(cn)}`, {
+    method: 'DELETE',
+    params: { reason },
+  })
+}
+
+export function revokeComponentCert(agentId, reason = 'unspecified') {
+  // 省略 serial = 吊销该节点 client + serving 全部未吊销证书，并删除引导 token
+  return request(`/pki/components/${encodeURIComponent(agentId)}`, {
+    method: 'DELETE',
+    params: { reason },
+  })
+}
+
 // ===== Sessions（服务端会话登记） =====
 export function getSessions() {
   // {session_id, user, groups, created_at, last_seen, expires_at, cert_fp}

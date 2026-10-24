@@ -41,7 +41,7 @@ const ICON_AGENTS = (
     <path d="M5 8h6M5 8l5.5-4M5 8l5.5 4" />
   </>
 )
-const ICON_CREDENTIALS = (
+const ICON_IDENTITY = (
   <>
     <circle cx="5" cy="8" r="2.5" />
     <path d="M7.5 8H14M11 8v2.5M14 8v2" />
@@ -82,7 +82,7 @@ export default function Layout() {
     { to: '/devices', label: t('nav.devices'), icon: ICON_DEVICES },
     { to: '/boot', label: t('nav.assets'), icon: ICON_FILES },
     { to: '/agents', label: t('nav.agents'), icon: ICON_AGENTS },
-    { to: '/credentials', label: t('nav.credentials'), icon: ICON_CREDENTIALS },
+    { to: '/identity', label: t('nav.identity'), icon: ICON_IDENTITY },
     { to: '/operations', label: t('nav.operations'), icon: ICON_OPERATIONS },
   ]
 

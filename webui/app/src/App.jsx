@@ -11,7 +11,7 @@ import Devices from './pages/Devices'
 import BootChain from './pages/BootChain'
 import Agents from './pages/Agents'
 import AgentLuns from './pages/AgentLuns'
-import Credentials from './pages/Credentials'
+import Identity from './pages/Identity'
 import Operations from './pages/Operations'
 
 function BootScreen() {
@@ -39,7 +39,10 @@ function Gate() {
         <Route path="boot" element={<BootChain />} />
         <Route path="agents" element={<Agents />} />
         <Route path="agents/:id" element={<AgentLuns />} />
-        <Route path="credentials" element={<Credentials />} />
+        <Route path="identity" element={<Identity />} />
+        {/* 旧入口合并进「身份与访问」 */}
+        <Route path="credentials" element={<Navigate to="/identity" replace />} />
+        <Route path="certificates" element={<Navigate to="/identity" replace />} />
         <Route path="operations" element={<Operations />} />
         {/* 旧书签 / 手改地址 / 已删除页面（如 #/files）不应留下空白树 */}
         <Route path="*" element={<Navigate to="/" replace />} />

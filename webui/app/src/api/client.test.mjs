@@ -1,7 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { extractDetail, crc32, generateDHHC1 } from './client.js'
+import {
+  extractDetail,
+  crc32,
+  generateDHHC1,
+  getComponentCerts,
+  revokeComponentCert,
+  revokeUserCert,
+} from './client.js'
 import { deriveEncryptionPosture } from './posture.js'
 
 // extractDetail 与 CLI detailOf（cli/api.go）同语义：[object Object] 回归的锚点。
@@ -169,4 +176,39 @@ test('不可用：节点后端未知（未登记 / 能力未取回）', () => {
     }),
     { state: 'unavailable', reason: null },
   )
+})
+
+// 证书台账请求形状：吊销走 DELETE + reason 查询参数；列表不误用写方法。
+
+async function captureRequest(fn) {
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return { ok: true, json: async () => [] }
+  }
+  try {
+    await fn()
+  } finally {
+    globalThis.fetch = original
+  }
+  return calls
+}
+
+test('revokeUserCert：DELETE /pki/users/<cn>?reason=...', async () => {
+  const calls = await captureRequest(() => revokeUserCert('alice', 'key_compromise'))
+  assert.equal(calls[0].options.method, 'DELETE')
+  assert.equal(calls[0].url, '/api/cp/pki/users/alice?reason=key_compromise')
+})
+
+test('revokeComponentCert：节点 ID 编码后走 DELETE + reason', async () => {
+  const calls = await captureRequest(() => revokeComponentCert('node a/b', 'superseded'))
+  assert.equal(calls[0].options.method, 'DELETE')
+  assert.equal(calls[0].url, '/api/cp/pki/components/node%20a%2Fb?reason=superseded')
+})
+
+test('getComponentCerts：GET /pki/components', async () => {
+  const calls = await captureRequest(() => getComponentCerts())
+  assert.equal(calls[0].options.method, 'GET')
+  assert.equal(calls[0].url, '/api/cp/pki/components')
 })

@@ -121,7 +121,7 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 /boot                 引导链状态板（UEFI 固件 / 引导服务 / 数据面 / Worker / 上报）
 /agents               Agent 监控（自适应网格卡片）
 /agents/:id           Agent 详情（Tab：Targets / Masters）
-/credentials          凭据管理（token 台账列表 / 吊销 / 签发管理 token）
+/identity             身份与访问（任务入口 + 用户 / 存储节点 / 控制面 / 自动化四个页签）
 /operations           操作审计日志（增量加载）
 *                     未匹配路由回退 `/`（旧书签、已删除页面不留空白树）
 ```
@@ -142,7 +142,7 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 │ Devices    │                          │
 │ 引导链     │                          │
 │ Agents     │                          │
-│ 凭据       │                          │
+│ 身份       │                          │
 │ Operations │                          │
 │ ──────     │                          │
 │ 登出 / 中EN│                          │
@@ -150,8 +150,8 @@ WebUI 是 Control Plane 的纯前端界面，通过 Control Plane HTTP API 实�
 ```
 
 侧边栏（`<aside class="sidebar">`，可折叠）：品牌标识 + 折叠按钮（`‹` / `›`）+ 7 个导航项
-（Dashboard / Workers / Devices / Boot chain / Agents / Credentials / Operations，各带内联 SVG 图标）+ 底部登出按钮
-与 中/EN 语言切换。
+（Dashboard / Workers / Devices / Boot chain / Agents / Identity / Operations，各带内联 SVG 图标）+ 底部登出按钮
+与 中/EN 语言切换。`#/credentials` 与 `#/certificates` 两个旧入口重定向到 `#/identity`。
 
 ### Dashboard
 
@@ -255,20 +255,40 @@ Tab 切换：Identity / Disks / Boot / CD（条件展示）/ NVMe-oF Credential�
   自动登记节点（tags 含 `auto`）的 API 地址由节点声明管理，编辑弹窗中只读并附灰字提示
 - 点击卡片进入 `/agents/:id`（Agent 详情：Targets / Masters 两个 Tab）
 
-### Credentials（凭据）
+### Identity（身份与访问）
 
-- token 台账列表（`GET /pki/tokens`，仅未过期条目）：Token ID、用途（enroll / admin）、
-  权限（scopes）、组、归属（component / agent_id）、备注、到期、最近使用、签发时间；
-  旧条目缺失字段显示 `-`（历史条目无该字段）
-- 工具栏：`刷新`、`签发管理 token`（POST `/pki/tokens` `{"usage":"admin"}`；
-  一次性明文展示 + 复制按钮 + 红字提示「仅本次可见，妥善保存」）
-- 吊销：每行 ConfirmAction 二次确认（危险按钮），DELETE `/pki/tokens/{token_id}`；
-  删除即失效、无法恢复（审计 `pki.token.revoke` 留痕）
-- 会话台账（`GET /sessions`，管理员）：用户、组、登录、最近活动、到期，逐行吊销
-  （DELETE `/sessions/{session_id}`）与「全部下线」（DELETE `/sessions`）；登记删除后
-  下一请求即失效
-- 与 CLI `kurrent token|sessions|cert` 同款调用；证书吊销（`DELETE /pki/users/{cn}`）
-  由 CLI `kurrent cert revoke` 操作，本页只读展示 token 与会话
+按「能做什么」组织，而不是按 PKI 结构或接口铺开：
+
+- 页头三个任务入口：**接入存储节点**（生成入网令牌与 join 命令）、**生成管理令牌**
+  （脚本与 CI 调用管理 API）、**收回访问**（滚动到台账并聚焦页签）
+- 状态行：可登录账户数、可管理节点数（仅统计已登记节点）、可用令牌数、已吊销证书数
+- 四个页签按访问主体划分：
+  - **用户**（users CA）：按 CN 聚合，展示权限组（`GET /pki/users` 的 `groups`，组来自
+    `users.yml`）、访问范围（admin = 全部资源，其余只读）、到期、状态；当前请求自身使用的
+    证书标记为「当前证书」且不可吊销。下方为用户会话（`GET /sessions` 中 `cert_fp` 非空），
+    逐行吊销
+  - **存储节点**（nodes CA + 节点令牌）：证书按 `agent_id` 聚合 agent 与 nvmet-host 各自的
+    client / serving 当前证书（按 CN + kind 各取最新，共 2~4 张）；状态 = 有效 / 部分可用 /
+    已吊销 / 已过期，部分可用时给出已吊销张数与原因；历史吊销证书只计入状态行总数。证书
+    对应节点未登记时标注「未登记」。下方为节点令牌（bootstrap / 派生），一次性已用尽的令牌
+    不再列出，逐行吊销
+  - **控制面**（control CA）：只读，吊销仅经 CLI/API
+  - **自动化**：管理 token 台账（用途、权限、到期、最近使用）与令牌会话（`cert_fp` 为空），
+    均可逐行吊销
+- 节点名称显示：`metadata.remark` 为主，未设置时以机器身份（12 位 hex）为主并改用等宽字体；
+  机器身份不重复显示。备注是唯一的人类标签，页面不要求也不允许手填节点标识
+- 接入弹窗：控制面地址一个输入项；节点标识由前端 `crypto.getRandomValues` 生成 12 位 hex
+  并直接写入 join 命令，接入后可在 Agent 台账设置备注；签发的一次性引导 token 明文只显示
+  本次
+- 吊销弹窗：目标身份、信任域、待吊销序列号、生效后果、原因
+  （`unspecified` / `key_compromise` / `superseded` / `cessation_of_operation`）；写 CRL 后
+  节点 ≤60 秒生效，用户证书即时生效并踢掉关联会话
+- 恢复弹窗（仅节点）：可编辑控制面地址 → 签发一次性 bootstrap token → 展示 `kurrent join`
+  命令与复制按钮；关闭即清空明文，「刷新台账」重新取数。节点恢复不需要手工删除本地证书
+- 数据来源：`GET /pki/users`、`GET /pki/components`、`GET /pki/control`、`GET /pki/tokens`、
+  `GET /sessions`、`GET /agents`、`DELETE /pki/users/{cn}`、`DELETE /pki/components/{agent_id}`、
+  `DELETE /pki/tokens/{token_id}`、`DELETE /sessions/{session_id}`、`POST /pki/tokens`；
+  页面不展示私钥，token 明文只在签发当次响应与恢复弹窗中出现
 
 ### Operations
 

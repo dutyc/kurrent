@@ -1,0 +1,391 @@
+/* ===== 身份与访问 ===== */
+.ident-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ident-subtitle {
+  margin: 4px 0 20px;
+  font-size: 12px;
+  color: var(--gray-500);
+  max-width: 880px;
+}
+
+/* ===== 任务入口 ===== */
+.ident-tasks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.ident-task {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 13px 16px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--white);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.ident-task:last-child {
+  border-right: none;
+}
+
+.ident-task:hover {
+  background: var(--gray-25);
+}
+
+.ident-task-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--black);
+  letter-spacing: 0.5px;
+}
+
+.ident-task-desc {
+  font-size: 11px;
+  color: var(--gray-500);
+  line-height: 1.5;
+}
+
+.ident-task-arrow {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  font-size: 12px;
+  color: var(--gray-300);
+  transition: color var(--transition), transform var(--transition);
+}
+
+.ident-task:hover .ident-task-arrow {
+  color: var(--black);
+  transform: translateX(2px);
+}
+
+.ident-task:hover .ident-task-arrow.down {
+  transform: translateY(2px);
+}
+
+/* ===== 状态行 ===== */
+.ident-statusline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 22px;
+  font-size: 11px;
+  color: var(--gray-500);
+}
+
+.ident-statusline b {
+  font-size: 12px;
+  color: var(--gray-800);
+  font-weight: 600;
+}
+
+.ident-sep {
+  color: var(--gray-300);
+}
+
+/* ===== Tabs ===== */
+.ident-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+
+.ident-tab {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--gray-500);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.ident-tab:hover {
+  color: var(--black);
+}
+
+.ident-tab.active {
+  color: var(--black);
+  border-bottom-color: var(--black);
+  font-weight: 600;
+}
+
+.ident-tab-count {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--gray-400);
+  margin-left: 4px;
+}
+
+.ident-tab.active .ident-tab-count {
+  color: var(--gray-500);
+}
+
+/* ===== 分组 ===== */
+.ident-group {
+  margin-bottom: 28px;
+}
+
+.ident-group:last-child {
+  margin-bottom: 0;
+}
+
+.ident-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ident-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--gray-700);
+}
+
+.ident-group-count {
+  font-size: 10px;
+  color: var(--gray-400);
+}
+
+.ident-group-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--gray-400);
+  text-align: right;
+}
+
+/* ===== 表格 ===== */
+.ident-table {
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.ident-row {
+  display: grid;
+  gap: 16px;
+  align-items: center;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 13px;
+  transition: background var(--transition);
+}
+
+.ident-row:last-child {
+  border-bottom: none;
+}
+
+.ident-row:not(.ident-row-head):hover {
+  background: var(--gray-25);
+}
+
+.ident-row-users {
+  grid-template-columns: 1.2fr 110px 1.8fr 130px 120px 120px;
+  min-width: 900px;
+}
+
+.ident-row-nodes {
+  grid-template-columns: 1.3fr 2fr 130px 120px 140px;
+  min-width: 860px;
+}
+
+.ident-row-node-tokens {
+  grid-template-columns: 1.4fr 2fr 150px 140px 80px;
+  min-width: 780px;
+}
+
+.ident-row-control {
+  grid-template-columns: 1.2fr 2fr 130px 120px 90px;
+  min-width: 820px;
+}
+
+.ident-row-auto-tokens {
+  grid-template-columns: 1.6fr 1.8fr 150px 140px 80px;
+  min-width: 820px;
+}
+
+.ident-row-sessions {
+  grid-template-columns: 1.4fr 140px 140px 140px 80px;
+  min-width: 720px;
+}
+
+.ident-row-head {
+  background: var(--gray-25);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--gray-500);
+}
+
+.ident-name-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ident-name {
+  font-size: 12px;
+  color: var(--gray-900);
+  word-break: break-all;
+}
+
+.ident-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--gray-700);
+}
+
+.ident-cell-sub {
+  font-size: 10px;
+  color: var(--gray-400);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ident-date {
+  font-size: 12px;
+  color: var(--gray-600);
+}
+
+.ident-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.ident-status-sub {
+  font-size: 10px;
+  color: var(--gray-400);
+  line-height: 1.4;
+}
+
+.ident-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ident-muted {
+  font-size: 11px;
+  color: var(--gray-400);
+}
+
+.ident-cli {
+  font-size: 11px;
+  color: var(--gray-400);
+  border-bottom: 1px dotted var(--gray-300);
+  cursor: help;
+}
+
+/* ===== 弹窗 ===== */
+.ident-target {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 4px 12px;
+  border: 1px solid var(--border-light);
+  background: var(--white);
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.ident-target dt {
+  color: var(--gray-400);
+}
+
+.ident-target dd {
+  color: var(--gray-700);
+  word-break: break-all;
+}
+
+.ident-consequence {
+  border-left: 2px solid var(--gray-700);
+  background: var(--gray-50);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--gray-600);
+  line-height: 1.6;
+}
+
+.ident-modal-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ident-recover-block {
+  border: 1px solid var(--border-light);
+  background: var(--white);
+  padding: 10px 12px;
+}
+
+.ident-recover-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--gray-500);
+  margin-bottom: 6px;
+}
+
+.ident-token {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.ident-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--gray-500);
+  line-height: 1.6;
+}
+
+.ident-recover-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+  .ident-tasks {
+    grid-template-columns: 1fr;
+  }
+
+  .ident-task {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ident-task:last-child {
+    border-bottom: none;
+  }
+
+  .ident-group-note {
+    display: none;
+  }
+}
