@@ -4,7 +4,7 @@
 
 ## 1. 首次开机与入池
 
-设备网络启动后：DHCP → TFTP 拉取 iPXE → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM，不出机器）→ `/devices/report` 上报指纹与公钥。
+设备网络启动后：DHCP → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM，不出机器）→ `/devices/report` 上报指纹与公钥。
 
 设备**只有在注册窗口开启且带有效公钥时**才会自动入池：
 
@@ -49,7 +49,8 @@ Worker 详情 → 系统盘 → **设为默认**。默认盘决定：
 ## 5. 开机链
 
 ```text
-DHCP → TFTP → iPXE
+DHCP → TFTP（snponly.efi + boot.ipxe 指针）→ iPXE
+  → HTTPS boot.ipxe.cfg        变量与设备身份链入口
   → /devices/report            设备信息与公钥上报
   → /devices/challenge         一次性 nonce
   → sign(nonce‖mac)            设备私钥签名
@@ -58,6 +59,8 @@ DHCP → TFTP → iPXE
   → sanboot nvme://<storager>:4421/<disk_nqn>   TLS 1.3 + DH-HMAC-CHAP
   → GRUB → 操作系统
 ```
+
+TFTP 只承载首跳固件 `snponly.efi` 和 `boot.ipxe` 指针；`boot.ipxe.cfg` 起全部走 HTTPS + TOFU。
 
 数据面只有 `4421` 一个端口，固件段与内核段共用；缺凭据、缺 PSK 或端口未就绪都会**拒绝引导**，不会回落明文。
 

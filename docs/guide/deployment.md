@@ -40,10 +40,23 @@
 | 80 | TCP | HTTP → 443 自动 301 升级（不承载内容/凭据） | 控制面服务器 |
 | 443 | TCP | 唯一入口：HTTPS（WebUI + `/api/cp` 反代控制面 + 组件 enroll/renew + 引导链） | 控制面服务器 |
 | 4840 | TCP | 存储 Agent HTTPS（控制面 → Agent） | 存储节点 |
-| 4841 | TCP | nvmet-host 管理服务（host 网络；仅 Agent 容器经 `host.docker.internal` 访问，不应向局域网开放） | 存储节点 |
 | 4421 | TCP | NVMe/TCP 数据面，单口 **TLS 1.3**（固件引导段与内核段共用） | 存储节点 |
 
+nvmet-host 管理面不占 TCP：Agent 与 nvmet-host 经共享卷 unix socket `/run/kurrent/nvmet/nvmet-host.sock` 通信（mTLS，目录 0700），局域网不可达。
+
 443 的引导链只反代 `/boot-vars`、`/devices/report`、`/devices/challenge` 三个只读端点；其余 `/devices/*` 管理接口不对外暴露。控制面管理面不发布 TCP 端口，只监听容器内 unix socket（`/run/kurrent/cp.sock`），由 nginx 经共享卷访问，容器健康检查走同一 socket。nginx 对所有反代 location 默认清空身份头，仅在 `/api/cp/` 的 mTLS 校验通过时注入 DN/issuer/serial/fingerprint。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
+
+### 引导网络边界（L1 信任档）
+
+引导链的第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有可用的密码学锚：设备固件不会验证这段内容，iPXE 也尚未拿到控制面证书。当前的信任档位是 **L1：把引导网段本身作为信任边界**，在此之上保留设备身份 TOFU（NVRAM 密钥 + 注册窗口 + 绑定）与服务端 TOFU。部署时必须满足：
+
+- **物理/逻辑隔离**：PXE 网段为独立 VLAN 或独立物理口，不与办公网、存储数据面混跑；控制面是该网段唯一提供 DHCP 与 TFTP 的主机。
+- **二层防护**：接入交换机启用 DHCP snooping（仅控制面上联口为 trusted）、Dynamic ARP Inspection、RA guard、端口安全/MAC 数量限制；有条件时用 802.1X 或 MAB 限定可接入端口。
+- **入池控制**：注册窗口按需开启并设放行额度；关闭窗口后未知 MAC 不会入池。
+- **吊销闭环**：`DELETE /devices/{mac}` 会在 dnsmasq 绑定文件写入 `MAC,ignore`，被吊销设备拿不到租约；重新登记（`/devices/report`）或清除条目（`DELETE /devices/revoked`）会移除该行。
+- **TFTP 面最小化**：TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe`，配置与菜单经 HTTPS 取回。
+
+**残余风险（L1 明确不解决）**：同一二层内的攻击者（或与被控端口同 VLAN 的主机）仍可伪造 DHCP/ARP 抢在控制面之前应答，替换首跳二进制或指针，再用设备 NVRAM 中的密钥作为签名预言机取走 `/boot-vars` 中的 DHHC-1/PSK；控制面或 TFTP 服务本身被攻陷时同理。设备密钥只是持有者凭证，控制面认证的是"持有该密钥的请求"，不是"运行该密钥的代码"。要消除该风险需要升级到 L2（Secure Boot + 自签 iPXE + 固定信任锚）或 L3（TPM 度量启动/远程证明），不在当前实现范围内。
 
 ## 前置条件
 
@@ -70,15 +83,14 @@ sudo systemctl enable --now tlshd
 
 > `host-prepare.sh` 只预检 nvmet 模块与 configfs；上面第 3 步的 TLS 条件与 tlshd 目前需手工确认。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
 
-**宿主基线（认证体系成立的前提）**：默认只读检查对外 TCP 监听、Docker 暴露面与凭据文件权限；唯一的自动修复是 `--fix-4841`（显式 opt-in）。
+**宿主基线（认证体系成立的前提）**：默认只读检查对外 TCP 监听、Docker 暴露面与凭据文件权限；脚本不修改系统状态。
 
 ```bash
 bash control_plane/host-baseline.sh
-sudo bash control_plane/host-baseline.sh --fix-4841   # 可选：为 4841 装幂等 iptables 规则
 ```
 
-- 控制面宿主只应暴露 22（运维）、53/67/69（dnsmasq）、80/443（nginx）；存储节点另有 4840/4421，`4841` 必须只绑回环
-- `--fix-4841` 只在 INPUT 链加三条带注释的规则（lo 与 `172.16.0.0/12` ACCEPT，其余 DROP），可重复执行；它遮蔽端口而不改变服务监听地址，服务仍应改绑 `127.0.0.1`
+- 控制面宿主只应暴露 22（运维）、53/67/69（dnsmasq）、80/443（nginx）；存储节点另有 4840/4421
+- nvmet-host 管理面走共享卷 UDS（目录 0700），不产生 TCP 监听；`--fix-4841` 已不再需要
 - ufw 不过滤 Docker 发布端口：需要入站限制时在 `DOCKER-USER` 链收口（脚本在 ufw 已启用但该链为空时给出 warn）
 - 控制面容器不挂载 `docker.sock`（dnsmasq 自己监听 `dhcp-hostsfile`，nginx 由容器内 watcher 自行 reload）
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600
@@ -179,6 +191,47 @@ kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id nod
 
 > token **绑定节点身份且默认一次性**：enroll 只接受该 `agent_id`，使用额度在签发前原子占用（签发失败退回），TTL 默认 60 分钟、上限 24 小时（`spec.pki.bootstrapTokenTtlMinutes`）；批量引导用 `kurrent token create --agent-id ... --uses N`（上限 100），过期或被吊销后重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
 
+### 1.6 组件面证书吊销（F-11）
+
+组件通道（443 enroll、4840 入站、控制面出站、agent → nvmet-host UDS）在 TLS 链校验之外做应用层吊销校验：
+
+- 控制面生成两张组件 CRL：`state/pki/nginx/nodes.crl`（nodes CA，校验同伴组件）与 `control.crl`（control CA，校验控制面客户端）；nginx 另用 `clients.crl` 管管理面握手。
+- 组件用自身 client cert 从 `/api/cp/enroll/crl` 取表，默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`）；控制面出站与 agent → nvmet-host 在每次建连时加载 `nodes.crl` 并检查 `nextUpdate`。
+- **fail-closed**：CRL 缺失或过期时组件/出站连接直接拒绝，不降级放行；`nodes.crl` / `control.crl` 的 `nextUpdate` 为 30 天，容忍控制面长时间不可达。
+- 吊销入口：`DELETE /api/cp/pki/components/{agent_id}`（nodes 域）与 `DELETE /api/cp/pki/control/{cn}`（control 域），均可加 `serial` 精确到一张。
+- **升级顺序**：先升级并重启控制面（生成 CRL、开放分发端点），再重建组件容器；旧组件不认识 `/enroll/crl` 时会保留原有链校验行为，不会因此拒绝启动。
+- 生效时间 = 控制面写入 CRL 后的下一次组件刷新（≤60 秒），无需重启组件。
+- **启动自检**：被吊销的证书无法完成 `/enroll/crl` 的 mTLS，组件改为在启动时从公开只读入口 `GET /crl/nodes.crl`（无认证、仅 GET/HEAD）取表，用本地 nodes CA 校验签名后比对 client / serving 序列号，命中即用引导凭据重新 enroll（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。
+- **管理入口**：WebUI「证书」页按 users / nodes / control 三个域展示到期与状态，可吊销人员与节点证书；节点证书异常时同一行提供「恢复」。
+
+**验证**：
+
+```bash
+bash tests/deploy/probe_edge.sh      # 含组件 CRL 分发、公开 nodes CRL、control CA 台账与人类证书 403 断言
+docker logs storager-agent 2>&1 | grep 'crl:'          # initial fetch ok（revoked 计数 / next_update）
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0
+```
+
+### 1.7 组件证书吊销后的恢复
+
+吊销会同时删除该节点的 bootstrap token，因此恢复必须重新签发引导凭据；节点上的旧证书
+**不需要手工删除**。
+
+1. 控制面：WebUI「证书」→「存储节点」→「恢复」，或
+   `kurrent token create --agent-id <id> --cp-url https://<cp-host>`。WebUI 预填控制面
+   地址，签发后显示一次性 token 与 join 命令（明文仅本次可见）。
+2. 节点：执行输出的 `kurrent join <cp-url> --token <token> --agent-id <id>`。
+3. 启动自检：agent 发现本地 client / serving 序列号命中 nodes CRL，用新 token 重新
+   enroll 并覆盖本地证书；随后 join 等待派生凭据写出并自动重启 nvmet-host。
+
+验证：
+
+```bash
+kurrent agents list                       # 节点 health=ok
+docker logs storager-agent 2>&1 | grep 'pki:'   # 重新 enroll / 自检记录
+docker logs kurrent-nvmet-host 2>&1 | grep 'pki:'
+```
+
 ## 第 2 步：存储节点
 
 ### 2.1 准备
@@ -226,13 +279,15 @@ docker ps    # 预期：storager-agent / kurrent-nvmet-host（或 stgt/lio 对�
 
 **防火墙**（存储节点）：`sudo ufw allow 4840,4421/tcp && sudo ufw reload`
 
-> `4841` 是 nvmet-host 的宿主本地管理口（host 网络，Agent 容器经 `host.docker.internal` 访问），不要向局域网开放；`4421` 是唯一数据面端口，按需限制来源网段。
+> nvmet-host 管理面走共享卷 UDS（`/run/kurrent/nvmet/nvmet-host.sock`，目录 0700），不占 TCP、局域网不可达；`4421` 是唯一数据面端口，按需限制来源网段。
 
 ### 2.4 验证
 
 ```bash
 docker logs storager-agent 2>&1 | grep pki     # pki: client cert ok (cn=agent-0d26b6f33a89)
 docker logs kurrent-nvmet-host 2>&1 | grep -i "数据面端口就绪"   # 4421 tsas=tls1.3
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0（UDS + mTLS + configfs）
+ss -H -lnt | grep ':4841 ' || echo "4841 无 TCP 监听（预期）"
 # 回到控制面服务器：
 kurrent agents list
 # ID             REMARK       HEALTH  BASE_URL                       ROLE  ENABLED  TAGS
@@ -248,7 +303,9 @@ kurrent agents list
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-预期链路：客户端 DHCP 获取地址 → TFTP 拉取引导固件 → iPXE 经 HTTPS 拉取引导脚本 → 设备身份上报与挑战-应答验签 → **设备自动登记入池**（WebUI → Devices 可见）。设备绑定、系统盘创建与 Worker 交付见[使用流程](./usage)。
+预期链路：客户端 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 拉取 `boot.ipxe.cfg` 及后续脚本 → 设备身份上报与挑战-应答验签 → **设备自动登记入池**（WebUI → Devices 可见）。设备绑定、系统盘创建与 Worker 交付见[使用流程](./usage)。
+
+> TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe` 两个文件；`boot.ipxe.cfg` / `menu.ipxe` 只经 HTTPS 提供。更新 `snponly.efi` 后需重建/重启 `kurrent-dnsmasq` 容器（文件级挂载固定 inode）。
 
 ## 故障排查
 

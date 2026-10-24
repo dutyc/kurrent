@@ -175,6 +175,7 @@ $EDITOR control_plane/kurrent.yaml
 - token **默认一次性**（TTL 60 分钟、上限 24 小时）：使用额度在签发前原子占用、签发失败退回；批量引导用 `--uses N`（1-100）显式放开。每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
 - 管理 token 用 `--scope`（`admin` 默认 / `readonly` 只读 / `enroll` 仅签发引导 token）与 `--ttl`（默认 24h、上限 720h）收窄权限与寿命；台账记录 `last_used_at`，列表与 WebUI 可对照使用情况
 - `nvmet-host` 组件凭据**不手工签发**：agent enroll 上报 `backend=nvmet` 时控制面派生随响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）
+- nvmet 后端 join 在 agent 收敛启动后等待上述派生凭据重新写出（默认 60 秒），再自动重启 `nvmet-host`。组件证书被吊销后，签发新 bootstrap token（`kurrent token create` 或 WebUI「证书」→「恢复」）并重跑 join 即完成恢复——旧证书无需手工删除
 - nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）与 configfs 挂载——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`；`--check` 只读诊断）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
 - enroll 自动登记时携带 `base_url`（声明 `spec.agent.advertiseUrl`，默认推导 `https://<cp-host>:4840`）、`remark`（声明 `metadata.remark`，备注/人类识别用）与能力标签；特殊场景（NAT 等）编辑声明覆盖
 

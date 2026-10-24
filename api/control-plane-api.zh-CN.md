@@ -123,8 +123,10 @@ curl -s "$BASE_URL/workers" \
 | `state/pki/ca/{users,nodes,control}/` | 三分根 CA（users=人类、nodes=节点组件、control=控制面客户端） |
 | `state/pki/users/issued.yml` | users 域证书登记（按序列号；含吊销时间与原因） |
 | `state/pki/components/issued.yml` | nodes 域组件证书登记（agent / nvmet-host，签发时写入；含吊销时间与原因） |
+| `state/pki/control/issued.yml` | control 域证书登记（控制面客户端，签发时写入；含吊销时间与原因） |
 | `state/pki/nginx/ca-bundle.pem` | nginx 信任包（仅 users + nodes 公钥；不含私钥） |
 | `state/pki/nginx/clients.crl` | nginx 客户端证书 CRL（users + nodes 两张表拼接） |
+| `state/pki/nginx/nodes.crl` / `control.crl` | 组件面 CRL（分别由 nodes / control CA 签发；经 `/enroll/crl` 分发给组件，`nextUpdate` 30 天） |
 | `state/operations.jsonl` | 控制面操作轨迹（含 actor） |
 | `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` 绑定（**派生视图**，权威在设备台账） |
 
@@ -180,6 +182,10 @@ curl -s "$BASE_URL/workers" \
 | `DELETE` | `/pki/users/{cn}` | 吊销证书（可选 `serial` 精确到一张）：重签 CRL + reload nginx + 踢会话（见 6.7） |
 | `GET` | `/pki/components` | 列出 nodes 域组件证书（含已吊销/已过期，见 6.7） |
 | `DELETE` | `/pki/components/{agent_id}` | 吊销组件证书（可选 `serial`）：写 nodes CRL + reload nginx + 删 bootstrap token（见 6.7） |
+| `GET` | `/pki/control` | 列出 control 域证书（控制面客户端，含已吊销/已过期，见 6.7） |
+| `DELETE` | `/pki/control/{cn}` | 吊销 control 域证书（可选 `serial`）：写 control CRL（见 6.7） |
+| `GET` | `/enroll/crl` | 组件取 nodes + control CRL（组件 mTLS，见 6.5.3） |
+| `GET` | `/crl/nodes.crl` | 公开只读的 nodes CRL（无认证、仅 GET/HEAD，供被吊销组件启动自检，见 6.5.3） |
 | `DELETE` | `/agents/{agent_id}` | 删除 Agent 台账（含母盘标签清理，见 6.6） |
 | `GET` | `/agents/{agent_id}/luns` | 列出指定 Agent 上的 iSCSI target/LUN |
 | `GET` | `/masters` | 聚合列出全部存储节点上的母盘清单（合并登记标签，供克隆选盘） |
@@ -1025,6 +1031,7 @@ curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
 - `base_url` 非空时必须为 `http://` / `https://` 开头，否则 400（不自动登记）
 - 已登记 agent 再次 enroll/renew 时**按节点声明刷新** `base_url` / `remark` / `role.cd`（声明权威：节点文件说了算，节点搬家/改备注后 renew 即对齐，无需重装）；控制面属性 `enabled` / `storager_ip` / `tags` **不碰**，节点未上报的字段保留现有值
 - agent 上报 `backend=nvmet` → 响应附加 `nvmet_token`（派生 nvmet-host 凭据）；stgt/lio 或旧 agent 无此字段
+- 响应附带 `nodes_crl` / `control_crl`（PEM）与 `next_update`：组件落盘后用于入站/出站的吊销校验；CRL 生成失败时省略该组字段（尽力而为），组件启动后经 `/enroll/crl` 补齐
 
 ### 6.5.2 一键加入命令（节点侧）
 
@@ -1038,6 +1045,34 @@ kurrent token create --agent-id node-01 --cp-url https://<cp-host>
 # 存储节点（命令已携带地址与节点 id，粘贴执行；业务键可用 kurrent config print node-defaults 预置模板编辑）：
 kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id node-01
 ```
+
+### 6.5.3 GET /enroll/crl（组件 CRL 分发）
+
+组件（agent / nvmet-host）用现有 client cert 取吊销表。入口 `/api/cp/enroll/crl` 强制
+mTLS 且只放行 `class=component`（人类证书 `403`，无证书 `401`）：
+
+```json
+{
+  "nodes_crl": "-----BEGIN X509 CRL-----\n...",
+  "control_crl": "-----BEGIN X509 CRL-----\n...",
+  "next_update": "2026-11-23T09:00:00+00:00"
+}
+```
+
+- `nodes_crl` 由 nodes CA 签发：组件校验**同伴**（agent ↔ nvmet-host）
+- `control_crl` 由 control CA 签发：组件校验**控制面客户端**（4840 入站）
+- 控制面出站（agent_client）与 agent → nvmet-host 出站同样加载 nodes CRL，并在每次
+  建连时校验新鲜度；CRL 缺失或已过 `nextUpdate` 时**拒绝连接**（fail-closed，非降级放行）
+- 组件默认每 60 秒刷新一次（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`，`<=0` 关闭）；
+  拉取失败保留上一份快照，过期后按上面的规则拒绝
+- 吊销生效时间 = 控制面写 CRL 后的下一次组件刷新（默认 ≤60 秒），无需重启组件
+
+公开只读副本（启动自检）：`GET /crl/nodes.crl` 由 nginx 直接返回
+`state/pki/nginx/nodes.crl`，无认证、仅 `GET`/`HEAD`、`Cache-Control: no-store`。
+被吊销的证书无法通过 `/enroll/crl` 的 mTLS（握手即被拒），所以组件启动时需要一个不要求
+客户端证书的入口：本地 `client.crt` / `serving.crt` 的序列号命中该表即进入重新引导；
+组件用本地 `ca-nodes.crt` 校验签名、issuer 与 `nextUpdate` 后才采信，拉取或校验失败不改变
+原有链校验结果（自检是补充，不是替代）。`KURRENT_PKI_SELF_CHECK=0` 可关闭启动自检。
 
 ## 6.6 DELETE /agents/{agent_id}
 
@@ -1112,6 +1147,7 @@ kurrent cert issue alice --csr ./alice/alice.csr --out ./alice --days 365
 [
   {
     "cn": "admin",
+    "groups": ["admin"],
     "serial": "6f1c0d2e",
     "fingerprint": "<sha256 hex>",
     "created_at": "2026-10-23T09:00:00+00:00",
@@ -1122,6 +1158,9 @@ kurrent cert issue alice --csr ./alice/alice.csr --out ./alice --days 365
   }
 ]
 ```
+
+`groups` 来自 `state/users.yml`（证书只承载 CN；已从目录移除的用户返回空数组），供管理面
+展示权限组；实际授权仍在每次请求时按 `users.yml` 重新解析。
 
 `DELETE /pki/users/{cn}?reason=key_compromise` 吊销某 CN 的证书；加
 `&serial=<hex>` 只吊销指定序列号（同一个人可能同时持有新旧两张）：
@@ -1188,6 +1227,15 @@ WebUI「凭据」页展示 token 权限 / 最近使用与会话台账。
   renew 入库后即可管理
 - 无未吊销证书返回 `404`；`reason` / `serial` 非法 `400`；CRL 已写但 reload 失败 `500`
 
+吊销后的恢复（不删除本地证书）：
+
+1. 签发新的节点绑定 bootstrap token（WebUI「证书」→「存储节点」→「恢复」，或
+   `kurrent token create --agent-id <id>`）；吊销时旧 token 已被删除，不能复用
+2. 在节点上执行 `kurrent join <cp-url> --token <token> --agent-id <id>`
+3. agent 启动时自检本地 client / serving 序列号，命中吊销表即用新 token 重新 enroll
+   并覆盖本地证书（无手工删除步骤）；join 等待 agent 写出派生的 nvmet-host 凭据后
+   自动重启 nvmet-host
+
 ```bash
 curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
   -H "Authorization: Bearer $TOKEN"
@@ -1199,6 +1247,44 @@ curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
 
 CLI 对应 `kurrent cert components [-o json]` 与
 `kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]`。
+
+### control 域证书（控制面客户端）
+
+控制面调用 Agent（4840）时出示的客户端证书由 control CA 签发。`GET /pki/control`
+列出该域证书（控制面启动时自举的一张会自动登记）：
+
+```json
+[
+  {
+    "cn": "control-plane",
+    "serial": "1de29ec7",
+    "fingerprint": "3a71...",
+    "created_at": "2026-10-24T09:00:00+00:00",
+    "expires_at": "2027-01-22T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/control/{cn}?reason=key_compromise`（可加 `&serial=<hex>`）吊销：
+
+- 标记 `state/pki/control/issued.yml`，重签 `state/pki/nginx/control.crl`
+- 组件在下一次刷新（默认 ≤60 秒）后拒绝该序列号；CRL 的 `nextUpdate` 为 30 天，
+  容忍控制面长时间不可达
+- 不能吊销当前请求自身所用的证书（`400`）；无未吊销证书返回 `404`
+- control 域证书不参与 nginx 管理面握手（`ca-bundle.pem` 只含 users + nodes），
+  吊销只影响控制面 → Agent 的组件通道
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/control/control-plane?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "control-plane", "serials": ["1de29ec7"], "reason": "key_compromise" }
+```
 
 ---
 ---
@@ -2751,12 +2837,14 @@ curl "$BASE_URL/devices?state=pooled" \
 
 注销设备（吊销）：`pooled` → `revoked`，设备保留在台账（审计保留）。
 
+吊销同时在该设备的 dnsmasq 绑定文件中写入 `MAC,ignore`，清除其静态绑定，使其后续不再获得 DHCP 租约（引导链的第一道拒绝发生在网络中继层，而不是等到无鉴权端点）。写文件失败不影响吊销结果，但会记 `device.dhcp_block` 错误事件。
+
 **409**：设备已绑定 Worker（须先解绑）或已吊销。
 
 ### 16.5.1 DELETE /devices/revoked
 
 清除已吊销设备（`revoked` → 删除条目）；`dry_run=true` 只返回将被清除的 MAC，不改台账。
-只清理已吊销项，`pooled` / `bound` 不受影响；无可清除项时返回空列表（幂等）。用于清理探测残留或误吊销的设备。
+只清理已吊销项，`pooled` / `bound` 不受影响；无可清除项时返回空列表（幂等）。用于清理探测残留或误吊销的设备。清除条目时同步删除该 MAC 在 dnsmasq 绑定文件中的 `MAC,ignore` 封禁行（`dry_run` 不改任何文件）。
 `mac` 可重复给出以限定范围（形如 `?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa`；未吊销的 MAC 忽略），缺省清除全部 revoked。
 
 ```bash
@@ -2925,6 +3013,6 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
 
 #### 存储节点
 - Agent: `4840`（mTLS，控制面调用）
-- nvmet-host: `4841`（mTLS，Agent 经 `host.docker.internal:4841` 调用）
+- nvmet-host: 共享卷 UDS `/run/kurrent/nvmet/nvmet-host.sock`（mTLS，Agent 调用；无 TCP 监听）
 - NVMe-oF 数据面: `4421`（nvmet 端口，强制 TLS 1.3 `tsas`；认证走 DH-HMAC-CHAP）
 - LIO / stgt（iSCSI 数据面）: `3260`

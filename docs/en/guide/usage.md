@@ -4,7 +4,7 @@
 
 ## 1. First Boot and Enrollment
 
-On network boot the machine runs: DHCP → TFTP pulls iPXE → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM, never leaves the machine) → `/devices/report` sends the fingerprint and public key.
+On network boot the machine runs: DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM, never leaves the machine) → `/devices/report` sends the fingerprint and public key.
 
 A device **enters the pool only while the registration window is open and the report carries a valid public key**:
 
@@ -49,7 +49,8 @@ Without a default disk, the control plane returns `menu-default=reboot` (a 1 ms 
 ## 5. Boot Chain
 
 ```text
-DHCP → TFTP → iPXE
+DHCP → TFTP (snponly.efi + boot.ipxe pointer) → iPXE
+  → HTTPS boot.ipxe.cfg        variables and device identity chain entry
   → /devices/report            device info and public key
   → /devices/challenge         one-time nonce
   → sign(nonce‖mac)            signed with the device key
@@ -58,6 +59,8 @@ DHCP → TFTP → iPXE
   → sanboot nvme://<storager>:4421/<disk_nqn>   TLS 1.3 + DH-HMAC-CHAP
   → GRUB → operating system
 ```
+
+TFTP carries only the first-stage firmware `snponly.efi` and the `boot.ipxe` pointer; everything from `boot.ipxe.cfg` onward uses HTTPS + TOFU.
 
 The data plane has a single port, `4421`, shared by the firmware and kernel stages. A missing credential, missing PSK or unready port **refuses the boot** — there is no plaintext fallback.
 

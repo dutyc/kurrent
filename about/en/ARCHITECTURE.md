@@ -25,7 +25,7 @@ State is persisted as plain files (YAML / JSONL) under `control_plane/state/` an
 Block storage. Each node runs two components:
 
 - **API Agent** (`:4840`, mTLS) — disk-file lifecycle (master scan, reflink clone, delete) and the storage-scheduling client, driving the local backend over HTTP
-- **nvmet-host** (`:4841`, host-network host service, mTLS) — translates control-plane commands into kernel configfs operations (subsystem / namespace / port / `allowed_hosts` and `dhchap_key`) and injects TLS pre-shared keys into the kernel's global `.nvme` keyring; the data-plane port is **`4421` (TLS 1.3), shared by the firmware and kernel boot segments**
+- **nvmet-host** (shared-volume UDS, host-network host service, mTLS) — translates control-plane commands into kernel configfs operations (subsystem / namespace / port / `allowed_hosts` and `dhchap_key`) and injects TLS pre-shared keys into the kernel's global `.nvme` keyring; the data-plane port is **`4421` (TLS 1.3), shared by the firmware and kernel boot segments**
 
 The backend of choice is **nvmet**; the iSCSI backends (stgt / lio) keep their code but have no live boot path on the main branch (the historical implementation lives in the `iscsi-classic` branch). Backend differences are encapsulated inside the Agent: the control plane only ever speaks HTTP, and the data-plane address and Host NQN are delivered to devices through boot variables.
 
@@ -54,7 +54,7 @@ The binding relationship is authoritative on the **device side** (`bound_worker_
 
 ## Boot Chain
 
-1. Device powers on → DHCP (dnsmasq) → TFTP downloads iPXE → iPXE boots
+1. Device powers on → DHCP (dnsmasq) → TFTP downloads iPXE and the `boot.ipxe` pointer → iPXE boots and fetches `boot.ipxe.cfg` over HTTPS
 2. **Device identity**: `keygen` creates an ECDSA P-256 private key once (persisted in EFI NVRAM, never leaves the machine) → `pubkey` → `/devices/report` sends the fingerprint and public key; an unknown MAC is admitted **only while the registration window is open and a valid public key is present**
 3. **Challenge-response**: `/devices/challenge` returns a one-shot nonce → `sign <nonce><mac>` → `/boot-vars?…&sig=`
 4. **`/boot-vars` admission**: identity match (MAC resolved through the device ledger; hostname is a fallback when no MAC is supplied or the ledger has no hit) → **binding is authentication** (the request MAC must belong to the matched Worker's bound device) → signature verification (with enforcement on, no key / no signature / bad signature are all rejected) → credentials injected only when the key store has an entry (**on nvmet nodes the key is issued automatically when a system disk is created**); only then are root-path, NQN and key projected

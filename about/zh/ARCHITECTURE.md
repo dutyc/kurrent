@@ -25,7 +25,7 @@
 块存储。每节点运行两个组件：
 
 - **API Agent**（`:4840`，mTLS）——盘文件生命周期（母盘扫描、reflink 克隆、删盘）与存储调度客户端，经 HTTP 驱动本机后端
-- **nvmet-host**（`:4841`，host 网络宿主服务，mTLS）——把控制面指令翻译为内核 configfs 操作（subsystem / namespace / port / `allowed_hosts` 与 `dhchap_key`），并把 TLS 预共享密钥注入内核全局 `.nvme` keyring；数据面端口为 **`4421`（TLS 1.3），固件段与内核段共用**
+- **nvmet-host**（共享卷 UDS，host 网络宿主服务，mTLS）——把控制面指令翻译为内核 configfs 操作（subsystem / namespace / port / `allowed_hosts` 与 `dhchap_key`），并把 TLS 预共享密钥注入内核全局 `.nvme` keyring；数据面端口为 **`4421`（TLS 1.3），固件段与内核段共用**
 
 后端以 **nvmet 为首选**；iSCSI 后端（stgt / lio）代码保留，但主分支已无存活的引导路径（历史实现见 `iscsi-classic` 分支）。后端差异封装在 Agent 内部：控制面只发 HTTP，数据面地址与 Host NQN 经启动变量下发给设备。
 
@@ -54,7 +54,7 @@
 
 ## 引导链路
 
-1. 设备通电 → DHCP（dnsmasq）→ TFTP 下载 iPXE → iPXE 启动
+1. 设备通电 → DHCP（dnsmasq）→ TFTP 下载 iPXE 与 `boot.ipxe` 指针 → iPXE 启动，经 HTTPS 取回 `boot.ipxe.cfg`
 2. **设备身份**：`keygen` 首次生成 ECDSA P-256 私钥（持久化在 EFI NVRAM，不出机器）→ `pubkey` → `/devices/report` 上报指纹与公钥；未知 MAC **仅在注册窗口开启且带有效公钥时**入池
 3. **挑战-响应**：`/devices/challenge` 取一次性 nonce → `sign <nonce><mac>` → `/boot-vars?…&sig=`
 4. **`/boot-vars` 准入**：识别命中（MAC 经设备台账反查；未传 MAC 或台账未命中时用 hostname 兜底）→ **绑定即认证**（请求 MAC 必须属于命中 Worker 的绑定设备）→ 身份验签（强制开关开启时，无密钥 / 无签名 / 验签失败一律拒绝）→ 密钥库有条目才注入凭据（**nvmet 节点上，建系统盘时即自动签发**）；全部通过才投影 root-path、NQN 与密钥

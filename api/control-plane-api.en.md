@@ -136,8 +136,10 @@ The current Control Plane state and configuration are divided as follows (contai
 | `state/pki/ca/{users,nodes,control}/` | Three separate root CAs (users=humans, nodes=node components, control=control-plane clients) |
 | `state/pki/users/issued.yml` | users-domain certificate registry (by serial; includes revocation time and reason) |
 | `state/pki/components/issued.yml` | nodes-domain component certificate registry (agent / nvmet-host, written at issuance; includes revocation time and reason) |
+| `state/pki/control/issued.yml` | control-domain certificate registry (control-plane clients, written at issuance; includes revocation time and reason) |
 | `state/pki/nginx/ca-bundle.pem` | nginx trust bundle (users + nodes public certs only; no private keys) |
 | `state/pki/nginx/clients.crl` | nginx client-certificate CRL (users + nodes tables concatenated) |
+| `state/pki/nginx/nodes.crl` / `control.crl` | Component-face CRLs (signed by the nodes / control CA; distributed via `/enroll/crl`, `nextUpdate` 30 days) |
 | `state/operations.jsonl` | Control Plane operation audit trail (with actor) |
 | `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` bindings (**derived view**; the device ledger is authoritative) |
 
@@ -193,6 +195,10 @@ Notes:
 | `DELETE` | `/pki/users/{cn}` | Revoke certificates (optional `serial` for a single one): re-sign CRL + reload nginx + kick sessions (see 6.7) |
 | `GET` | `/pki/components` | List nodes-domain component certificates (revoked/expired included, see 6.7) |
 | `DELETE` | `/pki/components/{agent_id}` | Revoke component certificates (optional `serial`): write the nodes CRL + reload nginx + delete bootstrap tokens (see 6.7) |
+| `GET` | `/pki/control` | List control-domain certificates (control-plane clients, revoked/expired included, see 6.7) |
+| `DELETE` | `/pki/control/{cn}` | Revoke a control-domain certificate (optional `serial`): write the control CRL (see 6.7) |
+| `GET` | `/enroll/crl` | Fetch the nodes + control CRLs as a component (component mTLS, see 6.5.3) |
+| `GET` | `/crl/nodes.crl` | Public read-only nodes CRL (unauthenticated, GET/HEAD only, for revoked-component startup self-check; see 6.5.3) |
 | `DELETE` | `/agents/{agent_id}` | Remove an Agent’s registry entry (incl. master-tag cleanup, see 6.6) |
 | `GET` | `/agents/{agent_id}/luns` | List iSCSI targets/LUNs on a given Agent |
 | `GET` | `/masters` | Aggregate master image inventory from all storage nodes (merged with registered tags, for clone selection) |
@@ -1038,6 +1044,7 @@ First-report auto-registration: when an `agent` component enrolls (`POST /enroll
 - A non-empty `base_url` must start with `http://` / `https://`, otherwise 400 (no auto-registration)
 - When an already-registered agent enrolls/renews again, `base_url` / `remark` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move or remark change, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` are **left untouched**, and fields the node does not report keep their current values
 - An agent reporting `backend=nvmet` gets an extra `nvmet_token` field in the response (derived nvmet-host credential); stgt/lio backends and legacy agents have no such field
+- The response also carries `nodes_crl` / `control_crl` (PEM) and `next_update`, which components persist for inbound/outbound revocation checks; if CRL generation fails these fields are omitted (best effort) and the component fetches them via `/enroll/crl` after startup
 
 ### 6.5.2 One-command join (node side)
 
@@ -1051,6 +1058,36 @@ kurrent token create --agent-id node-01 --cp-url https://<cp-host>
 # Storage node (the command already carries the URL and node id — paste and run; business keys can be pre-declared via kurrent config print node-defaults):
 kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id node-01
 ```
+
+### 6.5.3 GET /enroll/crl (component CRL distribution)
+
+Components (agent / nvmet-host) fetch the revocation tables with their existing client
+cert. The entry `/api/cp/enroll/crl` forces mTLS and admits only `class=component`
+(human certificates get `403`, no certificate gets `401`):
+
+```json
+{
+  "nodes_crl": "-----BEGIN X509 CRL-----\n...",
+  "control_crl": "-----BEGIN X509 CRL-----\n...",
+  "next_update": "2026-11-23T09:00:00+00:00"
+}
+```
+
+- `nodes_crl` is signed by the nodes CA: components verify **peers** (agent ↔ nvmet-host)
+- `control_crl` is signed by the control CA: components verify the **control-plane client** (4840 inbound)
+- Control-plane outbound (agent_client) and agent → nvmet-host outbound also load the nodes CRL and check freshness on every connection; a missing or stale (`nextUpdate` passed) CRL **refuses the connection** (fail-closed, not a degraded allow)
+- Components refresh every 60 seconds by default (`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`; `<=0` disables); a failed fetch keeps the previous snapshot, which is refused once stale
+- Revocation takes effect at the component's next refresh after the control plane writes the CRL (≤60 s by default), with no component restart
+
+Public read-only copy (startup self-check): `GET /crl/nodes.crl` is served directly by
+nginx from `state/pki/nginx/nodes.crl`, unauthenticated, `GET`/`HEAD` only,
+`Cache-Control: no-store`. A revoked certificate cannot pass the `/enroll/crl` mTLS
+handshake, so components need an entry point that does not require a client certificate:
+when the serial of the local `client.crt` / `serving.crt` appears in this table, the
+component re-bootstraps. Components accept the CRL only after verifying its signature,
+issuer and `nextUpdate` against the local `ca-nodes.crt`; a failed fetch or validation
+does not change the existing chain checks (the self-check is additive). Set
+`KURRENT_PKI_SELF_CHECK=0` to disable the startup self-check.
 
 ## 6.6 DELETE /agents/{agent_id}
 
@@ -1133,6 +1170,7 @@ metadata plus `certificate` (PEM).
 [
   {
     "cn": "admin",
+    "groups": ["admin"],
     "serial": "6f1c0d2e",
     "fingerprint": "<sha256 hex>",
     "created_at": "2026-10-23T09:00:00+00:00",
@@ -1143,6 +1181,10 @@ metadata plus `certificate` (PEM).
   }
 ]
 ```
+
+`groups` comes from `state/users.yml` (the certificate carries only the CN; a user removed
+from the directory returns an empty array) and is provided for the management UI; actual
+authorization still re-reads `users.yml` on every request.
 
 `DELETE /pki/users/{cn}?reason=key_compromise` revokes a CN's certificates; add
 `&serial=<hex>` to revoke exactly one (a user may hold an old and a new certificate):
@@ -1216,6 +1258,17 @@ revokes that node's component certificates:
 - `404` when nothing is left to revoke; `400` for a bad `reason` / `serial`; `500` when
   the CRL was written but the nginx reload failed
 
+Recovery after revocation (no local certificate deletion):
+
+1. Issue a new node-bound bootstrap token (WebUI "Certificates" → "Storage nodes" →
+   "Recover", or `kurrent token create --agent-id <id>`); revocation deleted the old
+   tokens, so they cannot be reused
+2. Run `kurrent join <cp-url> --token <token> --agent-id <id>` on the node
+3. At startup the agent checks the local client / serving serials; a CRL hit makes it
+   re-enroll with the new token and overwrite the local certificates (no manual deletion).
+   join waits for the agent to write the derived nvmet-host credential, then restarts
+   nvmet-host automatically
+
 ```bash
 curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
   -H "Authorization: Bearer $TOKEN"
@@ -1227,6 +1280,47 @@ curl -s -X DELETE "$BASE_URL/pki/components/node-a?reason=key_compromise" \
 
 CLI equivalents are `kurrent cert components [-o json]` and
 `kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]`.
+
+### control-domain certificates (control-plane clients)
+
+The client certificate the control plane presents when calling an Agent (4840) is signed
+by the control CA. `GET /pki/control` lists that domain (the certificate bootstrapped at
+control-plane startup is registered automatically):
+
+```json
+[
+  {
+    "cn": "control-plane",
+    "serial": "1de29ec7",
+    "fingerprint": "3a71...",
+    "created_at": "2026-10-24T09:00:00+00:00",
+    "expires_at": "2027-01-22T09:00:00+00:00",
+    "revoked_at": "",
+    "reason": "",
+    "expired": false
+  }
+]
+```
+
+`DELETE /pki/control/{cn}?reason=key_compromise` (optionally `&serial=<hex>`) revokes it:
+
+- records the revocation in `state/pki/control/issued.yml` and re-signs
+  `state/pki/nginx/control.crl`
+- components refuse that serial after their next refresh (≤60 s by default); the CRL's
+  `nextUpdate` is 30 days, tolerating a long control-plane outage
+- cannot revoke the certificate used by the current request (`400`); `404` when nothing is left to revoke
+- control-domain certificates do not participate in the nginx management handshake
+  (`ca-bundle.pem` holds only users + nodes); revocation only affects the
+  control-plane → Agent component channel
+
+```bash
+curl -s -X DELETE "$BASE_URL/pki/control/control-plane?reason=key_compromise" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "revoked": "control-plane", "serials": ["1de29ec7"], "reason": "key_compromise" }
+```
 
 ---
 ---
@@ -2772,6 +2866,8 @@ Bulk import a device manifest (pre-import of the MAC manifest): each entry is in
 
 Revoke a device: `pooled` → `revoked`; the record stays in the inventory (audit retention).
 
+Revocation also writes `MAC,ignore` into that device's dnsmasq binding file and removes its static reservation, so it no longer receives a DHCP lease (the first denial happens at the network relay, not at the unauthenticated endpoints). A file write failure does not roll back the revocation but records a `device.dhcp_block` error event.
+
 **409**: device is bound to a Worker (must unbind first) or already revoked.
 
 ### 16.5.1 DELETE /devices/revoked
@@ -2781,7 +2877,8 @@ would be purged and leaves the ledger untouched. Only revoked entries are remove
 `bound` devices are never touched; an empty list is returned when there is nothing to purge
 (idempotent). Intended for cleaning up probe leftovers or mistakenly revoked devices.
 Repeat `mac` to scope the purge (e.g. `?mac=02:00:00:00:00:01&mac=02:00:00:00:00:aa`; MACs that
-are not revoked are ignored); without it every revoked device is purged.
+are not revoked are ignored); without it every revoked device is purged. Purging also removes the
+MAC's `MAC,ignore` deny line from the dnsmasq binding file (`dry_run` touches no files).
 
 ```bash
 curl -s -X DELETE "$BASE_URL/devices/revoked?dry_run=true" -H "Authorization: Bearer $TOKEN"
@@ -2950,6 +3047,6 @@ The current version does **not** yet include:
 
 #### Storage node
 - Agent: `4840` (mTLS, called by the control plane)
-- nvmet-host: `4841` (mTLS, called by the Agent via `host.docker.internal:4841`)
+- nvmet-host: shared-volume UDS `/run/kurrent/nvmet/nvmet-host.sock` (mTLS, called by the Agent; no TCP listener)
 - NVMe-oF data plane: `4421` (nvmet port, TLS 1.3 `tsas` required; authentication via DH-HMAC-CHAP)
 - LIO / stgt (iSCSI data plane): `3260`

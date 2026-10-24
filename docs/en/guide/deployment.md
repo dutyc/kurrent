@@ -40,10 +40,23 @@ This guide follows Kurrent's declarative-configuration model: the control-plane 
 | 80 | TCP | HTTP → 443 automatic 301 upgrade (carries no content or credentials) | Controller server |
 | 443 | TCP | The only entry: HTTPS (WebUI + `/api/cp` reverse proxy to the control plane + component enroll/renew + boot chain) | Controller server |
 | 4840 | TCP | Storage Agent HTTPS (controller → Agent) | Storage node |
-| 4841 | TCP | nvmet-host management service (host network; reached only by the Agent container via `host.docker.internal`, should not be exposed to the LAN) | Storage node |
 | 4421 | TCP | NVMe/TCP data plane, single port with **TLS 1.3** (shared by the firmware and kernel boot stages) | Storage node |
 
+nvmet-host's management plane has no TCP port: the Agent and nvmet-host talk over the shared-volume unix socket `/run/kurrent/nvmet/nvmet-host.sock` (mTLS, directory mode 0700), unreachable from the LAN.
+
 The boot chain behind 443 only proxies three read-only endpoints: `/boot-vars`, `/devices/report` and `/devices/challenge`. The remaining `/devices/*` management endpoints are not exposed. The control-plane management plane publishes no TCP port; it listens on an in-container unix socket (`/run/kurrent/cp.sock`) that nginx reaches through a shared volume, and the container health check uses the same socket. nginx clears the identity headers by default for every proxied location and injects DN/issuer/serial/fingerprint only when mTLS verification succeeds on `/api/cp/`. The interactive control-plane API docs (`/openapi.json`, `/docs`) are off by default and can be enabled for debugging with `KURRENT_CP_OPENAPI=1`.
+
+### Boot network boundary (L1 trust profile)
+
+The first hop of the boot chain (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`) has no cryptographic anchor available: the device firmware does not verify it, and iPXE has not yet obtained the controller certificate. The current trust profile is **L1: treat the boot segment itself as the trust boundary**, keeping device-identity TOFU (NVRAM key + registration window + binding) and server TOFU on top. A deployment must satisfy:
+
+- **Physical/logical isolation**: the PXE segment is a dedicated VLAN or a dedicated physical port, not shared with the office network or the storage data plane; the controller is the only host serving DHCP and TFTP on it.
+- **Layer-2 controls**: enable DHCP snooping (only the controller uplink is trusted), Dynamic ARP Inspection, RA guard, and port security/MAC limits on access switches; use 802.1X or MAB to restrict which ports can attach where available.
+- **Admission control**: open the registration window only when needed and set a quota; once closed, unknown MACs cannot enter the pool.
+- **Revocation closed loop**: `DELETE /devices/{mac}` writes `MAC,ignore` into the dnsmasq binding file, so a revoked device gets no lease; re-registration (`/devices/report`) or purging (`DELETE /devices/revoked`) removes that line.
+- **Minimal TFTP surface**: the TFTP root mounts only `snponly.efi` and `boot.ipxe`; configuration and menu are fetched over HTTPS.
+
+**Residual risk (explicitly out of scope for L1)**: an attacker on the same Layer 2 (or on a host in the same VLAN as a compromised port) can still forge DHCP/ARP, answer ahead of the controller, and replace the first-stage binary or pointer, then use the device's NVRAM key as a signing oracle to fetch the DHHC-1/PSK from `/boot-vars`. The same holds if the controller or TFTP service itself is compromised. The device key is a bearer credential: the controller authenticates "a request holding this key", not "the code that runs with this key". Eliminating this requires L2 (Secure Boot + self-signed iPXE + a pinned trust anchor) or L3 (TPM measured boot/remote attestation), neither of which is in the current implementation.
 
 ## Prerequisites
 
@@ -71,15 +84,14 @@ sudo systemctl enable --now tlshd
 
 > `host-prepare.sh` only checks the nvmet modules and configfs; the TLS kernel options and tlshd from step 3 must currently be verified by hand. If the `4421` port cannot be created, the node reports the port as not ready and the control plane **refuses the boot** — there is no plaintext fallback.
 
-**Host baseline (a precondition for the auth model)**: read-only by default — checks public TCP listeners, Docker exposure and credential-file permissions; the only automatic fix is `--fix-4841` (explicit opt-in).
+**Host baseline (a precondition for the auth model)**: read-only by default — checks public TCP listeners, Docker exposure and credential-file permissions; the script does not modify system state.
 
 ```bash
 bash control_plane/host-baseline.sh
-sudo bash control_plane/host-baseline.sh --fix-4841   # optional: idempotent iptables rules for 4841
 ```
 
-- A controller host should expose only 22 (ops), 53/67/69 (dnsmasq) and 80/443 (nginx); storage nodes add 4840/4421, and `4841` must bind loopback only
-- `--fix-4841` adds three commented INPUT rules (ACCEPT for `lo` and `172.16.0.0/12`, DROP for everything else) and is safe to re-run; it masks the port rather than changing the listen address, so the service should still be bound to `127.0.0.1`
+- A controller host should expose only 22 (ops), 53/67/69 (dnsmasq) and 80/443 (nginx); storage nodes add 4840/4421
+- nvmet-host's management plane uses a shared-volume UDS (directory 0700) and creates no TCP listener; `--fix-4841` is no longer needed
 - ufw does not filter Docker-published ports: constrain them in the `DOCKER-USER` chain (the script warns when ufw is active but that chain is empty)
 - The controller container does not mount `docker.sock` (dnsmasq watches `dhcp-hostsfile`; nginx reloads itself via an in-container watcher)
 - CA private keys, `users.yml`, `sessions.yml`, `admin.conf` and `audit.jsonl` should be mode 600
@@ -186,6 +198,49 @@ kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id nod
 
 > The token is **bound to the node identity and single-use by default**: enroll only accepts that `agent_id`; an allowance is reserved atomically before issuance and released if issuance fails. TTL defaults to 60 minutes with a 24-hour cap (`spec.pki.bootstrapTokenTtlMinutes`); for bulk onboarding use `kurrent token create --agent-id ... --uses N` (max 100). Re-issue after expiry or revocation. **No nvmet-host credential needs issuing**: it is derived by the control plane when the agent enrolls with `backend=nvmet`.
 
+### 1.6 Component certificate revocation (F-11)
+
+Component channels (443 enroll, 4840 inbound, control-plane outbound, agent → nvmet-host over the UDS) perform application-level revocation checks on top of TLS chain validation:
+
+- The control plane generates two component CRLs: `state/pki/nginx/nodes.crl` (nodes CA, for peer components) and `control.crl` (control CA, for the control-plane client); nginx separately uses `clients.crl` for management handshakes.
+- Components fetch these with their own client cert from `/api/cp/enroll/crl` and refresh every 60 seconds by default (`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`); control-plane outbound and agent → nvmet-host load `nodes.crl` on every connection and check `nextUpdate`.
+- **Fail-closed**: a missing or stale CRL refuses the connection outright — no degraded allow. `nodes.crl` / `control.crl` carry a 30-day `nextUpdate` to tolerate a long control-plane outage.
+- Revocation entry points: `DELETE /api/cp/pki/components/{agent_id}` (nodes domain) and `DELETE /api/cp/pki/control/{cn}` (control domain), both accepting `serial` to target a single certificate.
+- **Upgrade order**: upgrade and restart the control plane first (it generates the CRLs and opens the distribution endpoint), then rebuild the component containers. Older components that do not know `/enroll/crl` keep their previous chain-only behavior and do not refuse to start.
+- Revocation takes effect at the component's next refresh after the control plane writes the CRL (≤60 s), with no component restart.
+- **Startup self-check**: a revoked certificate cannot complete the `/enroll/crl` mTLS handshake, so components fetch the public read-only `GET /crl/nodes.crl` (unauthenticated, GET/HEAD only) at startup, verify its signature against the local nodes CA, and compare the client / serving serials; a hit re-enrolls with the bootstrap credential (`KURRENT_PKI_SELF_CHECK=0` disables the check).
+- **Management UI**: the WebUI "Certificates" page shows expiry and status across the users / nodes / control domains and can revoke user and node certificates; an abnormal node row also offers "Recover".
+
+**Verification**:
+
+```bash
+bash tests/deploy/probe_edge.sh      # includes component CRL distribution, public nodes CRL, control CA ledger, and human-cert 403 assertions
+docker logs storager-agent 2>&1 | grep 'crl:'          # initial fetch ok (revoked counts / next_update)
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0
+```
+
+### 1.7 Recovery after component certificate revocation
+
+Revocation also deletes the node's bootstrap tokens, so recovery requires a newly issued
+credential. The old local certificates do **not** need manual deletion.
+
+1. Control plane: WebUI "Certificates" → "Storage nodes" → "Recover", or
+   `kurrent token create --agent-id <id> --cp-url https://<cp-host>`. The WebUI pre-fills
+   the control-plane URL and shows a single-use token plus the join command after issuance
+   (plaintext visible once).
+2. Node: run the printed `kurrent join <cp-url> --token <token> --agent-id <id>`.
+3. Startup self-check: the agent finds the local client / serving serials in the nodes CRL,
+   re-enrolls with the new token, and overwrites the local certificates; join then waits
+   for the derived credential and restarts nvmet-host automatically.
+
+Verification:
+
+```bash
+kurrent agents list                       # node health=ok
+docker logs storager-agent 2>&1 | grep 'pki:'   # re-enroll / self-check records
+docker logs kurrent-nvmet-host 2>&1 | grep 'pki:'
+```
+
 ## Step 2: Storage Node
 
 ### 2.1 Prepare
@@ -233,13 +288,15 @@ docker ps    # expect: storager-agent / kurrent-nvmet-host (or the stgt/lio equi
 
 **Firewall** (storage node): `sudo ufw allow 4840,4421/tcp && sudo ufw reload`
 
-> `4841` is nvmet-host's host-local management port (host network, reached by the Agent container via `host.docker.internal`); do not expose it to the LAN. `4421` is the only data-plane port — restrict its sources as needed.
+> nvmet-host's management plane uses a shared-volume UDS (`/run/kurrent/nvmet/nvmet-host.sock`, directory 0700): no TCP port, unreachable from the LAN. `4421` is the only data-plane port — restrict its sources as needed.
 
 ### 2.4 Verify
 
 ```bash
 docker logs storager-agent 2>&1 | grep pki     # pki: client cert ok (cn=agent-0d26b6f33a89)
 docker logs kurrent-nvmet-host 2>&1 | grep -i "数据面端口就绪"   # 4421 tsas=tls1.3
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0 (UDS + mTLS + configfs)
+ss -H -lnt | grep ':4841 ' || echo "no TCP listener on 4841 (expected)"
 # back on the controller server:
 kurrent agents list
 # ID             REMARK       HEALTH  BASE_URL                       ROLE  ENABLED  TAGS
@@ -255,7 +312,9 @@ Plug a bare-metal client into the PXE network with network boot enabled:
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-Expected chain: the client gets an address via DHCP → pulls the boot firmware over TFTP → iPXE fetches the boot scripts over HTTPS → device identity report and challenge-response verification → **the device auto-registers into the pool** (visible under WebUI → Devices). Binding devices, creating system disks and delivering Workers are covered by the [Usage Guide](./usage).
+Expected chain: the client gets an address via DHCP → pulls iPXE and the `boot.ipxe` pointer over TFTP → iPXE fetches `boot.ipxe.cfg` and the remaining scripts over HTTPS → device identity report and challenge-response verification → **the device auto-registers into the pool** (visible under WebUI → Devices). Binding devices, creating system disks and delivering Workers are covered by the [Usage Guide](./usage).
+
+> The TFTP root mounts only `snponly.efi` and `boot.ipxe`; `boot.ipxe.cfg` / `menu.ipxe` are served over HTTPS only. Recreate or restart the `kurrent-dnsmasq` container after replacing `snponly.efi` (file-level mounts pin the inode).
 
 ## Troubleshooting
 

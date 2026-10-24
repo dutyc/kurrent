@@ -13,6 +13,30 @@
 
 ---
 
+## 2026-10-24
+
+### 新增
+
+- **组件证书吊销后的自动恢复**：被吊销的组件证书无法再完成 mTLS，组件改为启动时从公开只读入口 `GET /crl/nodes.crl`（nginx 直出，无认证、仅 `GET`/`HEAD`、`Cache-Control: no-store`）取 nodes CRL，用本地 nodes CA 校验签名、issuer 与 `nextUpdate` 后比对本地 client / serving 序列号，命中即用引导凭据重新 enroll——**不再需要手工删除节点上的证书**（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。`kurrent join` 在重启 agent 后等待其写出派生的 nvmet-host 凭据，再自动重启 nvmet-host，恢复只需一条命令
+- **WebUI 身份与访问页**：侧边栏「身份」，路由 `#/identity`（`#/credentials`、`#/certificates` 重定向到此），把凭据与证书两张台账合成一页。页头先给三个任务入口（接入存储节点 / 生成管理令牌 / 收回访问），再按下表四个访问主体分页签：**用户**（users CA，按 CN 聚合，组来自 `users.yml`，当前请求自身的证书不可吊销；下方为用户会话）、**存储节点**（nodes CA，按 `agent_id` 聚合 agent 与 nvmet-host 的 client + serving 当前证书，状态区分有效 / 部分可用 / 已吊销 / 已过期，未登记节点有标注；下方为 bootstrap / 派生节点令牌，一次性已用尽的令牌不再列出）、**控制面**（control CA，只读）、**自动化**（管理 token 与令牌会话，均可逐行吊销）。接入存储节点不要求填写名称：节点标识由前端生成 12 位 hex 并直接写入 join 命令，备注在接入后由 Agent 台账设置；吊销支持原因选择，节点恢复可签发一次性 bootstrap token（明文仅本次可见），`GET /pki/users` 增加 `groups`（组来自 `users.yml`，证书只承载 CN）
+- **L1 引导信任档：吊销设备在 DHCP 层即被拒绝**：`DELETE /devices/{mac}` 现在同时清除该 MAC 的 dnsmasq 静态绑定并写入 `MAC,ignore`，被吊销设备不再取得租约（拒绝点前移到网络层，不再依赖无鉴权端点）；`DELETE /devices/revoked` 清除条目时移除对应封禁行，`POST /devices/report` 重新登记时清除历史遗留封禁。dnsmasq 写文件失败不回滚吊销结果，记 `device.dhcp_block` / `device.dhcp_unblock` 错误事件。部署指南（中英）新增「引导网络边界（L1 信任档）」一节，给出 VLAN/DHCP snooping/DAI/RA guard/端口安全/802.1X 清单与明确的残余风险（同二层伪造 DHCP/ARP 与控制面被攻陷不在 L1 覆盖范围内，L2/L3 未实施）
+
+### 修复
+
+- **组件面证书吊销不生效（F-11）**：此前 4840 / nvmet-host 的 mTLS 只校链不读 CRL，控制面出站同样不校，被吊销的组件证书在剩余有效期内仍可调用（控制面证书也没有台账与吊销入口）。现：
+  - 控制面生成 `nodes.crl` / `control.crl`（`nextUpdate` 30 天），新增 `GET /enroll/crl`（组件 mTLS + `class=component`，人类证书 `403`），enroll / renew 响应附带同一组 CRL
+  - 控制面出站（Agent 调用）与 agent → nvmet-host 出站每次建连时加载 `nodes.crl` 并检查新鲜度，启用 `VERIFY_CRL_CHECK_LEAF`
+  - Agent（4840）与 nvmet-host 入站在 TLS 之外做应用层校验：从 peer cert 取 issuer / CN / serial，CN 白名单之外拒绝，序列号命中 CRL 返回 `403`，CRL 缺失或过期返回 `503`（fail-closed）；组件默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`），吊销无需重启
+  - 新增 control CA 台账 `state/pki/control/issued.yml`、`GET /pki/control` 与 `DELETE /pki/control/{cn}`（可选 `serial`）；控制面启动自举的证书自动登记
+  - 部署探针增加 CRL 分发与 control 台账断言；API 文档（中英）与部署指南（中英）同步升级顺序（控制面先行）、生效窗口与验证方式
+- **`/devices/challenge` 的 nonce 可被无鉴权请求抢占（引导 DoS）**：此前每个 MAC 只保留一个未消费 nonce，局域网内任意主机反复请求 challenge（或用错误 nonce 请求 `/boot-vars`）都会清掉设备正在使用的那一个，使已签名请求失败、设备拿不到启动变量。现每个 MAC 保留最多 8 个未消费 nonce，消费只删除命中的一项，错误 nonce 不再影响其它待用项
+- **Agent 建盘/删盘入参路径穿越（组件面任意文件读）**：`POST /lun/disk` 的 `master`/`filename`、`POST /lun/cd` 的 `iso`、`DELETE /lun` 的 `iqn` 与 `POST /credential` 的 `sub_nqns`/`host_nqns` 此前直接拼路径或原样透传 NQN；持有控制面客户端证书即可把 `../../etc/hostname` 克隆成盘镜像并导出、越界写文件，或让 NQN 逃出 configfs 子系统目录改配置 / 删盘。现 Agent 的文件名只接受盘目录内的裸名并对最终路径做 realpath 越界检查，IQN/NQN/hostnqn 按严格字符集与 `iqn.`/`nqn.` 形态校验；nvmet-host 独立复核 NQN、`hostnqn` 与 backing（绝对路径、无 `..`、basename 重拼后仍在盘目录），`subsystems/`、`hosts/`、`allowed_hosts/` 的路径拼接全部先校验。非法入参统一 `400`，正常建盘 / 删盘 / 凭据推送行为不变
+
+### 变更
+
+- **nvmet-host 管理面收为共享卷 UDS**：管理面不再监听宿主 TCP `4841`，改听共享卷 `/run/kurrent/nvmet/nvmet-host.sock`（目录 0700，mTLS 保留）；Agent 的 nvmet 客户端改为 stdlib `AF_UNIX` + TLS；compose 增加 `kurrent-nvmet-run` 共享卷，健康检查改走 UDS。`host-baseline.sh --fix-4841` 不再需要（保留参数时提示并退出），宿主 4841 无监听
+- **引导链 TFTP 面收窄**：`boot.ipxe.cfg` 改经 HTTPS（nginx `/tftp/`，TOFU 同锚）取回，`boot.ipxe` 只保留一次跳转指针；移除 hostname/uuid/mac/pci/chip 覆盖脚本与 `boot.ipxe.cfg` 的 `boot-url`/`boot-dir`。TFTP 只承载 `snponly.efi` 与 `boot.ipxe`，其余引导脚本全走 HTTPS。dnsmasq 的 TFTP 根改为文件级挂载，仅挂这两个文件；`boot.ipxe.cfg` / `menu.ipxe` 不再能经 TFTP 取到，更新 `snponly.efi` 后需重建/重启 dnsmasq 容器。`https-port` 需与 compose 的 `KURRENT_HTTPS_PORT`、`boot.ipxe`、`boot.ipxe.cfg` 三处同步；`GET /boot-assets` 的脚本链解析同步支持 HTTPS 形式的配置地址
+
 ## 2026-10-23
 
 ### 新增
