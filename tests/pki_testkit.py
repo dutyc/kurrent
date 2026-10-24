@@ -42,4 +42,12 @@ def gen_pki_dir(target: Path) -> Path:
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption()))
+    # 空 CRL：出站客户端（Agent → nvmet-host、控制面 → Agent）启动即要求 CRL 存在
+    crl = (x509.CertificateRevocationListBuilder().issuer_name(name)
+           .last_update(now - datetime.timedelta(minutes=5))
+           .next_update(now + datetime.timedelta(days=30))
+           .sign(key, hashes.SHA256())
+           .public_bytes(serialization.Encoding.PEM))
+    (target / "nodes.crl").write_bytes(crl)
+    (target / "control.crl").write_bytes(crl)
     return target

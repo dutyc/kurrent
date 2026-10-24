@@ -120,6 +120,7 @@ def test_admin_cert_is_registered(client):
     assert admin["serial"]
     assert len(admin["fingerprint"]) == 64
     assert admin["revoked_at"] == ""
+    assert admin["groups"] == ["admin"]  # 组来自 users.yml，证书只承载 CN
     assert "token_secret_hash" not in admin
 
 

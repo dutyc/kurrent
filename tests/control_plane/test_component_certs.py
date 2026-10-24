@@ -179,6 +179,68 @@ def test_renew_rejects_revoked_serial(client, tmp_pki):
     assert "revoked" in res.json()["detail"]
 
 
+def _control_cert(tmp_pki, component: str = "control-plane") -> bytes:
+    ca_set = pki.ensure_ca_set(tmp_pki)
+    cert_path, _ = pki.ensure_control_plane_client_cert(
+        tmp_pki, *ca_set["control"], component)
+    return cert_path.read_bytes()
+
+
+def test_control_cert_registered_and_component_crls(tmp_pki):
+    """控制面自身证书登记进 control 台账；组件分发同时给出 nodes/control CRL。"""
+    cert = _control_cert(tmp_pki)
+    items = pki.list_control_certs(tmp_pki)
+    assert [(i["cn"], i["serial"]) for i in items] == [("control-plane", _serial(cert))]
+
+    bundle = pki.component_crls(tmp_pki)
+    nginx_dir = tmp_pki / "nginx"
+    assert (nginx_dir / "nodes.crl").is_file()
+    assert (nginx_dir / "control.crl").is_file()
+    assert bundle["nodes_crl"].startswith("-----BEGIN X509 CRL-----")
+    assert bundle["control_crl"].startswith("-----BEGIN X509 CRL-----")
+    assert bundle["next_update"]
+
+
+def test_revoke_control_cert_writes_only_control_crl(tmp_pki):
+    """吊销控制面证书：进 control CRL，不进 nodes CRL（两个域互不污染）。"""
+    cert = _control_cert(tmp_pki)
+    serial = int(_serial(cert), 16)
+    revoked = pki.revoke_control_cert(tmp_pki, "control-plane", "key_compromise")
+    assert [e["serial"] for e in revoked] == [_serial(cert)]
+
+    control = x509.load_pem_x509_crl((tmp_pki / "nginx" / "control.crl").read_bytes())
+    nodes = x509.load_pem_x509_crl((tmp_pki / "nginx" / "nodes.crl").read_bytes())
+    assert serial in {e.serial_number for e in control}
+    assert serial not in {e.serial_number for e in nodes}
+    assert pki.list_control_certs(tmp_pki)[0]["reason"] == "key_compromise"
+
+
+def test_revoke_control_cert_rejects_bad_input(tmp_pki):
+    with pytest.raises(ValueError, match="unknown revocation reason"):
+        pki.revoke_control_cert(tmp_pki, "control-plane", "nope")
+    with pytest.raises(ValueError, match="invalid serial"):
+        pki.revoke_control_cert(tmp_pki, "control-plane", serial="zz")
+
+
+def test_control_cert_endpoints(client, tmp_pki):
+    """API：列出与吊销 control 证书；吊销后 CRL 可见。"""
+    cert = _control_cert(tmp_pki)
+    serial = _serial(cert)
+    listed = client.get("/pki/control", headers={"Authorization": "Bearer x"}).json()
+    assert [(i["cn"], i["serial"]) for i in listed] == [("control-plane", serial)]
+
+    res = client.delete("/pki/control/control-plane?reason=key_compromise",
+                        headers={"Authorization": "Bearer x"})
+    assert res.status_code == 200, res.text
+    assert res.json()["serials"] == [serial]
+    crl = x509.load_pem_x509_crl((tmp_pki / "nginx" / "control.crl").read_bytes())
+    assert int(serial, 16) in {e.serial_number for e in crl}
+
+    again = client.delete("/pki/control/control-plane",
+                          headers={"Authorization": "Bearer x"})
+    assert again.status_code == 404
+
+
 def test_renew_accepts_unrevoked_serial(client, tmp_pki, monkeypatch):
     """未吊销的序列号走到签发（签发链路 mock，只验证闸门放行）。"""
     certs = _issue(tmp_pki)

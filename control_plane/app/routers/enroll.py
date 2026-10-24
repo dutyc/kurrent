@@ -102,6 +102,12 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
         "ca_nodes_crt": pki.ca_cert_pem(config.settings.pki_dir, "nodes").decode(),
         "ca_control_crt": pki.ca_cert_pem(config.settings.pki_dir, "control").decode(),
     }
+    # 首次引导即拿到吊销表：入站按 serial 校验 peer，出站 TLS 加载同一份。
+    # CRL 生成失败不让 enroll 失败（节点会以 degraded 状态启动并重试拉取）。
+    try:
+        resp.update(pki.component_crls(config.settings.pki_dir))
+    except Exception:
+        log.exception("enroll: component CRL bundle unavailable")
     # nvmet-host 组件凭据派生（能力上报驱动，签发不预知后端）：agent 上报
     # backend=nvmet → 签发绑 agent_id 的派生 token 随响应下发（agent 落盘供
     # nvmet-host 容器引导）；派生前清理旧条目（幂等重建）；stgt/lio 无该组件不派生。
@@ -148,6 +154,17 @@ def enroll(req: EnrollReq, request: Request, authorization: str = Header("", ali
     except Exception:
         pki.release_bootstrap_token(config.settings.pki_dir, token_id)
         raise
+
+
+@router.get("/crl")
+@principal("component")
+def component_crl() -> dict:
+    """组件定期拉取吊销表（nodes + control），无需重签或重启即可生效。
+
+    nginx 只放行 class=component 的 mTLS 请求；返回 PEM 与 next_update，
+    节点侧解析后用于入站 serial 校验与出站 TLS 上下文。
+    """
+    return pki.component_crls(config.settings.pki_dir)
 
 
 @router.post("/renew")

@@ -123,6 +123,46 @@ else
     fail "控制面未写 /app/state/audit.jsonl"
 fi
 
+# ── F-11：组件面 CRL 分发（nodes/control 双表，fail-closed 的原料在盘上）──
+for crl in users.crl clients.crl nodes.crl control.crl; do
+    if docker exec kurrent-control-plane test -s "/app/state/pki/nginx/$crl"; then
+        pass "控制面已生成 $crl"
+    else
+        fail "控制面缺少 /app/state/pki/nginx/$crl"
+    fi
+done
+check_code 401 "组件 CRL 端点强制客户端证书" "$(code "$BASE/api/cp/enroll/crl")"
+check_code 403 "人类证书不能取组件 CRL（class=human）" \
+    "$(code --cert "$CERT" --key "$KEY" "$BASE/api/cp/enroll/crl")"
+if [ -n "$COMP_CERT" ]; then
+    CRL_JSON=$(curl -sk --max-time 5 --cert "$COMP_CERT" --key "$COMP_KEY" "$BASE/api/cp/enroll/crl")
+    if printf '%s' "$CRL_JSON" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for key in ("nodes_crl", "control_crl"):
+    assert "BEGIN X509 CRL" in data[key], key
+assert data["next_update"], "no next_update"
+' 2>/dev/null; then
+        pass "组件证书可取 nodes + control CRL"
+    else
+        fail "组件 CRL 响应结构不符或缺少 PEM"
+    fi
+else
+    printf 'SKIP  组件 CRL 响应断言（未找到可用组件证书）\n'
+fi
+check_code 200 "公开 nodes.crl 可匿名获取" "$(code "$BASE/crl/nodes.crl")"
+if curl -sk --max-time 5 "$BASE/crl/nodes.crl" | head -1 | grep -q 'BEGIN X509 CRL'; then
+    pass "公开 nodes.crl 返回 PEM"
+else
+    fail "公开 nodes.crl 不是 PEM CRL"
+fi
+check_code 405 "公开 nodes.crl 拒绝 POST" "$(code -X POST "$BASE/crl/nodes.crl")"
+check_code 401 "control CA 台账需认证" "$(code "$BASE/api/cp/pki/control")"
+check_code 200 "admin 可读 control CA 台账" \
+    "$(code --cert "$CERT" --key "$KEY" "$BASE/api/cp/pki/control")"
+check_code 404 "吊销不存在的 control 证书 404（admin）" \
+    "$(code -X DELETE --cert "$CERT" --key "$KEY" "$BASE/api/cp/pki/control/probe-none")"
+
 # ── P3：会话登记与逐个吊销（I8）──
 SESSION_JAR=$(mktemp)
 SESSION_HDR=$(mktemp)

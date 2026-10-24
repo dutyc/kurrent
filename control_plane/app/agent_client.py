@@ -1,11 +1,23 @@
+import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 import ssl
 from typing import Any
 
 import httpx
+from cryptography import x509
 
 from .config import settings
+
+
+def _check_crl(path: Path) -> None:
+    """出站前确认 nodes CRL 存在且未过期：缺失/过期时 fail-closed，不降级。"""
+    try:
+        crl = x509.load_pem_x509_crl(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise AgentAPIError("-", 503, f"nodes CRL unavailable: {path}") from exc
+    if _dt.datetime.now(_dt.timezone.utc) >= crl.next_update_utc:
+        raise AgentAPIError("-", 503, f"nodes CRL expired: {path}")
 
 
 class AgentAPIError(Exception):
@@ -55,6 +67,7 @@ class AgentClient:
         self.timeout = timeout
         comp_dir = settings.pki_dir / "components" / settings.control_plane_component
         self.ca_cert = ca_cert or settings.pki_dir / "ca" / "nodes" / "ca.crt"
+        self.crl = settings.pki_dir / "nginx" / "nodes.crl"
         self.client_cert = client_cert or comp_dir / "client.crt"
         self.client_key = client_key or comp_dir / "client.key"
         self._tls_context = None
@@ -66,7 +79,10 @@ class AgentClient:
         兼容问题（经宿主端口映射的连接会 Broken pipe），且项目 TLS ≤ 1.2 约束
         （nginx 443 同，iPXE mbedTLS 封顶）。
         """
+        _check_crl(self.crl)
         ctx = ssl.create_default_context(cafile=str(self.ca_cert))
+        ctx.load_verify_locations(str(self.crl))
+        ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.maximum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(str(self.client_cert), str(self.client_key))

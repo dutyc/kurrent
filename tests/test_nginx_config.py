@@ -68,13 +68,14 @@ def test_identity_headers_default_to_none_and_opt_in():
     proxying = {path: body for path, body in blocks.items() if "proxy_pass" in body}
     assert set(proxying) == {
         "/healthz", "/boot-vars", "/devices/report", "/devices/challenge",
-        "/devices/rotate", "/api/cp/", "/api/cp/enroll/renew",
+        "/devices/rotate", "/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl",
     }
 
     for path, body in proxying.items():
         includes = re.findall(r"include\s+snippets/proxy-identity-(\w+)\.conf;", body)
         assert len(includes) == 1, f"{path} 必须恰好 include 一个身份头片段，实际 {includes}"
-        expected = "client" if path in {"/api/cp/", "/api/cp/enroll/renew"} else "none"
+        expected = ("client" if path in
+                    {"/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl"} else "none")
         assert includes[0] == expected, f"{path} 身份头片段应为 {expected}"
 
     # 客户端自带头不得被原样转发：none 片段必须清空全部五个头
@@ -110,6 +111,10 @@ def test_identity_headers_default_to_none_and_opt_in():
     assert 'if ($valid_client_class != "component") { return 403; }' in renew
     # 审计来源：renew 也必须带上 nginx 覆盖写入的真实客户端地址
     assert "proxy_set_header X-Real-IP $remote_addr;" in renew
+    crl = blocks["/api/cp/enroll/crl"]
+    assert 'if ($ssl_client_verify != "SUCCESS") { return 401; }' in crl
+    assert 'if ($valid_client_class != "component") { return 403; }' in crl
+    assert "proxy_pass http://control_plane/enroll/crl;" in crl
 
 
 def test_component_class_covers_legacy_promoted_ca():
@@ -118,6 +123,25 @@ def test_component_class_covers_legacy_promoted_ca():
     text = CONF.read_text(encoding="utf-8")
     assert '"~*CN=kurrent-ca(,|/|$)" component;' in text
     assert '"~*CN=kurrent-ca-users" human;' in text
+
+
+def test_public_nodes_crl_is_unauthenticated_and_read_only():
+    """被吊销证书无法通过 mTLS CRL 端点自取吊销表：公开一条只读的 nodes.crl，
+    供组件启动自检。只含序列号，不注入身份头，禁止缓存。"""
+    text = CONF.read_text(encoding="utf-8")
+    assert "location = /crl/nodes.crl {" in text
+    block = _location_blocks(text)["/crl/nodes.crl"]
+    assert "alias /etc/nginx/pki/nodes.crl;" in block
+    assert "default_type application/pkix-crl;" in block
+    assert "proxy_pass" not in block
+    assert "ssl_client_verify" not in block
+    assert "valid_client_class" not in block
+    assert "proxy-identity" not in block
+    assert 'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' in block
+    assert 'add_header Cache-Control "no-store" always;' in block
+    for header in ("X-Content-Type-Options nosniff", "X-Frame-Options SAMEORIGIN",
+                   "Referrer-Policy no-referrer"):
+        assert f"add_header {header} always;" in block
 
 
 def test_control_plane_has_no_docker_access():

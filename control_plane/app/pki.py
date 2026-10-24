@@ -55,9 +55,12 @@ _TOKEN_TOUCH: dict[str, float] = {}
 # 证书登记/CRL 写锁：签发、吊销与列表同步交错时以锁串行，文件原子替换
 _CRL_LOCK = threading.RLock()
 CA_DAYS = 3650
-# CRL：30 天有效期 / 签发时 7 天 next_update；吊销后立即重签并由控制面 reload nginx
+# CRL：30 天有效期 / 签发时 7 天 next_update；吊销后立即重签并由控制面 reload nginx。
+# 组件域（nodes/control）由节点侧定期拉取，next_update 放宽到 30 天：控制面短暂
+# 不可达时节点仍可凭旧 CRL 互相校验，超过 30 天则 fail-closed。
 CRL_DAYS = 30
 CRL_NEXT_UPDATE_DAYS = 7
+COMPONENT_CRL_NEXT_UPDATE_DAYS = 30
 USERS_REGISTRY_FILENAME = "issued.yml"
 # 人类证书 CN 兼作目录名：限制字符集，杜绝路径穿越
 USER_CN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
@@ -509,7 +512,147 @@ def component_cert_revoked(pki_dir: Path, serial: str) -> bool:
     return bool(isinstance(entry, dict) and entry.get("revoked_at"))
 
 
-def _build_crl(pki_dir: Path, kind: str, revoked: list[dict]) -> bytes:
+# ── 控制面自身证书（control 域）登记与吊销 ──
+# control CA 只签控制面自身 client cert（cp→agent 的 mTLS 身份）。组件入站按
+# control CRL 判断该证书是否仍有效；吊销后节点在下一个刷新周期内拒绝控制面连接。
+
+def _control_registry_path(pki_dir: Path) -> Path:
+    return Path(pki_dir) / "control" / USERS_REGISTRY_FILENAME
+
+
+def _load_control_registry(pki_dir: Path) -> dict:
+    try:
+        doc = yaml.safe_load(_control_registry_path(pki_dir).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _save_control_registry(pki_dir: Path, registry: dict) -> None:
+    path = _control_registry_path(pki_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".yml.tmp")
+    tmp.write_text(yaml.safe_dump(registry, allow_unicode=True, sort_keys=True), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _sync_control_registry(pki_dir: Path) -> dict:
+    """把 components/*/client.crt 中由 control CA 签发、尚未登记的证书补进台账。
+
+    兼容 P4 之前生成的控制面证书：控制面不保存组件证书文件，但自身 client cert
+    落在 components/<component>/client.crt，可按 issuer 识别。
+    """
+    registry = _load_control_registry(pki_dir)
+    try:
+        control_ca = _load_cert(ca_dir(pki_dir, "control") / CA_FILENAME)
+        issuer_cn = _subject_cn(control_ca)
+    except (OSError, ValueError):
+        return registry
+    changed = False
+    for cert_path in sorted((Path(pki_dir) / "components").glob("*/client.crt")):
+        try:
+            cert = _load_cert(cert_path)
+        except (OSError, ValueError):
+            continue
+        if _issuer_cn(cert) != issuer_cn:
+            continue
+        key = format(cert.serial_number, "x")
+        if key in registry:
+            continue
+        registry[key] = _cert_registry_entry(cert)
+        changed = True
+    if changed:
+        _save_control_registry(pki_dir, registry)
+    return registry
+
+
+def register_control_cert(pki_dir: Path, cert_pem: bytes) -> None:
+    """登记一张 control CA 签发的控制面证书（按序列号幂等）。"""
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    key = format(cert.serial_number, "x")
+    with _CRL_LOCK:
+        registry = _load_control_registry(pki_dir)
+        if key in registry:
+            return
+        registry[key] = _cert_registry_entry(cert)
+        _save_control_registry(pki_dir, registry)
+
+
+def list_control_certs(pki_dir: Path) -> list[dict]:
+    """列出 control 域证书（含已吊销/已过期）；serial 为 hex，fingerprint 为 sha256。"""
+    with _CRL_LOCK:
+        registry = _sync_control_registry(pki_dir)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        items = []
+        for key, entry in registry.items():
+            if not isinstance(entry, dict):
+                continue
+            expires = _parse_ts(str(entry.get("expires_at") or ""))
+            items.append({
+                "cn": str(entry.get("cn") or ""),
+                "serial": key,
+                "fingerprint": str(entry.get("fingerprint") or ""),
+                "created_at": str(entry.get("created_at") or ""),
+                "expires_at": str(entry.get("expires_at") or ""),
+                "revoked_at": str(entry.get("revoked_at") or ""),
+                "reason": str(entry.get("reason") or ""),
+                "expired": expires is None or expires <= now,
+            })
+        items.sort(key=lambda e: (e["cn"], e["created_at"]))
+        return items
+
+
+def revoke_control_cert(pki_dir: Path, cn: str, reason: str = "unspecified",
+                        serial: str | None = None) -> list[dict]:
+    """吊销控制面自身证书（control CA）：标记 + 重签 control CRL。
+
+    与组件吊销分开：control 域不进 443 管理面，不触发 nginx reload；节点侧按
+    刷新周期拉取 control CRL 后拒绝已吊销的控制面连接。
+    """
+    if reason not in REVOCATION_REASONS:
+        raise ValueError(f"unknown revocation reason: {reason}")
+    cn = cn.strip()
+    if not cn:
+        raise ValueError("cn required")
+    target = None
+    if serial is not None:
+        raw = serial.strip().lower().removeprefix("0x")
+        if not raw or not re.fullmatch(r"[0-9a-f]+", raw):
+            raise ValueError(f"invalid serial: {serial}")
+        target = int(raw, 16)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    with _CRL_LOCK:
+        registry = _sync_control_registry(pki_dir)
+        revoked: list[dict] = []
+        for entry in registry.values():
+            if not isinstance(entry, dict) or entry.get("cn") != cn:
+                continue
+            if entry.get("revoked_at"):
+                continue
+            if target is not None and int(entry.get("serial") or 0) != target:
+                continue
+            entry["revoked_at"] = now.isoformat()
+            entry["reason"] = reason
+            revoked.append(entry)
+        if revoked:
+            _save_control_registry(pki_dir, registry)
+            write_nginx_crl(pki_dir)
+            from . import audit
+            audit.alarm("crl_updated",
+                        detail=f"control cn={cn}, serials="
+                               f"{[format(int(e['serial']), 'x') for e in revoked]}",
+                        route="pki", principal=cn)
+        return [
+            {"serial": format(int(e["serial"]), "x"),
+             "fingerprint": str(e.get("fingerprint") or ""),
+             "reason": reason}
+            for e in revoked
+        ]
+
+
+def _build_crl(pki_dir: Path, kind: str, revoked: list[dict],
+               next_update_days: int = CRL_NEXT_UPDATE_DAYS) -> bytes:
     """按指定 CA 签发一张 CRL；revoked 条目为登记表记录（含 serial/revoked_at/reason）。"""
     ca_cert = _load_cert(ca_dir(pki_dir, kind) / CA_FILENAME)
     ca_key = _load_key(ca_dir(pki_dir, kind) / CA_KEY_FILENAME)
@@ -518,7 +661,7 @@ def _build_crl(pki_dir: Path, kind: str, revoked: list[dict]) -> bytes:
         x509.CertificateRevocationListBuilder()
         .issuer_name(ca_cert.subject)
         .last_update(now - _dt.timedelta(minutes=5))
-        .next_update(now + _dt.timedelta(days=CRL_NEXT_UPDATE_DAYS))
+        .next_update(now + _dt.timedelta(days=next_update_days))
     )
     for entry in revoked:
         revoked_at = _parse_ts(str(entry.get("revoked_at") or "")) or now
@@ -542,9 +685,14 @@ def _build_crl(pki_dir: Path, kind: str, revoked: list[dict]) -> bytes:
 
 
 def write_nginx_crl(pki_dir: Path) -> Path:
-    """重签 users/nodes CRL 并拼接为 nginx ssl_crl 使用的 clients.crl。
+    """重签 users/nodes/control CRL 并写入 nginx 卷。
 
-    幂等：启动时即使无吊销也写空 CRL（nginx 配置引用该文件，缺失会导致启动失败）。
+    - clients.crl：users + nodes 拼接，nginx 443 的 ssl_crl 使用；
+    - nodes.crl：组件域（agent/nvmet-host）单独使用，出站 TLS 加载；
+    - control.crl：控制面自身证书，组件入站校验使用。
+
+    幂等：启动时即使无吊销也写空 CRL（nginx 配置引用 clients.crl，缺失会导致启动失败）。
+    组件域 next_update 放宽到 30 天，容忍控制面短暂不可达。
     """
     with _CRL_LOCK:
         registry = _sync_user_registry(pki_dir)
@@ -558,16 +706,50 @@ def write_nginx_crl(pki_dir: Path) -> Path:
             e for e in component_registry.values()
             if isinstance(e, dict) and e.get("revoked_at") and e.get("serial") is not None
         ]
-        nodes_pem = _build_crl(pki_dir, "nodes", nodes_revoked)
+        nodes_pem = _build_crl(pki_dir, "nodes", nodes_revoked,
+                               COMPONENT_CRL_NEXT_UPDATE_DAYS)
+        control_registry = _sync_control_registry(pki_dir)
+        control_revoked = [
+            e for e in control_registry.values()
+            if isinstance(e, dict) and e.get("revoked_at") and e.get("serial") is not None
+        ]
+        control_pem = _build_crl(pki_dir, "control", control_revoked,
+                                 COMPONENT_CRL_NEXT_UPDATE_DAYS)
         target_dir = Path(pki_dir) / "nginx"
         target_dir.mkdir(parents=True, exist_ok=True)
-        for name, data in (("users.crl", users_pem), ("clients.crl", users_pem + nodes_pem)):
+        for name, data in (
+            ("users.crl", users_pem),
+            ("clients.crl", users_pem + nodes_pem),
+            ("nodes.crl", nodes_pem),
+            ("control.crl", control_pem),
+        ):
             path = target_dir / name
             tmp = path.with_suffix(".crl.tmp")
             tmp.write_bytes(data)
             os.chmod(tmp, 0o644)
             os.replace(tmp, path)
         return target_dir / "clients.crl"
+
+
+def component_crls(pki_dir: Path) -> dict[str, str]:
+    """组件分发用 CRL：返回 nodes/control 的 PEM 文本与 next_update。
+
+    文件缺失时补签一次（升级后首次 enroll 可能早于启动重签）。
+    """
+    with _CRL_LOCK:
+        target = Path(pki_dir) / "nginx"
+        nodes_path = target / "nodes.crl"
+        control_path = target / "control.crl"
+        if not nodes_path.is_file() or not control_path.is_file():
+            write_nginx_crl(pki_dir)
+        nodes_pem = nodes_path.read_text(encoding="utf-8")
+        control_pem = control_path.read_text(encoding="utf-8")
+        nodes_crl = x509.load_pem_x509_crl(nodes_pem.encode())
+        return {
+            "nodes_crl": nodes_pem,
+            "control_crl": control_pem,
+            "next_update": nodes_crl.next_update_utc.isoformat(),
+        }
 
 
 def ensure_control_plane_client_cert(pki_dir: Path, ca_cert, ca_key,
@@ -586,6 +768,7 @@ def ensure_control_plane_client_cert(pki_dir: Path, ca_cert, ca_key,
             cert = _load_cert(cert_path)
             if (cert.not_valid_after_utc > _dt.datetime.now(_dt.timezone.utc)
                     and _issuer_cn(cert) == _subject_cn(ca_cert)):
+                register_control_cert(pki_dir, cert_path.read_bytes())
                 return cert_path, key_path
             log.warning("pki: control-plane client cert expired or issued by another CA, rotating")
         except ValueError:
@@ -601,6 +784,7 @@ def ensure_control_plane_client_cert(pki_dir: Path, ca_cert, ca_key,
     ))
     os.chmod(key_path, 0o600)
     cert_path.write_bytes(cert)
+    register_control_cert(pki_dir, cert)
     log.info("pki: control-plane client cert ready: %s", cert_path)
     return cert_path, key_path
 

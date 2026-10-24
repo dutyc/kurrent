@@ -66,8 +66,16 @@ def issue_user_cert(cn: str, request: Request, req: IssueUserCertRequest | None 
 
 @router.get("/pki/users")
 def list_user_certs() -> list[dict]:
-    """列出 users 域证书（含已吊销/已过期）：serial 为 hex，fingerprint 为 sha256。"""
-    return pki.list_user_certs(settings.pki_dir)
+    """列出 users 域证书（含已吊销/已过期）：serial 为 hex，fingerprint 为 sha256。
+
+    groups 来自 users.yml（证书本身只承载 CN）；已从目录移除的用户返回空组。
+    """
+    items = pki.list_user_certs(settings.pki_dir)
+    groups = {cn: users.user_groups(settings.users_file, cn) or []
+              for cn in {item["cn"] for item in items}}
+    for item in items:
+        item["groups"] = groups.get(item["cn"], [])
+    return items
 
 
 @router.delete("/pki/users/{cn}")
@@ -111,6 +119,45 @@ def revoke_user_cert(cn: str, request: Request, reason: str = "unspecified",
         "revoked": cn,
         "serials": [e["serial"] for e in revoked],
         "sessions": kicked,
+        "reason": reason,
+    }
+
+
+@router.get("/pki/control")
+def list_control_certs() -> list[dict]:
+    """列出 control 域证书（控制面自身 client cert；含已吊销/已过期）。"""
+    return pki.list_control_certs(settings.pki_dir)
+
+
+@router.delete("/pki/control/{cn}")
+def revoke_control_cert(cn: str, request: Request, reason: str = "unspecified",
+                        serial: str | None = None) -> dict:
+    """吊销控制面自身证书（control CA）：标记 + 重签 control CRL。
+
+    节点在下一个刷新周期内拒绝该证书；控制面需要删除本地 client.crt 并重启以
+    签发新证书，否则 cp→agent 出站与 agent 入站都会失败。不能吊销当前请求身份
+    自己的证书；不存在未吊销证书返回 404。
+    """
+    ident: Identity = request.state.identity
+    cn = cn.strip()
+    if ident.name == cn:
+        raise HTTPException(status_code=400,
+                            detail="refusing to revoke the current principal's certificate")
+    try:
+        revoked = pki.revoke_control_cert(settings.pki_dir, cn, reason, serial=serial)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not revoked:
+        target = f" for serial {serial}" if serial else ""
+        record("pki.control.revoke", "failed", client=client_host(request), cn=cn,
+               serial=serial or "", error="no active certificate")
+        raise HTTPException(status_code=404,
+                            detail=f"no active control certificate{target} for {cn}")
+    record("pki.control.revoke", "ok", client=client_host(request), cn=cn,
+           serials=[e["serial"] for e in revoked])
+    return {
+        "revoked": cn,
+        "serials": [e["serial"] for e in revoked],
         "reason": reason,
     }
 
