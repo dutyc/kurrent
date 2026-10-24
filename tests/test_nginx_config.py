@@ -193,3 +193,12 @@ def test_static_roots_do_not_follow_symlinks():
     blocks = _location_blocks(CONF.read_text(encoding="utf-8"))
     assert "disable_symlinks on from=/data;" in blocks["/file/"]
     assert "disable_symlinks on from=/tftp;" in blocks["/tftp/"]
+
+
+def test_dnsmasq_tftp_root_only_has_first_stage_files():
+    """TFTP 根只挂首跳的固件与指针；配置、菜单等脚本必须经 HTTPS 提供。"""
+    compose = COMPOSE.read_text(encoding="utf-8")
+    dnsmasq = _service_block(compose, "kurrent-dnsmasq")
+    assert "- ./tftp:/var/tftp:ro" not in dnsmasq
+    assert "- ./tftp/snponly.efi:/var/tftp/snponly.efi:ro" in dnsmasq
+    assert "- ./tftp/boot.ipxe:/var/tftp/boot.ipxe:ro" in dnsmasq

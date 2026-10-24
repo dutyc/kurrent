@@ -16,6 +16,7 @@ from pathlib import Path
 _SET_RE = re.compile(r"^set\s+([A-Za-z0-9_-]+)\s+(.+?)\s*$")
 _DNSMASQ_BOOT_RE = re.compile(r"^dhcp-boot=tag:([A-Za-z0-9_-]+),([^,\s]+)")
 _VERSION_RE = re.compile(rb"\b\d+\.\d+\.\d+\+?(?: \(g[0-9a-f]+\))?")
+_HTTPS_TFTP_RE = re.compile(r"^https?://[^/]+/tftp/(.+)$")
 
 _FIRMWARE_TAG = "efi64"
 _STAGE2_TAG = "ipxe"
@@ -100,14 +101,40 @@ def _firmware_meta(path: Path) -> dict:
     }
 
 
-def _menu_path(url: str) -> str | None:
-    """menu-url 只接受 nginx 同源的 /tftp 前缀；其它地址无法从本地判定。"""
-    for prefix in ("${https-url}tftp/",):
-        if url.startswith(prefix):
-            return url[len(prefix):]
-    if url.startswith("tftp://"):
-        _, _, rest = url.partition("://")
-        return rest.split("/", 1)[1] if "/" in rest else ""
+def _local_rel(url: str | None) -> str | None:
+    """把脚本里的配置/菜单地址映射回 tftp 根内的相对路径。
+
+    支持 HTTPS 绝对地址、${https-url}tftp/ 前缀和旧的 tftp:// 形式；
+    地址不在 /tftp/ 下时返回 None（无法从本地判定，也不去读）。
+    """
+    if not url:
+        return None
+    value = url.strip().rstrip("\\")
+    if value.startswith("${https-url}tftp/"):
+        return value[len("${https-url}tftp/"):]
+    if value.startswith("tftp://"):
+        _, _, rest = value.partition("://")
+        return rest.split("/", 1)[1] if "/" in rest else None
+    match = _HTTPS_TFTP_RE.match(value)
+    if match:
+        return match.group(1)
+    if "://" in value:
+        return None
+    return value
+
+
+def _find_cfg_name(boot_text: str) -> str | None:
+    for raw in boot_text.splitlines():
+        line = _strip_comment(raw)
+        if not line.startswith("chain"):
+            continue
+        for token in line.split()[1:]:
+            value = token.rstrip("\\")
+            if value.startswith("--") or not value.endswith(".cfg"):
+                continue
+            rel = _local_rel(value)
+            if rel:
+                return rel
     return None
 
 
@@ -154,20 +181,14 @@ def inventory(dnsmasq_conf: str | Path, tftp_dir: str | Path) -> dict:
 
     boot_script = boots.get(_STAGE2_TAG)
     boot_text = _read_inside(tftp, boot_script) or ""
-    cfg_name = next(
-        (token.rstrip("\\") for line in boot_text.splitlines()
-         if line.strip().startswith("chain")
-         for token in line.split()[1:]
-         if not token.startswith("--") and token.rstrip("\\").endswith(".cfg")),
-        None,
-    )
+    cfg_name = _find_cfg_name(boot_text)
     cfg_text = _read_inside(tftp, cfg_name) or ""
     menu_url = next(
         (m.group(2) for raw in cfg_text.splitlines()
          if (m := _SET_RE.match(_strip_comment(raw))) and m.group(1) == "menu-url"),
         None,
     )
-    menu_rel = _menu_path(menu_url) if menu_url else None
+    menu_rel = _local_rel(menu_url)
     menu_text = _read_inside(tftp, menu_rel) or ""
 
     stage2 = []

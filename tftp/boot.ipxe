@@ -1,26 +1,12 @@
 #!ipxe
 
-# Global variables used by all other iPXE scripts
-chain --autofree boot.ipxe.cfg ||
+# 唯一的 TFTP 引导脚本：只做一次 HTTPS 跳转。
+# https-port 必须先在这里设置（本文件先于 boot.ipxe.cfg 执行），并与
+# docker-compose 的 KURRENT_HTTPS_PORT、boot.ipxe.cfg 的 set https-port 保持一致。
+set https-port 443
 
-# Boot <boot-url>/<boot-dir>/hostname-<hostname>.ipxe
-# if hostname DHCP variable is set and script is present
-isset ${hostname} && chain --replace --autofree ${boot-dir}hostname-${hostname}.ipxe ||
+# 取回配置：变量、设备身份链与 /boot-vars 都在这个脚本里，之后全链 HTTPS + TOFU
+chain --autofree https://${next-server}:${https-port}/tftp/boot.ipxe.cfg ||
 
-# Boot <boot-url>/<boot-dir>/uuid-<UUID>.ipxe
-# if SMBIOS UUID variable is set and script is present
-isset ${uuid} && chain --replace --autofree ${boot-dir}uuid-${uuid}.ipxe ||
-
-# Boot <boot-url>/<boot-dir>/mac-010203040506.ipxe if script is present
-chain --replace --autofree ${boot-dir}mac-${mac:hexraw}.ipxe ||
-
-# Boot <boot-url>/<boot-dir>/pci-8086100e.ipxe if one type of
-# PCI Intel adapter is present and script is present
-chain --replace --autofree ${boot-dir}pci-${pci/${busloc}.0.2}${pci/${busloc}.2.2}.ipxe ||
-
-# Boot <boot-url>/<boot-dir>/chip-82541pi.ipxe if one type of
-# PCI Intel adapter is present and script is present
-chain --replace --autofree ${boot-dir}chip-${chip}.ipxe ||
-
-# Boot <boot-url>/menu.ipxe script if all other options have been exhausted
+# 配置成功时 ${menu-url} 已设置；失败时为空，chain 直接失败
 chain --replace --autofree ${menu-url} ||
