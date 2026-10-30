@@ -201,7 +201,7 @@ curl -s "$BASE_URL/workers" \
 | `POST` | `/workers/luns/disk/batch` | 批量给多个 Worker 创建系统盘（逐项点名节点，或 `workers` 交给控制面放置；`dry_run` 出计划） |
 | `DELETE` | `/workers/{worker_id}/luns/disk/{os_tag}` | 删除 Worker 单个系统盘（保留/删除 .img 文件） |
 | `PUT` | `/workers/{worker_id}/default-disk` | 设置 Worker 默认启动配置（默认盘 os_tag / 菜单项 / 超时） |
-| `PUT` | `/workers/{worker_id}/mac` | 修改 Worker 的 MAC 绑定（更新 dnsmasq 绑定并 HUP 重载，审计旧/新 MAC，见 7.5） |
+| `PUT` | `/workers/{worker_id}/mac` | 修改 Worker 的 MAC 绑定（设备台账权威，dnsmasq 投影缺失补写；审计旧/新 MAC，见 7.5） |
 | `GET` | `/workers` | 列出 Worker |
 | `GET` | `/workers/{worker_id}` | 查询单个 Worker |
 | `GET` | `/workers/{worker_id}/status` | 查询 Worker 台账与实时状态 |
@@ -1302,14 +1302,8 @@ Control Plane 会：
 
 1. 校验 `worker_id`、`hostname`；传了 `mac` 时校验 `mac`
 2. 写入 `state/workers.yml`（`disks` 为空数组，`state=registered`）
-3. 传了 `mac` 时绑定设备（写 `state/devices.yml` 的 `bound_worker_id` + 写 `dnsmasq/dhcp-hosts.conf`）
-4. 通过 Docker 向 `ipxe-dnsmasq` 容器发送 HUP：
-
-```bash
-docker exec ipxe-dnsmasq killall -HUP dnsmasq
-```
-
-5. 如指定 `windows_iso`，额外调用 Agent 创建 CD target（安装期光驱，与系统盘无关）
+3. 传了 `mac` 时绑定设备（写 `state/devices.yml` 的 `bound_worker_id` + 写 `dnsmasq/dhcp-hosts.conf`；dnsmasq 自监听该文件变化，无需 HUP）
+4. 如指定 `windows_iso`，额外调用 Agent 创建 CD target（安装期光驱，与系统盘无关）
 
 ### 请求体字段
 
@@ -1838,14 +1832,15 @@ curl -s -X DELETE "$BASE_URL/workers/worker-01/luns/disk/0d26b6f33a89?delete_fil
 
 ### 说明
 
-修改指定 Worker 的 **MAC 地址绑定**（hostname 不变）：Control Plane 会：
+修改指定 Worker 的 **MAC 地址绑定**（hostname 不变），内部映射为**设备换绑**。绑定关系以设备台账 `state/devices.yml` 为权威，`dnsmasq/dhcp-hosts.conf` 只是派生投影。Control Plane 会：
 
 1. 校验 Worker 存在（不存在时返回 `404`）
-2. 校验新 MAC 格式（非法返回 `400`）；**新 MAC 已被其他 hostname 占用时返回 `409`**（不写入，防止一 MAC 多 Worker）
-3. 更新 `dnsmasq/dhcp-hosts.conf` 中该 hostname 的绑定并 HUP 重载 dnsmasq（保持文件 inode 不变，文件级 bind mount 下重载立即可见）
-4. **审计记录 `worker.mac.update`（含 `old_mac` / `new_mac` / `changed` / `client`）**——即修改历史，可通过 `GET /operations` 查询；新 MAC 与旧 MAC 相同时 `changed=false`，不触发重载
+2. 校验新 MAC 格式（非法返回 `400`）与设备状态：新 MAC 须已在设备池中（`pooled`），且未被其他 Worker 绑定（已绑定其他 Worker / 已吊销时返回 `409`）
+3. 从设备台账反查当前绑定到该 Worker 的旧设备（**不依赖 dnsmasq 绑定**）：旧设备回池，新设备绑定到该 Worker
+4. 写 `dnsmasq/dhcp-hosts.conf`：该 hostname 已有绑定则替换，没有则补写（dnsmasq 自监听文件变化，无需 HUP）；投影写入失败则回滚台账
+5. **审计记录 `worker.mac.update`（含 `old_mac` / `new_mac` / `changed` / `client`）**——即修改历史，可通过 `GET /operations` 查询；台账未发生绑定变更（如重复设置同一 MAC）时 `changed=false`，此时只做投影补写
 
-> **注意**：`workers.yml` 台账不存 MAC，MAC 唯一权威在 `dnsmasq/dhcp-hosts.conf`，本端点直接改绑定文件；改完后 Worker 需重新获取 DHCP 租约（重启网卡 / 重新 PXE 启动）才会使用新 MAC 对应身份。
+> **注意**：`dnsmasq/dhcp-hosts.conf` 是设备台账的派生视图（`MAC -> hostname`），不是 MAC 的权威来源；即使绑定文件缺失或与台账不一致，本端点也能按台账完成换绑并补写投影。改完后 Worker 需重新获取 DHCP 租约（重启网卡 / 重新 PXE 启动）才会使用新 MAC 对应身份。
 
 ### Body 参数
 
@@ -1864,7 +1859,7 @@ curl -s -X PUT "$BASE_URL/workers/worker-01/mac" \
 
 ### 成功返回
 
-返回该 Worker 的完整台账（`mac` 字段为更新后的实时反查结果）。
+返回该 Worker 的完整台账（`mac` 字段来自设备台账的绑定反查）。
 
 ### 常见错误
 
@@ -1872,9 +1867,9 @@ curl -s -X PUT "$BASE_URL/workers/worker-01/mac" \
 |---:|---|
 | `400` | `mac` 格式非法 |
 | `401` | 缺少 Token 或 Token 错误 |
-| `404` | Worker 不存在，或该 hostname 在 dnsmasq 中无绑定 |
-| `409` | 新 MAC 已被其他 hostname 占用 |
-| `500` | dnsmasq 重载失败（绑定文件已更新） |
+| `404` | Worker 不存在 |
+| `409` | 新设备不在池中 / 已吊销 / 已绑定其他 Worker / dnsmasq 投影冲突（该 MAC 已绑定其他 hostname） |
+| `500` | 设备台账或 dnsmasq 绑定写入失败（台账已回滚） |
 
 ---
 
@@ -2082,7 +2077,7 @@ CLI：`kurrent workers credential show|set|revoke <worker_id>`；WebUI：Worker 
 
 ### 说明
 
-列出当前所有 Worker 台账。返回结果中的 `mac` 字段来自 `dnsmasq/dhcp-hosts.conf` 的实时反查。
+列出当前所有 Worker 台账。返回结果中的 `mac` 字段来自设备台账（`state/devices.yml` 中绑定到该 Worker 的设备）的反查；`dnsmasq/dhcp-hosts.conf` 只是派生投影。
 
 ### curl
 
@@ -2233,8 +2228,7 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 5. 再删 disk target
 6. 从 `workers.yml` 删除该 Worker
 7. **清空该 Worker 的凭据痕迹**：删掉 `state/credentials.yml` 的密钥条目与该 Worker 的推送台账（审计 `credential.forget`）——Worker 已不存在，若留下孤儿条目它既不可见（`GET /credential` 对不存在的 Worker 返回 404）也不可删，且同 id 的 Worker 重建时会**静默继承旧密钥**并把旧钥推给新机器的盘
-8. 从 `dnsmasq/dhcp-hosts.conf` 删除 `mac,hostname` 这一行
-9. HUP `ipxe-dnsmasq`
+8. 从 `dnsmasq/dhcp-hosts.conf` 删除 `mac,hostname` 这一行（dnsmasq 自监听文件变化，无需 HUP）
 
 `POST /workers/delete/batch`（11.1）同样联动解绑并清理凭据痕迹。
 
@@ -2913,7 +2907,7 @@ curl -X POST "$BASE_URL/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force
 
 ### 16.8 DELETE /devices/{mac}/bind
 
-解绑设备：回池（`state=pooled`、`bound_worker_id=null`），移除 dnsmasq 绑定并重载；Worker 的系统盘保留（其 `readiness` 降级为 `partial`/`idle`）。
+解绑设备：回池（`state=pooled`、`bound_worker_id=null`），移除 dnsmasq 绑定（dnsmasq 自监听文件变化）；Worker 的系统盘保留（其 `readiness` 降级为 `partial`/`idle`）。
 
 **409**：设备未绑定。**404**：设备不存在。
 

@@ -272,7 +272,9 @@ def batch_create_workers(req: BatchCreateWorkersRequest, request: Request):
 @router.put("/workers/{worker_id}/mac")
 def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Request):
     """修改 Worker 的 MAC 绑定（hostname 不变）：映射为设备换绑——
-    新 MAC 须在设备池中（pooled），绑定新设备；旧设备解绑回池。审计记 device.bind + worker.mac.update（兼容）。"""
+    新 MAC 须在设备池中（pooled），绑定新设备；旧设备解绑回池。
+    绑定关系以设备台账为权威：旧设备从 `devices.yml` 反查，dnsmasq 绑定是派生投影，
+    缺失不影响换绑（本端点负责补写）。审计记 device.bind + worker.mac.update（兼容）。"""
     worker_id = canonical_id(worker_id)
     new_mac = canonical_mac(req.mac)
 
@@ -285,13 +287,6 @@ def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Requ
         client_ip = client_host(request)
         record("worker.mac.update", "started", worker_id=worker_id, client=client_ip)
 
-        old_mac = dnsmasq.find_mac(hostname)
-        if old_mac == new_mac:
-            record("worker.mac.update", "ok", worker_id=worker_id, hostname=hostname,
-                   old_mac=old_mac, new_mac=new_mac, changed=False, client=client_ip)
-            return _enrich_worker(worker_id, record_)
-
-        # 新绑定落盘 + 旧设备回池（一次原子写）：预校验——新 MAC 设备须在池中且未绑定
         old_released: str | None = None
         with devices.locked():
             devs_data = devices.load()
@@ -302,44 +297,50 @@ def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Requ
             new_state = new_dev.get("state")
             if new_state == "revoked":
                 raise HTTPException(409, f"device revoked: {new_mac}")
-            if new_state == "bound":
-                raise HTTPException(409, f"device already bound to {new_dev.get('bound_worker_id')}: {new_mac}")
-            old_dev = devs.get(old_mac) if old_mac else None
-            if old_dev and old_dev.get("bound_worker_id") not in (None, worker_id):
-                raise HTTPException(409, f"device {old_mac} bound to unexpected worker: "
-                                    f"{old_dev.get('bound_worker_id')}")
+            bound_worker = new_dev.get("bound_worker_id") if new_state == "bound" else None
+            if bound_worker and bound_worker != worker_id:
+                raise HTTPException(409, f"device already bound to {bound_worker}: {new_mac}")
 
-            new_dev["state"] = "bound"
-            new_dev["bound_worker_id"] = worker_id
-            if old_dev and old_dev.get("state") == "bound" and old_dev.get("bound_worker_id") == worker_id:
-                old_dev["state"] = "pooled"
-                old_dev["bound_worker_id"] = None
-                old_released = old_mac
-            try:
-                devices.save(devs_data)
-            except Exception as exc:
-                raise HTTPException(500, f"devices save failed: {exc}") from exc
+            old_mac = next((mac for mac, dev in devs.items()
+                            if dev.get("state") == "bound" and dev.get("bound_worker_id") == worker_id), None)
+            changed = bound_worker != worker_id
+            if changed:
+                new_dev["state"] = "bound"
+                new_dev["bound_worker_id"] = worker_id
+                if old_mac and old_mac != new_mac:
+                    old_dev = devs[old_mac]
+                    old_dev["state"] = "pooled"
+                    old_dev["bound_worker_id"] = None
+                    old_released = old_mac
+                try:
+                    devices.save(devs_data)
+                except Exception as exc:
+                    raise HTTPException(500, f"devices save failed: {exc}") from exc
 
-        # dnsmasq 替换绑定（hostname 不变，仅换 MAC）
+        # dnsmasq 是设备台账的派生投影：缺失补写、已有替换（hostname 不变，仅换 MAC）
         try:
-            replaced = dnsmasq.replace_binding(hostname, new_mac)
+            dnsmasq.set_binding(new_mac, hostname)
         except ValueError as exc:
-            _rollback_devices_binding(new_mac, old_released, worker_id)
+            if changed:
+                _rollback_devices_binding(new_mac, old_released, worker_id)
             record("worker.mac.update", "failed", worker_id=worker_id, client=client_ip, error=str(exc))
             raise HTTPException(409, str(exc)) from exc
-        if replaced is None:
-            _rollback_devices_binding(new_mac, old_released, worker_id)
-            record("worker.mac.update", "failed", worker_id=worker_id, client=client_ip,
-                   error=f"no dnsmasq binding for hostname: {hostname}")
-            raise HTTPException(409, f"no dnsmasq binding for hostname: {hostname}")
+        except Exception as exc:
+            if changed:
+                _rollback_devices_binding(new_mac, old_released, worker_id)
+            record("worker.mac.update", "failed", worker_id=worker_id, client=client_ip, error=str(exc))
+            raise HTTPException(500, f"dnsmasq binding failed: {exc}") from exc
+
         record("worker.mac.update", "ok", worker_id=worker_id, hostname=hostname,
-               old_mac=old_mac, new_mac=new_mac, changed=True, client=client_ip)
+               old_mac=old_mac, new_mac=new_mac, changed=changed, client=client_ip)
         if old_released:
             record("device.unbind", "ok", mac=old_released, worker_id=worker_id,
                    reason="worker.mac.update", client=client_ip)
-        record("device.bind", "ok", mac=new_mac, worker_id=worker_id, force=True,
-               old_worker_id=worker_id, old_device_mac=old_released, client=client_ip)
-        _push_credentials(worker_id)  # 换绑：host NQN 随新设备 UUID 变化，重新推送
+        if changed:
+            record("device.bind", "ok", mac=new_mac, worker_id=worker_id, force=True,
+                   old_worker_id=worker_id, old_device_mac=old_released, client=client_ip)
+        # host NQN/PSK 按 worker 派生、与设备无关；换绑后重放一次，保持节点侧登记与台账一致
+        _push_credentials(worker_id)
         return _enrich_worker(worker_id, record_)
 
 
@@ -932,8 +933,9 @@ def _target_actual(target_record: dict[str, Any] | None, os: str | None = None) 
 def _enrich_worker(worker_id: str, record_: dict[str, Any]) -> dict[str, Any]:
     item = copy.deepcopy(record_)
     item["worker_id"] = worker_id
-    item["mac"] = dnsmasq.find_mac(item["hostname"])
+    # MAC 以设备台账（bound_worker_id）为权威；dnsmasq 绑定只是派生投影
     bound_device = _bound_device_mac_for(worker_id)
+    item["mac"] = bound_device
     item["bound_device"] = bound_device
     item["readiness"] = _readiness_for(bound_device, bool(worker_disks(record_)))
     return item

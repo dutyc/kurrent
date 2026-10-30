@@ -1338,14 +1338,8 @@ The Control Plane will:
 
 1. Validate `worker_id`, `hostname`; validate `mac` if provided
 2. Write to `state/workers.yml` (`disks` as empty array, `state=registered`)
-3. If `mac` is provided: bind the device (write `state/devices.yml` `bound_worker_id` + write to `dnsmasq/dhcp-hosts.conf`)
-4. Send a HUP signal to the `ipxe-dnsmasq` container via Docker:
-
-```bash
-docker exec ipxe-dnsmasq killall -HUP dnsmasq
-```
-
-5. If `windows_iso` is specified, additionally call the Agent to create a CD target (installation optical drive, unrelated to system disks).
+3. If `mac` is provided: bind the device (write `state/devices.yml` `bound_worker_id` + write to `dnsmasq/dhcp-hosts.conf`; dnsmasq watches that file, no HUP needed)
+4. If `windows_iso` is specified, additionally call the Agent to create a CD target (installation optical drive, unrelated to system disks).
 
 ### Request Body Fields
 
@@ -1417,13 +1411,21 @@ During Windows installation, if you want to default to the installation menu:
 
 ### PUT /workers/{worker_id}/mac (Rebind Mapping)
 
-Changes the Worker’s MAC binding (hostname unchanged). It is mapped internally to a **device rebind**: the new MAC must be in the pool (`state=pooled`) and is bound to this Worker; the old device (if bound to this Worker) is released back to the pool. The audit trail records `device.bind` (new) + `device.unbind` (old) plus the compatibility `worker.mac.update`.
+Changes the Worker’s MAC binding (hostname unchanged), mapped internally to a **device rebind**. Bindings are authoritative in the device inventory (`state/devices.yml`); `dnsmasq/dhcp-hosts.conf` is only a derived projection. The Control Plane:
+
+1. Verifies the Worker exists (`404`) and the new MAC format (`400`).
+2. Requires the new MAC to be in the pool, not revoked and not bound to another Worker (`409`).
+3. Looks up the Worker’s current device in the inventory (**not** in dnsmasq): the old device returns to the pool, the new one is bound to the Worker.
+4. Writes `dnsmasq/dhcp-hosts.conf`: replaces the hostname binding when present, appends it when missing (dnsmasq watches the file; no HUP needed); a projection write failure rolls the inventory back.
+5. Records `worker.mac.update` (`old_mac` / `new_mac` / `changed` / `client`); when the inventory had no binding change (e.g. the same MAC again) `changed=false` and only the projection is repaired.
 
 **Request body**: `{"mac": "00:0c:29:b9:8b:2d"}`
 
-**409**: new MAC out-of-pool / revoked / already bound to another Worker; old device bound to an unexpected Worker.
+**404**: Worker not found. **409**: device out-of-pool / revoked / bound to another Worker / dnsmasq projection conflict (MAC bound to another hostname). **500**: inventory or binding write failed (inventory rolled back).
 
-**Idempotent**: setting the same MAC again returns `changed=false`.
+**Idempotent**: setting the same MAC again returns `changed=false` and repairs a missing dnsmasq binding.
+
+**Note**: the dnsmasq file is a derived view (`MAC -> hostname`), not the MAC authority; the endpoint works even when it is missing or inconsistent. The Worker must renew its DHCP lease (restart NIC / PXE boot again) to use the new MAC identity.
 
 
 ## 7.1 POST /workers/{worker_id}/luns/disk
@@ -2111,7 +2113,7 @@ tab on the Worker detail page (shown only when the Worker has an NVMe-oF disk).
 
 ### Description
 
-Lists the inventory of all current Workers. The `mac` field in the response is a real-time reverse lookup from `dnsmasq/dhcp-hosts.conf`.
+Lists the inventory of all current Workers. The `mac` field in the response comes from the device inventory (`state/devices.yml`, the device bound to that Worker); `dnsmasq/dhcp-hosts.conf` is a derived projection.
 
 ### curl
 
@@ -2262,8 +2264,7 @@ Deletes a Worker. The Control Plane will:
 5. Then delete the disk target(s).
 6. Remove the Worker from `workers.yml`.
 7. **Forget the Worker’s credential traces**: drop its key entry from `state/credentials.yml` and its push-state records (audit `credential.forget`) — the Worker no longer exists, and an orphaned entry is neither visible (`GET /credential` returns 404 for a nonexistent Worker) nor removable, while a later Worker re-created with the same id would **silently inherit the old key** and have it pushed to the new machine’s disks.
-8. Remove the `mac,hostname` line from `dnsmasq/dhcp-hosts.conf`.
-9. Send HUP to `ipxe-dnsmasq`.
+8. Remove the `mac,hostname` line from `dnsmasq/dhcp-hosts.conf` (dnsmasq watches the file, no HUP needed).
 
 The same cascade-unbind and credential cleanup apply to `POST /workers/delete/batch` (11.1).
 

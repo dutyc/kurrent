@@ -79,10 +79,11 @@ class DnsmasqHosts:
             self._write_lines(kept)
         return removed
 
-    def replace_binding(self, hostname: str, new_mac: str) -> str | None:
-        """将该 hostname 的绑定 MAC 替换为 new_mac，返回旧 MAC；hostname 无绑定返回 None。
-        新 MAC 已被其他 hostname 占用时抛 ValueError（不写入）。"""
-        new_mac = normalize_mac(new_mac)
+    def set_binding(self, mac: str, hostname: str) -> str | None:
+        """设置 hostname → mac 绑定（单次写入的幂等 upsert）：已有该 hostname 绑定则替换，
+        缺失则新增；同时清除该 mac 的历史 ignore 行。mac 已被其他 hostname 占用时抛
+        ValueError（不写入）。返回被替换的旧 mac（此前无绑定返回 None）。"""
+        mac = normalize_mac(mac)
         lines = self._read_lines()
         old_mac: str | None = None
         new_lines: list[str] = []
@@ -90,17 +91,15 @@ class DnsmasqHosts:
             binding = _parse_binding(line)
             if binding and binding.hostname == hostname:
                 old_mac = binding.mac
-                new_lines.append(f"{new_mac},{hostname}")
-            elif binding and binding.mac == new_mac:
-                raise ValueError(f"mac already bound to {binding.hostname}: {new_mac}")
-            elif _is_ignore_line(line, new_mac):
                 continue
-            else:
-                new_lines.append(line)
-        if old_mac is None:
-            return None
-        if old_mac == new_mac:
-            return old_mac
+            if binding and binding.mac == mac:
+                raise ValueError(f"mac already bound to {binding.hostname}: {mac}")
+            if _is_ignore_line(line, mac):
+                continue
+            new_lines.append(line)
+        if new_lines and new_lines[-1].strip():
+            new_lines.append("")
+        new_lines.append(f"{mac},{hostname}")
         self._write_lines(new_lines)
         return old_mac
 

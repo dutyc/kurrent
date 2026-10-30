@@ -143,7 +143,8 @@ def bind_device(
     record("device.bind", "ok", mac=mac, worker_id=worker_id, force=force,
            old_worker_id=result.get("old_worker_id"), old_device_mac=result.get("old_device_mac"),
            client=client_host(request))
-    # 凭据推送：host NQN 随绑定设备 UUID 变化（force 换绑时旧 worker 的设备已回池，一并推送）
+    # 凭据推送：host NQN/PSK 按 worker 派生、与设备无关；换绑后重放一次，
+    # 保证节点侧 hosts 登记与台账一致（旧 worker 的设备已回池，一并推送）
     from .workers import _push_credentials
     _push_credentials(worker_id)
     old_worker = result.get("old_worker_id")

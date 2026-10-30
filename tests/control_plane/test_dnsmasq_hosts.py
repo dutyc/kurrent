@@ -43,13 +43,45 @@ def test_unblock_removes_only_ignore_and_is_idempotent(tmp_path):
     assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01")]
 
 
-def test_replace_binding_clears_stale_block_for_new_mac(tmp_path):
+def test_set_binding_creates_when_absent(tmp_path):
+    hosts = _hosts(tmp_path)
+
+    old = hosts.set_binding(MAC_A, "worker-01")
+
+    assert old is None
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01")]
+
+
+def test_set_binding_replaces_existing(tmp_path):
+    hosts = _hosts(tmp_path)
+    hosts.add_binding(MAC_A, "worker-01")
+
+    old = hosts.set_binding(MAC_B, "worker-01")
+
+    assert old == MAC_A
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_B, hostname="worker-01")]
+
+
+def test_set_binding_clears_stale_block_for_new_mac(tmp_path):
     hosts = _hosts(tmp_path)
     hosts.add_binding(MAC_A, "worker-01")
     hosts.block(MAC_B)
 
-    old = hosts.replace_binding("worker-01", MAC_B)
+    old = hosts.set_binding(MAC_B, "worker-01")
 
     assert old == MAC_A
     assert hosts.list_bindings() == [HostBinding(mac=MAC_B, hostname="worker-01")]
     assert f"{MAC_B},{IGNORE}" not in hosts.hosts_file.read_text(encoding="utf-8")
+
+
+def test_set_binding_rejects_mac_bound_elsewhere(tmp_path):
+    hosts = _hosts(tmp_path)
+    hosts.add_binding(MAC_A, "worker-01")
+
+    try:
+        hosts.set_binding(MAC_A, "worker-02")
+    except ValueError as exc:
+        assert "already bound" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01")]

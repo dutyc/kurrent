@@ -161,6 +161,50 @@ class TestWorkerMac:
         assert res.status_code == 200
         assert res.json()["mac"] == MAC_A
 
+    def test_update_mac_without_dnsmasq_binding(self, client, auth_headers):
+        """回归：全新 Worker 尚无 dnsmasq 绑定也能直接换绑（绑定是派生投影，不参与判定）。"""
+        from control_plane.app.config import settings
+        client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        assert (not settings.dnsmasq_hosts_file.exists()
+                or "worker-01" not in settings.dnsmasq_hosts_file.read_text(encoding="utf-8"))
+
+        res = client.put("/workers/worker-01/mac", json={"mac": MAC_B}, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        assert res.json()["mac"] == MAC_B
+        dev = client.get(f"/devices/{MAC_B}", headers=auth_headers).json()
+        assert dev["state"] == "bound"
+        assert dev["bound_worker_id"] == "worker-01"
+        assert f"{MAC_B},worker-01" in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+
+    def test_update_mac_reads_ledger_not_dnsmasq(self, client, auth_headers):
+        """旧设备从设备台账反查：dnsmasq 绑定丢失时仍能正确回池旧设备并补写新绑定。"""
+        from control_plane.app.config import settings
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
+        settings.dnsmasq_hosts_file.write_text("", encoding="utf-8")  # 模拟投影丢失
+
+        res = client.put("/workers/worker-01/mac", json={"mac": MAC_B}, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        assert client.get(f"/devices/{MAC_A}", headers=auth_headers).json()["state"] == "pooled"
+        new = client.get(f"/devices/{MAC_B}", headers=auth_headers).json()
+        assert new["state"] == "bound"
+        assert new["bound_worker_id"] == "worker-01"
+        hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+        assert f"{MAC_B},worker-01" in hosts and MAC_A not in hosts
+
+    def test_update_mac_same_repairs_missing_binding(self, client, auth_headers):
+        """台账已绑定、dnsmasq 投影缺失时，同 MAC 调用补写投影而不是 409。"""
+        from control_plane.app.config import settings
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
+        settings.dnsmasq_hosts_file.write_text("", encoding="utf-8")
+
+        res = client.put("/workers/worker-01/mac", json={"mac": MAC_A}, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        assert f"{MAC_A},worker-01" in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+
     def test_update_mac_not_in_pool_409(self, client, auth_headers):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
