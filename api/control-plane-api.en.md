@@ -1975,23 +1975,43 @@ NQN prefix, i.e. the node's `spec.agent.nqnBase`) and is injected via `/boot-var
 the firmware's built-in default (the firmware derives it from the SMBIOS UUID by default; without
 the override authentication always fails).
 
-**Push reconciliation (2026-10-05)**: the per-Agent outcome of every push is recorded in
-`state/credential-push.yml` (key = `worker_id/agent_id`, storing the audit hash of the pushed
-key, never the plaintext). A control-plane reconciliation thread (default interval 60s,
-`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` seconds, 0 disables) compares desired state against
-the records: pairs whose key hash matches and were delivered (ok / n-a) are skipped, everything
-else is replayed idempotently — closing three silent gaps: failed pushes without retry, crash
-windows (ledger changed, nothing pushed) and undelivered revocations. A pair with no key and no
-push history is never pushed — no ledger entry, no audit, no false "sync failed" while its Agent is
-offline; with nvmet disk creation issuing keys automatically, this only covers disks on non-nvmet
-backends (DHHC-1 not applicable, a push would only return `n/a`). Once a push record exists,
-later revocations keep being replayed even when undelivered. Records for unregistered
-Agents are pruned (re-registration triggers a fresh push). Reconcile-driven pushes audit only on
-state/key changes (noise suppression); user-triggered pushes audit every time.
-Push outcomes: `ok` delivered (Agent cache and host service both in sync); `failed` not delivered
-(Agent unreachable / host sync error), reconciliation keeps retrying; `n/a` target Agent is not an
-nvmet backend (not applicable, not a failure); `pending` no record yet or a stale one (awaiting
-replay); `none` no sync target (no NVMe-oF disks, no credential ever set, or the hosting Agent is unregistered).
+**Push reconciliation (2026-10-05, hardened 2026-10-30)**: the per-Agent outcome of every push is
+recorded in `state/credential-push.yml` (key = `worker_id/agent_id`, storing the audit hash of the
+pushed key and a monotonic `generation`, never the plaintext). A control-plane reconciliation
+thread (default interval 60s, `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` seconds, 0 disables)
+compares desired state against the records: pairs whose key hash matches and whose **per-pair
+application is confirmed** are skipped, everything else is replayed idempotently — closing three
+silent gaps: failed pushes without retry, crash windows (ledger changed, nothing pushed) and
+undelivered revocations. `ok` does not mean HTTP 200: the Agent must report `tls_expected`
+(number of subsystems × hosts) and `tls_applied`, and they must match; an old Agent that does not
+report application results, a partial application, or a target-count mismatch is recorded as
+`failed` (fail-closed, never mistaking "sent" for "applied"). When the Agent reports
+`tls_unavailable` (host TLS port not ready, 409) for every target the outcome is `degraded` —
+the authentication key is written but the transport-encryption PSK is not, so boot still fails;
+reconciliation keeps retrying and flips to `ok` once the port is ready.
+
+Even when the ledger says `ok` and the hash matches, reconciliation re-checks the host's kernel
+`.nvme` keyring through the Agent's credential-status query: for a set desired state every
+(subsystem, host) PSK must be present, and for a revocation every one must be absent; otherwise it
+re-pushes — a host reboot clears the keyring, so "the last push succeeded" is not trusted on its
+own. Each push carries a monotonic `generation`: the Agent rejects stale values and the ledger
+rejects stale write-backs (out-of-order or concurrent replays cannot overwrite a newer key with an
+older one); after revocation the entry is deleted but the generation tombstone is kept. Deleting a
+subsystem also removes all PSKs under it in the host service, and service startup garbage-collects
+keys whose subsystem no longer exists.
+
+A pair with no key and no push history is never pushed — no ledger entry, no audit, no false
+"sync failed" while its Agent is offline; with nvmet disk creation issuing keys automatically, this
+only covers disks on non-nvmet backends (DHHC-1 not applicable, a push would only return `n/a`).
+Once a push record exists, later revocations keep being replayed even when undelivered. Records for
+unregistered Agents are pruned (re-registration triggers a fresh push). Reconcile-driven pushes
+audit only on state/key changes (noise suppression); user-triggered pushes audit every time.
+Push outcomes: `ok` delivered (Agent cache and host service both in sync and applied per pair);
+`degraded` partially applied (authentication key written, target TLS unavailable so the PSK is not
+in effect); `failed` not delivered (Agent unreachable / host sync error), reconciliation keeps
+retrying; `n/a` target Agent is not an nvmet backend (not applicable, not a failure); `pending` no
+record yet or a stale one (awaiting replay); `none` no sync target (no NVMe-oF disks, no credential
+ever set, or the hosting Agent is unregistered).
 
 Operations that trigger a push: **issuance on disk creation** (nvmet backends, see above),
 setting/deleting credentials, device bind/unbind/rebind
@@ -2002,9 +2022,9 @@ setting/deleting credentials, device bind/unbind/rebind
 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` (default 90 days, `<=0` disables it) the key is rotated:
 a new key is generated and pushed to every target Agent of that Worker, and the ledger
 `state/credentials.yml` is switched **only after all pushes succeed** (`rotated_at` /
-`updated_at` refreshed, `credential.rotate` audited). If any target fails, already-delivered
-targets get the old key pushed back and the ledger stays unchanged, retrying next cycle; entries
-without an nvmet target are skipped. Until the switch, `/boot-vars` still projects the old key,
+`updated_at` refreshed, `credential.rotate` audited). If any target fails or is degraded (TLS not
+in effect), already-delivered targets get the old key pushed back and the ledger stays unchanged,
+retrying next cycle; entries without an nvmet target are skipped. Until the switch, `/boot-vars` still projects the old key,
 so the window in which hosts hold the new key covers only the push itself.
 
 Static storage boundary (2026-10-05): the plaintext key lands in exactly four places along the

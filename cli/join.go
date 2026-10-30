@@ -9,7 +9,8 @@
 // 带入控制面台账）。
 // 引导凭据落盘（--token 或既有 bootstrap/agent.token）→ .env 插值键同步 → 收敛启动
 // agent（docker compose 为内部编排细节，重跑幂等）。nvmet 后端先预检宿主前置
-// （内核模块 nvmet/nvmet-tcp + configfs 挂载），未就绪指路 nvmeof/host-prepare.sh。
+// （内核模块 nvmet/nvmet-tcp + configfs 挂载 + tlshd 版本），未就绪指路
+// nvmeof/host-prepare.sh。
 package main
 
 import (
@@ -18,8 +19,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -335,17 +338,21 @@ func joinRun(o joinOpts) error {
 
 // ── 宿主前置预检（nvmet 数据面）──
 
+const tlshdMinVersion = "1.5.0"
+
 // hostEnv 宿主前置检查的只读路径根（沙盒测试注入替换）。
 type hostEnv struct {
-	procMounts    string // /proc/mounts（configfs 挂载检测）
-	sysModuleRoot string // /sys/module（内核模块加载检测）
+	procMounts    string                 // /proc/mounts（configfs 挂载检测）
+	sysModuleRoot string                 // /sys/module（内核模块加载检测）
+	tlshdVersion  func() (string, error) // 宿主 tlshd 版本（含服务运行状态）；nil = 真实探测
 }
 
 var hostEnvPaths = hostEnv{procMounts: "/proc/mounts", sysModuleRoot: "/sys/module"}
 
-// hostPreflightNvmet 检查宿主 nvmet 数据面前置：nvmet/nvmet-tcp 模块已加载、configfs 已挂载。
-// 内核 nvmet target 无法容器化（4421 数据面在宿主），这是 nvmet 后端节点唯一的手工步骤——
-// 已由 nvmeof/host-prepare.sh 工具化；未就绪时 fail fast 并指路该脚本。
+// hostPreflightNvmet 检查宿主 nvmet 数据面前置：nvmet/nvmet-tcp 模块已加载、configfs 已挂载、
+// tlshd 版本 >= 1.5.0 且服务运行中。内核 nvmet target 无法容器化（4421 数据面在宿主），
+// 这些是 nvmet 后端节点的手工步骤——已由 nvmeof/host-prepare.sh 工具化；未就绪时
+// fail fast 并指路该脚本。
 func hostPreflightNvmet(storagerDir string) error {
 	var missing []string
 	for _, m := range []string{"nvmet", "nvmet_tcp"} { // /sys/module 用下划线名（modprobe 名 nvmet-tcp）
@@ -356,11 +363,111 @@ func hostPreflightNvmet(storagerDir string) error {
 	if !configfsMounted() {
 		missing = append(missing, "configfs 未挂载: /sys/kernel/config")
 	}
+	tlshdBad := false
+	ver, err := hostEnvPaths.tlshd()
+	switch {
+	case err != nil:
+		tlshdBad = true
+		missing = append(missing, "tlshd 不可用: "+err.Error())
+	case !versionAtLeast(ver, tlshdMinVersion):
+		tlshdBad = true
+		missing = append(missing, fmt.Sprintf("tlshd 版本过低: %s（需 >= %s；1.5.0 起进程 keyring 优先，旧版会在 PSK 轮换后遮蔽新密钥）",
+			ver, tlshdMinVersion))
+	}
 	if len(missing) == 0 {
 		return nil
 	}
-	return fmt.Errorf("宿主机 nvmet 前置未就绪（存储数据面无法起服）:\n  %s\n  修复（需 root，幂等）: sudo bash %s",
-		strings.Join(missing, "\n  "), filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
+	hint := fmt.Sprintf("修复（需 root，幂等）: sudo bash %s", filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
+	if tlshdBad {
+		hint += fmt.Sprintf("\n  tlshd: 安装/升级 ktls-utils >= %s 并 sudo systemctl enable --now tlshd（构建步骤见 %s）",
+			tlshdMinVersion, filepath.Join(storagerDir, "nvmeof", "nvmet-host", "README.md"))
+	}
+	return fmt.Errorf("宿主机 nvmet 前置未就绪（存储数据面无法起服）:\n  %s\n  %s",
+		strings.Join(missing, "\n  "), hint)
+}
+
+// tlshd 真实探测：优先取 systemd 单元实际执行的二进制（发行版包与源码安装并存时
+// 以运行中的那份为准），版本从 `tlshd -v` 的 stderr 解析。
+func (e hostEnv) tlshd() (string, error) {
+	if e.tlshdVersion != nil {
+		return e.tlshdVersion()
+	}
+	return detectTlshdVersion()
+}
+
+func detectTlshdVersion() (string, error) {
+	bin := tlshdBinaryPath()
+	if bin == "" {
+		return "", fmt.Errorf("未安装（需 ktls-utils >= %s）", tlshdMinVersion)
+	}
+	out, err := exec.Command(bin, "-v").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s -v 失败: %v", bin, err)
+	}
+	ver, err := parseTlshdVersion(string(out))
+	if err != nil {
+		return "", err
+	}
+	// 单元存在时服务必须在运行（tlshd 常驻承接内核 TLS 握手 upcall）；
+	// 无单元的自定义部署不在此判定。
+	if state, err := exec.Command("systemctl", "show", "-p", "LoadState", "--value", "tlshd").Output(); err == nil {
+		switch strings.TrimSpace(string(state)) {
+		case "loaded":
+			if err := exec.Command("systemctl", "is-active", "--quiet", "tlshd").Run(); err != nil {
+				return "", fmt.Errorf("服务未运行（sudo systemctl enable --now tlshd）")
+			}
+		case "masked":
+			return "", fmt.Errorf("tlshd.service 被 mask")
+		}
+	}
+	return ver, nil
+}
+
+func tlshdBinaryPath() string {
+	if out, err := exec.Command("systemctl", "show", "-p", "ExecStart", "--value", "tlshd").Output(); err == nil {
+		if p := parseExecStartPath(string(out)); p != "" {
+			if _, statErr := os.Stat(p); statErr == nil {
+				return p
+			}
+		}
+	}
+	if p, err := exec.LookPath("tlshd"); err == nil {
+		return p
+	}
+	return ""
+}
+
+var execStartPathRe = regexp.MustCompile(`path=([^ ;}]+)`)
+
+func parseExecStartPath(out string) string {
+	if m := execStartPathRe.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+var tlshdVersionRe = regexp.MustCompile(`ktls-utils\s+([0-9]+(?:\.[0-9]+){1,3})`)
+
+func parseTlshdVersion(out string) (string, error) {
+	if m := tlshdVersionRe.FindStringSubmatch(out); m != nil {
+		return m[1], nil
+	}
+	return "", fmt.Errorf("无法解析 tlshd 版本输出: %q", strings.TrimSpace(out))
+}
+
+func versionAtLeast(v, min string) bool {
+	a, b := strings.Split(v, "."), strings.Split(min, ".")
+	for i := range b {
+		x, y := 0, 0
+		if i < len(a) {
+			x, _ = strconv.Atoi(a[i])
+		}
+		y, _ = strconv.Atoi(b[i])
+		if x != y {
+			return x > y
+		}
+	}
+	return true
 }
 
 // configfsMounted /proc/mounts 中查找 configfs 挂载点（挂载即内核模块已就位）。

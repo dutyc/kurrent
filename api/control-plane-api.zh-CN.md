@@ -1964,17 +1964,30 @@ Agent 转调存储节点 nvmet 宿主服务登记 hosts（子系统 NQN = 盘 NQ
 worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点侧 `spec.agent.nqnBase`），
 由 `/boot-vars` 注入固件覆盖其内置默认值（固件默认按 SMBIOS UUID 派生，不覆盖必认证失败）。
 
-**推送对账（2026-10-05）**：每次推送的逐 Agent 结果记录在 `state/credential-push.yml`
-（键 = `worker_id/agent_id`；含所推密钥的审计哈希，不含明文）。控制面对账线程周期（默认 60s，
-`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` 秒，0 = 禁用）比对「期望 × 记录」：密钥哈希一致且
-已送达（ok / n-a）跳过，否则幂等重放——覆盖推送失败未重试、进程崩溃缝隙（台账已改未推送）与
-吊销未送达三类静默缺口。无密钥且无推送历史的对**不推送**、不记台账、不记审计（避免 Agent 离线时
-出现「同步失败」的虚假故障）——nvmet 建盘已自动签发，实际只剩非 nvmet 后端的盘（DHHC-1 不适用，
-推送只会得 `n/a`）；一旦有过推送记录，之后的吊销即使未送达也持续重放。Agent 登记被删（登记删除语义）→ 记录剪除，重新登记后自动重推。
-对账重放仅在状态或密钥变化时记审计（去噪）；用户动作触发的推送照常每次记录。
-推送结果：`ok` 已送达（Agent 缓存与宿主服务均已同步）；`failed` 未送达（Agent 不可达 / 宿主
-同步失败，对账持续重试）；`n/a` 目标 Agent 非 nvmet 后端（凭据不适用，非故障）；`pending` 尚无
-记录或记录为旧值（待对账重放）；`none` 无同步目标（无 NVMe-oF 盘、凭据从未设置无推送历史，或盘所在 Agent 未登记）。
+**推送对账（2026-10-05，2026-10-30 加固）**：每次推送的逐 Agent 结果记录在 `state/credential-push.yml`
+（键 = `worker_id/agent_id`；含所推密钥的审计哈希与单调 `generation`，不含明文）。控制面对账线程
+周期（默认 60s，`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` 秒，0 = 禁用）比对「期望 × 记录」：
+密钥哈希一致且**逐对应用已确认**才跳过，否则幂等重放——覆盖推送失败未重试、进程崩溃缝隙
+（台账已改未推送）与吊销未送达三类静默缺口。`ok` 不代表 HTTP 200：Agent 必须回报
+`tls_expected`（子系统数 × host 数）与 `tls_applied`，二者相等才算送达；旧 Agent 不回报应用
+结果、只部分应用或目标数不一致一律记 `failed`（fail-closed，不会把「已下发」误当「已生效」）。
+Agent 回报中 `tls_unavailable`（目标端 TLS 端口未就绪，409）覆盖全部目标时记 `degraded`——
+认证密钥已写、传输加密 PSK 未生效，仍不能引导；对账持续重推，端口就绪后自动转 `ok`。
+
+台账为 `ok` 且哈希一致时，对账仍经 Agent 的凭据状态查询回查宿主内核 `.nvme` keyring：设置态要求
+每个（子系统, host）对的 PSK 都在位，吊销态要求全部不在位，否则重推——宿主机重启会清空 keyring，
+不能只信「上次推送成功」的台账。每次推送分配单调 `generation`：Agent 拒绝迟到的旧值，台账也拒绝
+旧 generation 的回写（乱序/并发重放不会用旧密钥覆盖新密钥）；吊销删除条目后 generation 墓碑保留。
+删除子系统时宿主服务同步摘除该子系统名下全部 PSK，服务启动时清理 subsystem 已不存在的孤儿 key。
+
+无密钥且无推送历史的对**不推送**、不记台账、不记审计（避免 Agent 离线时出现「同步失败」的虚假
+故障）——nvmet 建盘已自动签发，实际只剩非 nvmet 后端的盘（DHHC-1 不适用，推送只会得 `n/a`）；
+一旦有过推送记录，之后的吊销即使未送达也持续重放。Agent 登记被删（登记删除语义）→ 记录剪除，
+重新登记后自动重推。对账重放仅在状态或密钥变化时记审计（去噪）；用户动作触发的推送照常每次记录。
+推送结果：`ok` 已送达（Agent 缓存与宿主服务均已同步且逐对应用）；`degraded` 部分生效（认证密钥
+已写、目标端 TLS 未启用，PSK 未生效）；`failed` 未送达（Agent 不可达 / 宿主同步失败，对账持续
+重试）；`n/a` 目标 Agent 非 nvmet 后端（凭据不适用，非故障）；`pending` 尚无记录或记录为旧值
+（待对账重放）；`none` 无同步目标（无 NVMe-oF 盘、凭据从未设置无推送历史，或盘所在 Agent 未登记）。
 
 触发推送的操作：**建盘即签发**（nvmet 后端，见上）、设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、删盘（含批量）、删除 Worker。
 
@@ -1982,7 +1995,7 @@ worker 派生** `nqn.<…>:host.<worker_id>`，base 取盘 NQN 前缀 = 节点�
 `updated_at` / `created_at`），超过 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS`（默认 90 天，`<=0` 关闭）
 即轮换：生成新密钥 → 推送到该 Worker 的全部目标 Agent → **全部送达后**才在
 `state/credentials.yml` 切换（`rotated_at` / `updated_at` 更新，审计 `credential.rotate`）。
-任一目标失败则把已送达目标回推旧密钥、台账不动，下个周期重试；没有 nvmet 目标的条目跳过。
+任一目标失败或降级（TLS 未生效）则把已送达目标回推旧密钥、台账不动，下个周期重试；没有 nvmet 目标的条目跳过。
 切换前 `/boot-vars` 投影的仍是旧密钥，宿主改新密钥的窗口只覆盖推送本身。
 
 静态存储边界（2026-10-05 裁定）：密钥明文按链路必要范围落盘四处——控制面 `state/credentials.yml`、

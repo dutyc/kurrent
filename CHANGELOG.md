@@ -15,13 +15,31 @@
 
 ## 2026-10-30
 
+### 新增
+
+- **凭据推送新增 `degraded` 状态与 PSK 在位查询**：控制面推送结果新增 `degraded`（认证密钥已写入、目标端 TLS 数据面未就绪导致 PSK 未生效），CLI 与 WebUI（中英）同步显示。nvmet-host 新增 `GET /subsystems/{nqn}/tls/{hostnqn}` 只读查询内核 `.nvme` keyring 中的 PSK 是否在位；Agent 新增 mTLS 内部端点 `POST /credential/status` 供控制面对账回查
+
 ### 变更
 
+- **凭据推送以「逐对应用」为准（fail-closed）**：控制面不再把 Agent 的 HTTP 200 视为送达——要求 Agent 回报 `tls_expected`（子系统数 × host 数）与 `tls_applied`，二者相等才记 `ok`；旧 Agent 不回报、部分应用或目标数不符一律记 `failed` 并持续重放。全部目标因宿主 TLS 端口未就绪（409）未应用时记 `degraded`。对账在台账为 `ok` 且哈希一致时仍回查 keyring 在位（设置态要求全部在位、吊销态要求全部不在位），宿主重启导致 keyring 丢失会自动补推。定期轮换遇到 `failed` / `degraded` 回滚旧密钥
+- **凭据推送增加单调 `generation`**：每次推送分配递增序号，Agent 拒绝迟到的旧 generation，推送台账也拒绝旧 generation 回写；吊销删除条目后保留 generation 墓碑——并发/乱序重放不会用旧密钥覆盖新密钥
+- **PSK 生命周期清理**：删除子系统时 nvmet-host 同步摘除其名下全部 `.nvme` PSK，服务启动时清理 subsystem 已不存在的孤儿 key；Agent 吊销改存 `secret: null` 墓碑而非删除缓存条目，保证对账持续摘除目标端 PSK
+- **宿主前置预检 tlshd ≥ 1.5.0**：`storager/nvmeof/host-prepare.sh`（含 `--check`）与 `kurrent join` 的 nvmet 预检增加 tlshd 版本与服务运行状态检查，低于 1.5.0 或未运行直接失败；部署指南（中英）与 nvmet-host README 补充 1.5.0 源码安装、systemd drop-in 升级与验证步骤
 - **单盘 Worker 自动成为默认启动盘**：单盘建盘时直接写入 `default_disk`（批量建盘原有语义不变；第二块及以后不自动改写默认盘）；删盘后只剩一块时该盘自动成为默认盘；控制面启动迁移为存量单盘 Worker 补齐 `default_disk`（幂等）。可观察差异：新建 Worker 无需再调 `PUT /workers/{worker_id}/default-disk` 才能引导系统盘，`/boot-vars` 的 `menu_default` 由 `reboot` 变为 `boot-os`
 
 ### 修复
 
+- **PSK 轮换后旧密钥遮蔽新密钥（F-02）的检测与部署闭环**：ktls-utils 1.5.0 起 tlshd 优先查进程 keyring、再回落会话 keyring，更早版本会让会话中的旧 PSK 遮蔽 `.nvme` 中的新 PSK，而推送侧只看 HTTP 200 无法发现。现以逐对应用结果判定推送、对账回查 keyring 在位并清理旧 PSK，同时把 tlshd ≥ 1.5.0 作为 nvmet 宿主硬前置
+- **nvmet-host 拒绝 512 字节扇区 GPT 的 backing**：建子系统时校验盘文件 GPT 布局，512 布局返回 400 并给出 4K 重建指引；此前只有控制面的母盘校验，手工/绕过路径仍可能建出不可引导的盘（演练中 iPXE 报 `EFIBLK cannot locate file systems` / `0x7f22208e`）。Agent 将宿主的 400 透传为 400，不再误报 503
 - **MAC 换绑依赖 dnsmasq 主机名绑定（全新 Worker 无法换绑）**：`PUT /workers/{worker_id}/mac` 此前从 `dnsmasq/dhcp-hosts.conf` 反查旧 MAC，再以"该 hostname 有绑定"为前提替换；没有绑定的新 Worker 直接 `409 no dnsmasq binding`，投影丢失时也无法识别旧设备。现绑定关系以设备台账 `state/devices.yml` 为权威：旧设备按 `bound_worker_id` 反查，dnsmasq 改为幂等 upsert 投影（缺失补写、已有替换、清除该 MAC 的封禁行），投影写入失败回滚设备台账；`GET /workers` 与 Worker 详情的 `mac` 字段同样改从设备台账反查
+
+---
+
+## 2026-10-27
+
+### 修复
+
+- **组件 CRL 首拉与 Agent 启动扫描增加重试**：nvmet-host / agent 的 CRL 初始拉取改为短重试（吸收控制面或 nginx 启动期的 502），仍失败则保持 fail-closed 并交给周期刷新；Agent 的启动扫描在宿主服务/CRL 未就绪时按指数退避重试，不再一次性放弃导致 4421/subsystems 长期缺失。新增 CRL 重试单测
 
 ---
 

@@ -2,8 +2,9 @@
 // 密钥在 nvmet 节点建系统盘时由控制面自动签发（单盘与批量同一语义），本子命令用于显式轮换：
 // set 的密钥可粘贴（--secret）或就地生成（--generate：32 字节随机 + CRC32 终值，
 // 对齐固件契约；不打印明文——固件经 /boot-vars 注入，人不需要看到）。
-// 三个动词的响应都带逐 Agent 推送状态（ok=已送达 / failed=未送达，对账自动重试 /
-// pending=待对账重放 / n/a=目标非 nvmet 后端 / none=无同步目标（无盘 / 未设凭据 / Agent 未登记）。
+// 三个动词的响应都带逐 Agent 推送状态（ok=已送达 / degraded=密钥已送达但节点 TLS 数据面
+// 未就绪、PSK 未生效 / failed=未送达，对账自动重试 / pending=待对账重放 /
+// n/a=目标非 nvmet 后端 / none=无同步目标（无盘 / 未设凭据 / Agent 未登记）。
 package main
 
 import (
@@ -96,11 +97,12 @@ func printCredentialPush(pushAny any) {
 	}
 	result := strOf(push["result"])
 	label, ok := map[string]string{
-		"ok":      "已送达",
-		"failed":  "未送达（对账将自动重试）",
-		"pending": "待推送（对账将重放）",
-		"n/a":     "不适用（目标 Agent 非 nvmet 后端）",
-		"none":    "无同步目标（无 NVMe-oF 盘、凭据未设置，或盘所在 Agent 未登记）",
+		"ok":       "已送达",
+		"degraded": "部分生效（节点 TLS 数据面未就绪，对账将自动重试）",
+		"failed":   "未送达（对账将自动重试）",
+		"pending":  "待推送（对账将重放）",
+		"n/a":      "不适用（目标 Agent 非 nvmet 后端）",
+		"none":     "无同步目标（无 NVMe-oF 盘、凭据未设置，或盘所在 Agent 未登记）",
 	}[result]
 	if !ok {
 		label = result

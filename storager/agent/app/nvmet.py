@@ -159,6 +159,10 @@ class NvmetHostClient:
     def delete_tls_key(self, nqn: str, hostnqn: str) -> dict:
         return self._request("DELETE", f"/subsystems/{_quote(nqn)}/tls/{_quote(hostnqn)}") or {}
 
+    def get_tls_key(self, nqn: str, hostnqn: str) -> dict:
+        """查询目标端 PSK 是否在位（重启后 keyring 清空检测）。"""
+        return self._request("GET", f"/subsystems/{_quote(nqn)}/tls/{_quote(hostnqn)}") or {}
+
 
 class NvmetCredentialCache:
     """按 Worker 跟盘的凭据缓存（控制面推送驱动）。
@@ -168,7 +172,8 @@ class NvmetCredentialCache:
     宿主服务不可达时同步失败但缓存已更新，reconcile() 周期重放补上。
     reconcile 遇子系统 404（盘已删且未收到清理推送）→ 移除过期条目，避免死重试。
     目标端 TLS-PSK（宿主服务写入内核 .nvme keyring）与 hosts 矩阵同批同步；宿主服务无 TLS
-    端口时返回 409 → 记警告跳过（明文端口仍可用，属降级而非故障，见 nvmet-host main.py）。
+    端口时返回 409 → 计入 tls_unavailable 上报控制面判 degraded，不再静默当成功。
+    吊销保留 tombstone（secret=None）而非删除条目，确保周期 reconcile 持续摘除目标端 PSK。
     """
 
     def __init__(self, host: NvmetHostClient, path: str, interval: float = 60.0):
@@ -202,14 +207,24 @@ class NvmetCredentialCache:
             pass
 
     def apply(self, worker_id: str, secret: str | None, sub_nqns: list[str],
-              host_nqns: list[str], tls_psk: str | None = None) -> dict:
-        """应用控制面推送的期望状态：更新缓存（secret=None 移除条目）→ 落盘 → 同步宿主服务。"""
+              host_nqns: list[str], tls_psk: str | None = None,
+              generation: int = 0) -> dict:
+        """应用控制面推送的期望状态：更新缓存 → 落盘 → 同步宿主服务。
+
+        generation 单调：迟到的旧 push 不得覆盖较新的期望状态。吊销保留 tombstone
+        条目（secret=None），使后续 reconcile 持续确保目标端 key 已删除。"""
         with self.lock:
-            if secret:
-                self._entries[worker_id] = {"secret": secret, "tls_psk": tls_psk,
-                                            "sub_nqns": list(sub_nqns), "host_nqns": list(host_nqns)}
-            else:
-                self._entries.pop(worker_id, None)
+            current = int((self._entries.get(worker_id) or {}).get("generation", 0))
+            if generation < current:
+                return {"worker_id": worker_id, "secret": bool(secret), "stale": True,
+                        "tls_applied": 0,
+                        "tls_expected": len(sub_nqns) * len(host_nqns),
+                        "tls_revoked": 0, "stale_generation": current,
+                        "generation": generation}
+            self._entries[worker_id] = {"secret": secret, "tls_psk": tls_psk,
+                                        "sub_nqns": list(sub_nqns),
+                                        "host_nqns": list(host_nqns),
+                                        "generation": generation}
             self._save()
             return self._sync(worker_id, secret, sub_nqns, host_nqns, tls_psk)
 
@@ -237,8 +252,13 @@ class NvmetCredentialCache:
     def _sync(self, worker_id: str, secret: str | None, sub_nqns: list[str],
               host_nqns: list[str], tls_psk: str | None = None) -> dict:
         """同步单个 worker 的 hosts 矩阵 + 目标端 TLS-PSK：
-        secret 非空 → set_host + set_tls_key；空 → delete_host + delete_tls_key（404 幂等视为成功）。"""
-        tls_ok = 0
+        secret 非空 → set_host + set_tls_key；空 → delete_host + delete_tls_key（404 幂等视为成功）。
+
+        返回 tls_expected/tls_applied 供控制面判定，不再把「宿主无 TLS 端口」静默当成功：
+        tls_unavailable = 409（端口未启用），tls_missing = 404（子系统已删）。"""
+        applied = unavailable = missing = revoked = 0
+        tls_error = ""
+        expected = len(sub_nqns) * len(host_nqns) if (tls_psk or secret is None) else 0
         for sub in sub_nqns:
             for host in host_nqns:
                 if secret:
@@ -252,11 +272,15 @@ class NvmetCredentialCache:
                 if tls_psk:
                     try:
                         self.host.set_tls_key(sub, host, tls_psk)
-                        tls_ok += 1
+                        applied += 1
                     except NvmetHostError as exc:
-                        # 409 = 宿主服务未启用 TLS 端口（降级为明文）；404 = 子系统已删（由
-                        # reconcile 的 404 分支回收条目）。两者都不该让认证凭据同步失败。
-                        if exc.status not in (404, 409):
+                        if exc.status == 409:
+                            unavailable += 1
+                            tls_error = exc.detail
+                        elif exc.status == 404:
+                            missing += 1
+                            tls_error = exc.detail
+                        else:
                             raise
                         log.warning(f"tls psk not applied: worker={worker_id} sub={sub}: {exc.detail}")
                 elif not secret:
@@ -264,12 +288,37 @@ class NvmetCredentialCache:
                     # → 保持不动，避免误清已有 PSK
                     try:
                         self.host.delete_tls_key(sub, host)
+                        revoked += 1
                     except NvmetHostError as exc:
-                        if exc.status != 404:
+                        if exc.status == 404:
+                            revoked += 1  # 已不存在 = 吊销目标已达成
+                        else:
                             raise
         return {"worker_id": worker_id, "secret": bool(secret),
-                "tls": bool(tls_psk), "tls_applied": tls_ok,
+                "tls": bool(tls_psk), "tls_applied": applied,
+                "tls_expected": expected if (tls_psk or secret is None) else 0,
+                "tls_unavailable": unavailable, "tls_missing": missing,
+                "tls_revoked": revoked, "tls_error": tls_error,
                 "sub_count": len(sub_nqns), "host_count": len(host_nqns)}
+
+    def credential_status(self, worker_id: str, sub_nqns: list[str],
+                          host_nqns: list[str]) -> dict:
+        """只读查询目标端 key 是否在位（不依赖本地缓存，重启后仍能发现丢失）。"""
+        keys: list[dict] = []
+        for sub in sub_nqns:
+            for host in host_nqns:
+                try:
+                    info = self.host.get_tls_key(sub, host)
+                    present = bool(info.get("present"))
+                    serials = info.get("serials") or []
+                except NvmetHostError as exc:
+                    if exc.status != 404:
+                        raise
+                    present, serials = False, []
+                keys.append({"sub_nqn": sub, "host_nqn": host,
+                             "present": present, "serials": serials})
+        return {"worker_id": worker_id, "keys": keys,
+                "present_all": bool(keys) and all(k["present"] for k in keys)}
 
 
 def to_nqn(iqn: str) -> str:

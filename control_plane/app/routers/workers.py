@@ -1033,9 +1033,11 @@ def _host_nqn_for(base_nqn: str, worker_id: str) -> str:
 
 _UNSET = object()
 
-# 推送结果三值：ok=已送达（Agent 缓存与宿主服务均已同步）；failed=未送达（Agent 不可达 /
-# 宿主同步失败），对账会持续重放；n/a=目标 Agent 非 nvmet 后端（凭据不适用，非故障）。
+# 推送结果四值：ok=已送达且 TLS-PSK 已全部应用；degraded=认证已送达但宿主未启用
+# TLS（不当作成功，引导仍会拒绝）；failed=未送达/应用数量不足（对账持续重放）；
+# n/a=目标 Agent 非 nvmet 后端（凭据不适用，非故障）。
 PUSH_OK = "ok"
+PUSH_DEGRADED = "degraded"
 PUSH_FAILED = "failed"
 PUSH_NA = "n/a"
 
@@ -1078,6 +1080,7 @@ def _forget_worker_credentials(worker_id: str) -> None:
         if creds["credentials"].pop(worker_id, None) is not None:
             credentials.save(creds)
             record("credential.forget", "ok", worker_id=worker_id, reason="worker.delete")
+    _next_generation(worker_id)  # 保留单调墓碑，防止迟到 push 复活已删 worker 的 key
     prefix = f"{worker_id}/"  # 推送台账键 = "<worker_id>/<agent_id>"（worker_id 不含 "/"）
     with credential_pushes.locked():
         data = credential_pushes.load()
@@ -1093,12 +1096,15 @@ def _push_state_key(worker_id: str, agent_id: str) -> str:
 
 
 def _set_push_state(worker_id: str, agent_id: str, result: str,
-                    secret: str | None, error: str = "") -> None:
-    """回写推送状态记录（secret_hash 记期望密钥审计哈希，"" = 期望吊销）。"""
+                    secret: str | None, generation: int, error: str = "") -> bool:
+    """回写推送状态记录（secret_hash 记期望密钥审计哈希，"" = 期望吊销）。
+
+    台账按 generation 单调：迟到的旧推送结果不能覆盖较新的记录（乱序/并发重放）。"""
     entry: dict[str, Any] = {
         "worker_id": worker_id,
         "agent_id": agent_id,
         "secret_hash": _secret_hash(secret) if secret else "",
+        "generation": generation,
         "result": result,
         "updated_at": now_iso(),
     }
@@ -1106,13 +1112,55 @@ def _set_push_state(worker_id: str, agent_id: str, result: str,
         entry["error"] = error
     with credential_pushes.locked():
         data = credential_pushes.load()
+        prev = data["pushes"].get(_push_state_key(worker_id, agent_id), {})
+        if generation < int(prev.get("generation", 0)):
+            return False
         data["pushes"][_push_state_key(worker_id, agent_id)] = entry
         credential_pushes.save(data)
+    return True
+
+
+def _push_result(resp: object, *, secret: str | None, tls_psk: str | None,
+                 expected: int) -> tuple[str, str]:
+    """按 Agent 回报判定推送结果：TLS-PSK 必须逐对应用到目标端，不能只看 HTTP 200。
+
+    Agent 不可达时 set_credential 直接抛错；这里处理 200 但未真正应用的情况：
+    - applied == expected → ok；
+    - 全部缺失且原因是宿主未启用 TLS（409）→ degraded（认证已写，引导仍会拒绝）；
+    - 其他（含旧 Agent 不回报、部分应用、子系统 404）→ failed，由对账重试。"""
+    if not isinstance(resp, dict):
+        return PUSH_FAILED, "agent response missing tls application status"
+    if secret is None:
+        if expected == 0:
+            return PUSH_OK, ""
+        if resp.get("tls_revoked") == expected:
+            return PUSH_OK, ""
+        return PUSH_FAILED, (
+            f"tls psk revoke not applied: {resp.get('tls_revoked', 'missing')}/{expected}")
+    if not tls_psk or expected == 0:
+        return PUSH_OK, ""
+    applied = resp.get("tls_applied")
+    if not isinstance(applied, int):
+        return PUSH_FAILED, "agent response missing tls_applied"
+    app_expected = resp.get("tls_expected")
+    if app_expected != expected:
+        return PUSH_FAILED, (
+            f"agent tls target mismatch: expected {expected}, got {app_expected}")
+    if applied == expected:
+        return PUSH_OK, ""
+    unavailable = resp.get("tls_unavailable") or 0
+    missing = resp.get("tls_missing") or 0
+    detail = f"tls psk not applied: {applied}/{expected}"
+    if resp.get("tls_error"):
+        detail += f" ({resp['tls_error']})"
+    if unavailable and not missing and applied + unavailable == expected:
+        return PUSH_DEGRADED, detail
+    return PUSH_FAILED, detail
 
 
 def _push_one(worker_id: str, agent_id: str, sub_nqns: list[str], secret: str | None,
-              *, audit_always: bool) -> str:
-    """推送单个 (worker, agent) 对并回写状态记录；返回 ok|failed|n/a|skipped。
+              *, audit_always: bool, generation: int) -> str:
+    """推送单个 (worker, agent) 对并回写状态记录；返回 ok|degraded|failed|n/a|skipped。
 
     审计：用户动作（audit_always=True）每次记录；对账重放仅在结果或期望密钥变化时
     记录（周期重放不刷屏）。Agent 登记缺失（登记删除语义 = 仅清控制面记录）跳过且
@@ -1131,9 +1179,10 @@ def _push_one(worker_id: str, agent_id: str, sub_nqns: list[str], secret: str | 
     # TLS-PSK 随认证密钥派生（_derive_tls_psk）；secret=None（吊销）→ 同步吊销目标端 PSK
     tls_psk = _derive_tls_psk(secret) if secret else None
     try:
-        agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns,
-                                            tls_psk=tls_psk)
-        result, error = PUSH_OK, ""
+        resp = agents.client(agent).set_credential(worker_id, secret, sub_nqns, host_nqns,
+                                                   tls_psk=tls_psk, generation=generation)
+        result, error = _push_result(resp, secret=secret, tls_psk=tls_psk,
+                                     expected=len(sub_nqns) * len(host_nqns))
     except AgentAPIError as exc:
         if exc.status_code == 400 and "backend=nvmet" in exc.detail:
             result, error = PUSH_NA, ""
@@ -1141,7 +1190,9 @@ def _push_one(worker_id: str, agent_id: str, sub_nqns: list[str], secret: str | 
             result, error = PUSH_FAILED, exc.detail
     except Exception as exc:
         result, error = PUSH_FAILED, str(exc)
-    _set_push_state(worker_id, agent_id, result, secret, error)
+    if not _set_push_state(worker_id, agent_id, result, secret, generation, error):
+        # 旧 generation 的迟到结果：不覆盖台账，也不重复审计
+        return result
     if result == PUSH_FAILED:
         log.warning(f"credential push failed: worker={worker_id} agent={agent_id}: {error}")
     desired_hash = _secret_hash(secret) if secret else ""
@@ -1210,10 +1261,14 @@ def _push_credentials(worker_id: str, secret: object = _UNSET) -> None:
         record_ = store.load_workers()["workers"].get(worker_id)
     if not record_:
         return
-    for agent_id, sub_nqns in _sync_targets(record_).items():
-        if _no_sync_needed(_push_state(worker_id, agent_id), secret):
-            continue
-        _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=True)
+    pending = [(agent_id, sub_nqns) for agent_id, sub_nqns in _sync_targets(record_).items()
+               if not _no_sync_needed(_push_state(worker_id, agent_id), secret)]
+    if not pending:
+        return
+    generation = _next_generation(worker_id)
+    for agent_id, sub_nqns in pending:
+        _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=True,
+                  generation=generation)
 
 
 _reconcile_thread_started = False
@@ -1259,16 +1314,18 @@ def rotate_due_credentials(now: dt.datetime | None = None) -> dict[str, int]:
             skipped += 1
             continue
         new_secret = _generate_dhhc1()
+        new_generation = _next_generation(worker_id)
         delivered: list[str] = []
         for agent_id, sub_nqns in targets.items():
             if _push_one(worker_id, agent_id, sub_nqns, new_secret,
-                         audit_always=False) == PUSH_FAILED:
+                         audit_always=False, generation=new_generation) in (PUSH_FAILED, PUSH_DEGRADED):
                 break
             delivered.append(agent_id)
         if len(delivered) != len(targets):
+            rollback_generation = _next_generation(worker_id) if delivered else new_generation
             for agent_id in delivered:
                 _push_one(worker_id, agent_id, targets[agent_id], old_secret,
-                          audit_always=False)
+                          audit_always=False, generation=rollback_generation)
             record("credential.rotate", "failed", worker_id=worker_id,
                    delivered=len(delivered), targets=len(targets))
             failed += 1
@@ -1323,9 +1380,28 @@ def reconcile_credentials_once() -> dict[str, int]:
             skipped += 1
             continue
         if prev.get("result") in (PUSH_OK, PUSH_NA) and prev.get("secret_hash", "") == desired_hash:
-            skipped += 1
-            continue
-        if _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=False) == PUSH_FAILED:
+            # 台账 ok 只代表上次推送成功；宿主重启会清空 .nvme，必须回查 key 是否仍在。
+            if prev.get("result") == PUSH_NA:
+                skipped += 1
+                continue
+            try:
+                host_nqns = [_host_nqn_for(_base_nqn_from_target(sub_nqns[0]), worker_id)]
+                status = agents.client(agent_id).credential_status(
+                    worker_id, sub_nqns, host_nqns)
+                keys = status.get("keys") or []
+                in_place = (
+                    bool(keys) and all(k.get("present") for k in keys)
+                    if secret else
+                    bool(keys) and not any(k.get("present") for k in keys)
+                )
+            except Exception:
+                in_place = False
+            if in_place:
+                skipped += 1
+                continue
+        generation = _next_generation(worker_id)
+        if _push_one(worker_id, agent_id, sub_nqns, secret, audit_always=False,
+                     generation=generation) == PUSH_FAILED:
             failed += 1
         else:
             pushed += 1
@@ -1396,6 +1472,31 @@ def _secret_hash(secret: str) -> str:
     return "sha256:" + hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _next_generation(worker_id: str) -> int:
+    """分配并持久化下一次推送的 generation（每次推送单调递增）。
+
+    generation 存在 credentials.yml 顶层 generations（吊销后条目删除仍保留墓碑），
+    Agent 据此拒绝迟到的旧 push；台账按 (worker, agent) 记录并只接受更新的值。"""
+    with credentials.locked():
+        data = credentials.load()
+        gens = data.get("generations")
+        if not isinstance(gens, dict):
+            gens = {}
+            data["generations"] = gens
+        entry = data["credentials"].get(worker_id)
+        try:
+            current = max(int(gens.get(worker_id, 0)),
+                          int((entry or {}).get("generation", 0)))
+        except (TypeError, ValueError):
+            current = 0
+        generation = current + 1
+        gens[worker_id] = generation
+        if entry is not None:
+            entry["generation"] = generation
+        credentials.save(data)
+        return generation
+
+
 def _derive_tls_psk(secret: str) -> str:
     """从 worker 的 DHHC-1 认证密钥派生 NVMe/TCP TLS-PSK（32 字节，64 位十六进制）。
 
@@ -1421,9 +1522,10 @@ def _credential_meta(entry: dict[str, Any]) -> dict[str, Any]:
 def _credential_push_view(worker_id: str, record_: dict, *, desired: str | None) -> dict[str, Any]:
     """推送状态投影（GET/PUT/DELETE 响应）：逐 Agent 明细 + 汇总，供 CLI/WebUI 呈现。
 
-    汇总 result：ok=全部适用目标已送达 / failed=任一未送达 / pending=等待对账重放
-    （含密钥已轮换、记录仍是旧值）/ n-a=目标均非 nvmet 后端（凭据不适用）/ none=无同步目标
-    （未设置凭据且无推送历史，或盘所在 Agent 未登记）。"""
+    汇总 result：ok=全部适用目标已送达 / degraded=认证已写但目标端 TLS 未启用、PSK 未生效 /
+    failed=任一未送达 / pending=等待对账重放（含密钥已轮换、记录仍是旧值）/
+    n-a=目标均非 nvmet 后端（凭据不适用）/ none=无同步目标（未设置凭据且无推送历史，
+    或盘所在 Agent 未登记）。"""
     targets = _sync_targets(record_)
     if not targets:
         return {"result": "none", "updated_at": None, "agents": []}
@@ -1445,6 +1547,9 @@ def _credential_push_view(worker_id: str, record_: dict, *, desired: str | None)
             item["error"] = prev.get("error", "")
         elif result == PUSH_NA:
             item["result"] = PUSH_NA
+        elif result == PUSH_DEGRADED and prev.get("secret_hash", "") == desired_hash:
+            item["result"] = PUSH_DEGRADED
+            item["error"] = prev.get("error", "")
         elif result == PUSH_OK and prev.get("secret_hash", "") == desired_hash:
             item["result"] = PUSH_OK
         else:
@@ -1458,6 +1563,8 @@ def _credential_push_view(worker_id: str, record_: dict, *, desired: str | None)
         overall = PUSH_FAILED
     elif "pending" in results:
         overall = "pending"
+    elif PUSH_DEGRADED in results:
+        overall = PUSH_DEGRADED
     elif all(r == PUSH_NA for r in results):
         overall = PUSH_NA
     else:
@@ -1543,6 +1650,8 @@ def delete_worker_credential(worker_id: str, request: Request):
             raise HTTPException(404, f"credential not found: {worker_id}")
         del creds["credentials"][worker_id]
         credentials.save(creds)
+    # 吊销也要推进 generation：迟到的旧 set push 不能把 key 加回来
+    _next_generation(worker_id)
     record("credential.revoke", "ok", worker_id=worker_id, client=client_host(request))
     _push_credentials(worker_id, secret=None)
     return {"worker_id": worker_id, "deleted": True,

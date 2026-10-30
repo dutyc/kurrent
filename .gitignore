@@ -111,3 +111,6 @@ storager/agent/logs/nvmet-credentials.json
 dnsmasq/dnsmasq.leases
 dnsmasq/dhcp-hosts.conf
 dnsmasq/dnsmasq.conf
+
+# 本地攻击演练报告（仅保留在工作区，不入库）
+reports/

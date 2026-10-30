@@ -20,6 +20,12 @@ def make_secret(key: bytes = b"0123456789abcdef0123456789abcdef") -> str:
     return "DHHC-1:01:" + base64.b64encode(key + zlib.crc32(key).to_bytes(4, "little")).decode()
 
 
+def _ok_push(w, s, subs, hosts, tls_psk=None):
+    expected = len(subs) * len(hosts) if (tls_psk or s is None) else 0
+    return {"worker_id": w, "tls_applied": expected if s else 0,
+            "tls_expected": expected, "tls_revoked": expected if s is None else 0}
+
+
 def _setup(client, auth_headers, worker_id: str = "worker-01", secret: str | None = None,
            age_days: float = 100) -> str:
     """注册 agent + worker + 一块盘 + 凭据；把密钥时间戳回拨 age_days 天。"""
@@ -56,7 +62,8 @@ def test_rotation_replaces_due_secret(client, auth_headers, mock_agent_client):
     old = _setup(client, auth_headers)
     pushes = []
     mock_agent_client.set_credential = (
-        lambda w, s, subs, hosts, tls_psk=None: pushes.append((s, tls_psk)) or {})
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        pushes.append((s, tls_psk)) or _ok_push(w, s, subs, hosts, tls_psk))
 
     summary = rotate_due_credentials()
     assert summary == {"rotated": 1, "failed": 0, "skipped": 0}
@@ -71,7 +78,7 @@ def test_rotation_replaces_due_secret(client, auth_headers, mock_agent_client):
 def test_rotation_skips_fresh_secret(client, auth_headers, mock_agent_client):
     _setup(client, auth_headers, age_days=1)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 0}
     assert pushes == []
 
@@ -81,7 +88,7 @@ def test_rotation_push_failure_keeps_old_secret(client, auth_headers, mock_agent
     old = _setup(client, auth_headers)
     attempted = []
 
-    def fail(w, s, subs, hosts, tls_psk=None):
+    def fail(w, s, subs, hosts, tls_psk=None, generation=0):
         attempted.append(s)
         raise RuntimeError("agent down")
 
@@ -104,11 +111,11 @@ def test_rotation_partial_failure_rolls_back_delivered(client, auth_headers, moc
     }
     calls = []
 
-    def set_credential(w, s, subs, hosts, tls_psk=None):
+    def set_credential(w, s, subs, hosts, tls_psk=None, generation=0):
         calls.append((subs, s))
         if any("w1-b" in nqn for nqn in subs):
             raise RuntimeError("agent down")
-        return {}
+        return _ok_push(w, s, subs, hosts, tls_psk)
 
     mock_agent_client.set_credential = set_credential
     import control_plane.app.routers.workers as mod
@@ -134,7 +141,7 @@ def test_rotation_skips_without_nvmet_targets(client, auth_headers, mock_agent_c
                headers=auth_headers)
     _backdate("worker-x", 200)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 1}
     assert pushes == []
     entry = _entry("worker-x")

@@ -193,3 +193,32 @@ def test_nvmet_host_gate_uses_nodes_issuer(monkeypatch):
         allowed_cns={"agent-node-a", "nvmet-node-a"},
         issuer_cn="kurrent-ca-nodes", crl_kind="nodes", store=store)
     assert ident.cn == "agent-node-a"
+
+
+@pytest.mark.parametrize("mod", [agent_security, nvmet_security])
+def test_initial_crl_fetch_retries_transient_failures(mod, monkeypatch):
+    """启动期 502 不应变成一次性失败：短重试后成功。"""
+    calls = []
+
+    def flaky(client, pki_dir, store):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("crl fetch failed: HTTP 502")
+
+    monkeypatch.setattr(mod, "refresh_once", flaky)
+    assert mod._initial_fetch(None, Path("."), mod.CrlStore(), retries=5, delay=0) is True
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("mod", [agent_security, nvmet_security])
+def test_initial_crl_fetch_gives_up_after_retries(mod, monkeypatch):
+    """持续失败时返回 False（入站 fail-closed，周期刷新继续），不抛异常。"""
+    calls = []
+
+    def down(client, pki_dir, store):
+        calls.append(1)
+        raise RuntimeError("crl fetch unreachable")
+
+    monkeypatch.setattr(mod, "refresh_once", down)
+    assert mod._initial_fetch(None, Path("."), mod.CrlStore(), retries=3, delay=0) is False
+    assert len(calls) == 3

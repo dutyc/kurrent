@@ -66,14 +66,14 @@ The first hop of the boot chain (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe
 # 1. Docker with Compose v2
 docker --version && docker compose version
 
-# 2. Storage node: nvmet host prerequisites (kernel modules + configfs + persistence; idempotent)
+# 2. Storage node: nvmet host prerequisites (kernel modules + configfs + tlshd version + persistence; idempotent)
 sudo bash storager/nvmeof/host-prepare.sh
 #    Read-only diagnosis (no root, for pre-deployment checks): bash storager/nvmeof/host-prepare.sh --check
 
 # 3. Storage node: NVMe/TCP TLS prerequisites — the kernel needs CONFIG_NVME_TCP_TLS /
-#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING, and tlshd must be running
+#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING, and tlshd >= 1.5.0 must be running
 grep -E 'CONFIG_NVME_(TCP_TLS|TARGET_TCP_TLS|KEYRING)' /boot/config-$(uname -r)
-sudo apt install -y ktls-utils        # Debian/Ubuntu; use the equivalent package elsewhere
+sudo apt install -y ktls-utils        # if the distro package is older than 1.5.0, build from source per storager/nvmeof/nvmet-host/README.md
 sudo systemctl enable --now tlshd
 
 # 4. Storage node: btrfs or xfs is recommended for the data disk (both support
@@ -82,7 +82,7 @@ sudo systemctl enable --now tlshd
 #    Mount example: sudo mkfs.btrfs /dev/sdb && sudo mount /dev/sdb /pool1
 ```
 
-> `host-prepare.sh` only checks the nvmet modules and configfs; the TLS kernel options and tlshd from step 3 must currently be verified by hand. If the `4421` port cannot be created, the node reports the port as not ready and the control plane **refuses the boot** — there is no plaintext fallback.
+> `host-prepare.sh` and `kurrent join` check the nvmet modules, configfs, and tlshd (**>= 1.5.0 and running**); the kernel TLS build options from step 3 still need a manual check. A tlshd older than 1.5.0 lets a stale PSK shadow the rotated one (1.5.0 looks up the process keyring first), so the check fails closed. If the `4421` port cannot be created, the node reports the port as not ready and the control plane **refuses the boot** — there is no plaintext fallback.
 
 **Host baseline (a precondition for the auth model)**: read-only by default — checks public TCP listeners, Docker exposure and credential-file permissions; the script does not modify system state.
 
@@ -325,7 +325,8 @@ Expected chain: the client gets an address via DHCP → pulls iPXE and the `boot
 | No DHCP answers | Does `dnsmasq.conf` `interface=` match the real NIC (`ip a`)? Firewall 67/69 UDP |
 | Agent container restarting | `docker logs storager-agent`; usually the controller is unreachable (`controlPlane.url` 443 blocked) or the bootstrap credential file is missing (`kurrent join --token <token>` rewrites agent.token; delete nvmet-host.token and restart the agent to trigger re-derivation) |
 | Controller 503 / enroll failures | Is nginx 443 with the `/api/cp` reverse proxy healthy? `curl -k https://<cp-ip>/api/cp/healthz` |
-| Data-plane port not ready / boot refused | Does the storage host carry the NVMe/TCP TLS kernel options, and is `tlshd` running? Check the `4421` port-creation log in `docker logs kurrent-nvmet-host`; `/capabilities` should report `port.ready=true` |
+| Data-plane port not ready / boot refused | Does the storage host carry the NVMe/TCP TLS kernel options, and is `tlshd >= 1.5.0` running (`bash storager/nvmeof/host-prepare.sh --check`)? Check the `4421` port-creation log in `docker logs kurrent-nvmet-host`; `/capabilities` should report `port.ready=true` |
+| Boot fails with `Error 0x7f22208e` (`Boot from SAN device ... failed`) | The system disk GPT sector size does not match the nvmet exported block size: the nvmet file backend exports the backing FS block size (typically 4096 B), so a 512-byte-sector GPT disk is seen as having no partitions. Check the master `gpt` field in `GET /masters` (must be `4k`) and rebuild the GPT as 4K-native per the nvmet-host README |
 
 ## Appendix: Declaration Files at a Glance
 

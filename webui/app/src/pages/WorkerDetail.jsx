@@ -370,6 +370,7 @@ export default function WorkerDetail() {
   // 推送状态文案（ok 单目标不展开明细；failed 列原因）
   const PUSH_LABEL = {
     ok: t('workerDetail.pushOk'),
+    degraded: t('workerDetail.pushDegraded'),
     failed: t('workerDetail.pushFailed'),
     pending: t('workerDetail.pushPending'),
     'n/a': t('workerDetail.pushNa'),

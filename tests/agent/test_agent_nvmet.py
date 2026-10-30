@@ -246,7 +246,8 @@ def test_cache_apply_revoke(backend, fake_host):
     cache.apply("worker-01", None, [NQN_UBUNTU], [HOST_NQN])
     assert ("delete_host", NQN_UBUNTU, HOST_NQN) in calls
     with open(cache.path, encoding="utf-8") as f:
-        assert "worker-01" not in json.load(f)
+        entry = json.load(f)["worker-01"]
+    assert entry["secret"] is None  # 保留 tombstone，周期 reconcile 继续确保 key 已删
 
 
 def test_cache_reconcile_retries(backend, fake_host):
@@ -314,7 +315,7 @@ def test_push_credential_revoke(agent_client):
     assert res.status_code == 200
     assert res.json()["secret"] is False
     assert ("delete_host", NQN_UBUNTU, HOST_NQN) in calls
-    assert "worker-01" not in backend.cache._entries
+    assert backend.cache._entries["worker-01"]["secret"] is None
 
 
 def test_push_credential_rejects_nqn_traversal(agent_client):
@@ -463,6 +464,63 @@ def test_cache_tls_409_is_non_fatal(backend, fake_host):
     b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
     host, _ = fake_host
     host.tls_ready = False
-    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    result = cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
     assert ("set_host", NQN_UBUNTU, HOST_NQN, SECRET) in calls
     assert [c for c in calls if c[0] == "set_tls_key"] == []
+    assert result["tls_applied"] == 0 and result["tls_expected"] == 1
+    assert result["tls_unavailable"] == 1
+
+
+def test_sync_reports_tls_applied_counts(backend):
+    """成功推送回报 expected/applied，控制面据此判定 ok。"""
+    b, cache, _ = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    result = cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK)
+    assert result["tls_applied"] == 1 and result["tls_expected"] == 1
+    assert result["tls_unavailable"] == result["tls_missing"] == 0
+
+
+def test_credential_status_endpoint(agent_client):
+    """POST /credential/status：不依赖缓存，直接查目标端 key 是否在位。"""
+    client, backend, _ = agent_client
+    backend.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    client.post("/credential", json={
+        "worker_id": "worker-01", "secret": SECRET,
+        "sub_nqns": [NQN_UBUNTU], "host_nqns": [HOST_NQN],
+        "tls_psk": TLS_PSK, "generation": 1,
+    })
+    res = client.post("/credential/status", json={
+        "worker_id": "worker-01", "sub_nqns": [NQN_UBUNTU], "host_nqns": [HOST_NQN],
+    })
+    assert res.status_code == 200
+    assert res.json()["present_all"] is True
+    backend.host.delete_tls_key(NQN_UBUNTU, HOST_NQN)
+    res = client.post("/credential/status", json={
+        "worker_id": "worker-01", "sub_nqns": [NQN_UBUNTU], "host_nqns": [HOST_NQN],
+    })
+    assert res.json()["present_all"] is False
+
+
+def test_generation_rejects_stale_push(backend, fake_host):
+    """旧 generation 的迟到 push 不得覆盖新值；缓存与宿主都不再改变。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK, generation=2)
+    before = len(calls)
+    result = cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN],
+                         TLS_PSK, generation=1)
+    assert result["stale"] is True and result["tls_applied"] == 0
+    assert len(calls) == before
+    with open(cache.path, encoding="utf-8") as f:
+        assert json.load(f)["worker-01"]["generation"] == 2
+
+
+def test_revoke_tombstone_is_replayed(backend, fake_host):
+    """吊销保留 tombstone：周期 reconcile 继续确保目标端 key 已删除。"""
+    b, cache, calls = backend
+    b.create_target(IQN_UBUNTU, "/srv/x.img", cd=False)
+    cache.apply("worker-01", SECRET, [NQN_UBUNTU], [HOST_NQN], TLS_PSK, generation=1)
+    cache.apply("worker-01", None, [NQN_UBUNTU], [HOST_NQN], generation=2)
+    before = len(calls)
+    assert cache.reconcile() == {"applied": 1, "failed": 0}
+    assert ("delete_tls_key", NQN_UBUNTU, HOST_NQN) in calls[before:]

@@ -73,6 +73,7 @@ def fake_host():
         def __init__(self):
             self.calls: list = []
             self.subsystems: dict = {}
+            self.tls_keys: dict = {}
             self.unreachable = False
             self.configfs = True
             self.tls_ready = True  # 置 False 模拟宿主服务无 TLS 端口（PUT /tls → 409）
@@ -102,6 +103,8 @@ def fake_host():
             if nqn not in self.subsystems:
                 raise NvmetHostError(404, f"subsystem not found: {nqn}")
             del self.subsystems[nqn]
+            for key in [k for k in self.tls_keys if k[0] == nqn]:
+                self.tls_keys.pop(key, None)
 
         def list_subsystems(self):
             self._check()
@@ -127,12 +130,22 @@ def fake_host():
             if not self.tls_ready:
                 raise NvmetHostError(409, "TLS port disabled (NVMET_TLS_PORT_ID 为空)")
             self.calls.append(("set_tls_key", nqn, hostnqn, psk))
+            self.tls_keys[(nqn, hostnqn)] = 1
 
         def delete_tls_key(self, nqn, hostnqn):
             self._check()
             if nqn not in self.subsystems:
                 raise NvmetHostError(404, f"subsystem not found: {nqn}")
             self.calls.append(("delete_tls_key", nqn, hostnqn))
+            self.tls_keys.pop((nqn, hostnqn), None)
+
+        def get_tls_key(self, nqn, hostnqn):
+            self._check()
+            if nqn not in self.subsystems:
+                raise NvmetHostError(404, f"subsystem not found: {nqn}")
+            present = (nqn, hostnqn) in self.tls_keys
+            return {"nqn": nqn, "hostnqn": hostnqn, "present": present,
+                    "serials": [1] if present else []}
 
     host = FakeHost()
     return host, host.calls

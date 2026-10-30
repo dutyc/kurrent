@@ -184,22 +184,39 @@ def refresh_once(client, pki_dir: Path, store: CrlStore) -> None:
     write_crls(Path(pki_dir), client.fetch_crls(), store)
 
 
+def _initial_fetch(client, pki_dir: Path, store: CrlStore,
+                   retries: int = 5, delay: float = 2.0) -> bool:
+    """初始拉取：短重试吸收控制面/nginx 启动期的 502，仍失败则交周期刷新。
+
+    周期刷新开启时由刷新线程调用：服务先起来（入站 fail-closed），重试不占启动路径，
+    避免控制面晚就绪把组件启动阻塞成一次性的永久失败。周期刷新被关闭时没有线程可交棒，
+    只能在调用方做一次有界重试。"""
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            refresh_once(client, pki_dir, store)
+            log.info("crl: initial fetch ok (%s)", store.describe())
+            return True
+        except Exception as exc:
+            log.warning("crl: initial fetch %d/%d failed: %s", attempt, retries, exc)
+            if attempt < retries and delay > 0:
+                threading.Event().wait(delay)
+    log.warning("crl: initial fetch failed, inbound fails closed until periodic refresh succeeds")
+    return False
+
+
 def start_refresh_thread(client, pki_dir: Path, store: CrlStore) -> threading.Thread | None:
-    """初始拉取失败不退出（degraded，入站 fail-closed），后台按周期重试。"""
-    try:
-        refresh_once(client, pki_dir, store)
-        log.info("crl: initial fetch ok (%s)", store.describe())
-    except Exception as exc:
-        log.warning("crl: initial fetch failed, inbound fails closed until available: %s", exc)
+    """后台初始重试 + 周期刷新；初始失败不退出（degraded，入站 fail-closed）。"""
     try:
         interval = int(os.environ.get(REFRESH_ENV, DEFAULT_REFRESH_SECONDS))
     except ValueError:
         interval = DEFAULT_REFRESH_SECONDS
     if interval <= 0:
         log.warning("crl: refresh disabled (%s=%s)", REFRESH_ENV, interval)
+        _initial_fetch(client, pki_dir, store)
         return None
 
     def _loop() -> None:
+        _initial_fetch(client, pki_dir, store)
         while True:
             threading.Event().wait(interval)
             try:

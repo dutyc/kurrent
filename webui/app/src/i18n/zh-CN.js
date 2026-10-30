@@ -361,6 +361,7 @@ const zh = {
     credentialUpdated: '更新时间',
     credentialPush: '推送状态',
     pushOk: '已送达',
+    pushDegraded: '部分生效（节点 TLS 数据面未就绪，对账将重试）',
     pushFailed: '同步失败（对账将自动重试）',
     pushPending: '待同步（对账将重放）',
     pushNa: '不适用（目标节点非 nvmet 后端）',

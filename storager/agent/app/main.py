@@ -617,12 +617,25 @@ backend = _make_backend()
 
 
 def _startup() -> None:
-    backend.wait_ready()
-    result = backend.startup()
-    if result is not None:                       # stgt/nvmet 返回 scan 结果，lio 返回 None
-        oplog.record("auto_scan", {}, "ok", "local",
-                     created=len(result.get("created", [])),
-                     skipped=len(result.get("skipped", [])))
+    """启动扫描：宿主服务/CRL 可能晚于本容器就绪，失败按指数退避重试而不是一次性放弃。
+
+    真实故障：nvmet-host 初始 CRL 拉取遇 502 时 fail-closed，Agent 的首次 scan 立刻 503；
+    旧实现只跑一次，此后 4421/subsystems 永远不建，直到人工重启。"""
+    delay = 2.0
+    while not _reconcile_stop.is_set():
+        try:
+            backend.wait_ready()
+            result = backend.startup()
+            if result is not None:                       # stgt/nvmet 返回 scan 结果，lio 返回 None
+                oplog.record("auto_scan", {}, "ok", "local",
+                             created=len(result.get("created", [])),
+                             skipped=len(result.get("skipped", [])))
+            return
+        except Exception as exc:
+            log.warning(f"startup failed: {exc}; retrying in {delay:.0f}s")
+            if _reconcile_stop.wait(delay):
+                return
+            delay = min(delay * 2, 30.0)
 
 
 _reconcile_stop = threading.Event()
@@ -677,6 +690,14 @@ class CredentialPushReq(BaseModel):
     sub_nqns: list = []
     host_nqns: list = []
     tls_psk: Optional[str] = None
+    generation: int = 0
+
+
+class CredentialStatusReq(BaseModel):
+    """只读查询某 worker 在本节点的目标端 PSK 是否在位（控制面对账用）。"""
+    worker_id: str
+    sub_nqns: list = []
+    host_nqns: list = []
 
 
 # ── 后端就绪度探针（healthz 投影，仅 nvmet 后端）──
@@ -738,9 +759,23 @@ def push_credential(req: CredentialPushReq, request: Request):
         host_nqns = [_safe_nqn(x, "host_nqns") for x in req.host_nqns]
         try:
             return backend.cache.apply(req.worker_id, req.secret, sub_nqns,
-                                       host_nqns, req.tls_psk)
+                                       host_nqns, req.tls_psk, req.generation)
         except NvmetHostError as exc:
             raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
+
+
+@app.post("/credential/status", dependencies=[Depends(verify_client_cert)])
+def credential_status(req: CredentialStatusReq):
+    """只读查询目标端 key 在位状态；不写缓存、不改变宿主状态。"""
+    from .nvmet import NvmetBackend, NvmetHostError
+    if not isinstance(backend, NvmetBackend):
+        raise HTTPException(400, "credential status requires backend=nvmet")
+    try:
+        sub_nqns = [_safe_nqn(x, "sub_nqns") for x in req.sub_nqns]
+        host_nqns = [_safe_nqn(x, "host_nqns") for x in req.host_nqns]
+        return backend.cache.credential_status(req.worker_id, sub_nqns, host_nqns)
+    except NvmetHostError as exc:
+        raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
 
 
 @app.post("/lun/disk", dependencies=[Depends(verify_client_cert)])

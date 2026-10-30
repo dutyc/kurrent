@@ -30,13 +30,52 @@ class _FakeKeyring:
 
     def __init__(self):
         self.keys: dict[tuple[str, str], bytes] = {}
+        self._serials: dict[int, tuple[str, str]] = {}
+        self._next_serial = 0x2A
 
     def set_key(self, hostnqn, subsysnqn, psk):
-        self.keys[(hostnqn, subsysnqn)] = psk
-        return 0x2A
+        identity = (hostnqn, subsysnqn)
+        self.keys[identity] = psk
+        serial = self._next_serial
+        self._next_serial += 1
+        self._serials[serial] = identity
+        return serial
 
     def delete_key(self, hostnqn, subsysnqn):
-        return self.keys.pop((hostnqn, subsysnqn), None) is not None
+        identity = (hostnqn, subsysnqn)
+        if identity not in self.keys:
+            return False
+        for serial, ident in list(self._serials.items()):
+            if ident == identity:
+                self._serials.pop(serial, None)
+        self.keys.pop(identity, None)
+        return True
+
+    def key_status(self, hostnqn, subsysnqn):
+        identity = (hostnqn, subsysnqn)
+        serials = [s for s, ident in self._serials.items() if ident == identity]
+        return {"present": bool(serials), "serials": serials}
+
+    def delete_keys_for_subsystem(self, subsysnqn):
+        removed = [h for (h, n) in list(self.keys) if n == subsysnqn]
+        for h in removed:
+            self.delete_key(h, subsysnqn)
+        return removed
+
+    def keyring_serial(self):
+        return 1
+
+    def _linked_serials(self, keyring):
+        return list(self._serials)
+
+    def _describe(self, serial):
+        ident = self._serials.get(serial)
+        return f"NVMe0R01 {ident[0]} {ident[1]}" if ident else None
+
+    def _unlink(self, serial, keyring):
+        ident = self._serials.pop(serial, None)
+        if ident:
+            self.keys.pop(ident, None)
 
 
 @pytest.fixture()
@@ -327,6 +366,38 @@ def test_delete_tls_key_absent_is_false(client, configfs, keyring, tls_port):
     assert res.json()["deleted"] is False
 
 
+def test_get_tls_key_status(client, configfs, keyring, tls_port):
+    """GET 查询 PSK 在位：写入后 present+serial，删除后 absent（控制面对账依据）。"""
+    client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    client.put(f"/subsystems/{NQN}/tls", json={"hostnqn": HOST_NQN, "psk": PSK_HEX})
+    res = client.get(f"/subsystems/{NQN}/tls/{HOST_NQN}")
+    assert res.status_code == 200
+    assert res.json()["present"] is True and res.json()["serials"]
+    client.delete(f"/subsystems/{NQN}/tls/{HOST_NQN}")
+    res = client.get(f"/subsystems/{NQN}/tls/{HOST_NQN}")
+    assert res.status_code == 200 and res.json()["present"] is False
+
+
+def test_delete_subsystem_clears_tls_keys(client, configfs, keyring, tls_port):
+    """删除子系统按 subsysnqn 清掉 .nvme 里的 PSK，避免旧 key 继续完成握手。"""
+    client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    client.put(f"/subsystems/{NQN}/tls", json={"hostnqn": HOST_NQN, "psk": PSK_HEX})
+    assert (HOST_NQN, NQN) in keyring.keys
+    assert client.delete(f"/subsystems/{NQN}").status_code == 200
+    assert keyring.keys == {}
+
+
+def test_gc_orphan_tls_keys(configfs, nvmet, keyring):
+    """启动 GC：只清无对应子系统的 key，不动仍存在子系统的 key。"""
+    os.makedirs(configfs / "subsystems" / NQN, exist_ok=True)
+    keyring.set_key(HOST_NQN, NQN, bytes.fromhex(PSK_HEX))
+    keyring.set_key(HOST_NQN, "nqn.2026-07.com.test.gone", bytes.fromhex(PSK_HEX))
+    removed = nvmet.manager.gc_orphan_tls_keys()
+    assert (HOST_NQN, "nqn.2026-07.com.test.gone") in removed
+    assert (HOST_NQN, NQN) in keyring.keys
+    assert (HOST_NQN, "nqn.2026-07.com.test.gone") not in keyring.keys
+
+
 def test_delete_subsystem_404(client, configfs):
     res = client.delete(f"/subsystems/{NQN}")
     assert res.status_code == 404
@@ -412,3 +483,38 @@ def test_keyring_serial_found_when_empty(nvmet, tmp_path):
         encoding="utf-8")
     nk = nvmet.NvmePskKeyring(keys_file=str(kf))
     assert nk.keyring_serial() == 0x20F492D5
+
+
+def test_key_serials_describe_linked_key_missing_from_proc(nvmet, tmp_path, monkeypatch):
+    """回归：linked 到 .nvme 但 /proc/keys 不可见的旧 psk 必须能被 DESCRIBE 找到并摘除。
+
+    真实故障：轮换时 add_key 复用旧 key（返回旧 serial），tlshd 仍用旧 PSK；仅靠
+    /proc/keys 过滤会漏删。KEYCTL_DESCRIBE 对 user View 权限可用，不要求 possess。
+    """
+    import struct
+
+    kf = tmp_path / "keys"
+    kf.write_text(
+        "00000010 I------     1 perm 1f1f0000     0     0 keyring   .nvme: 1\n"
+        "00000012 I--Q---     1 perm 3b010000     0     0 psk       NVMe0R01 h s\n",
+        encoding="utf-8")
+    nk = nvmet.NvmePskKeyring(keys_file=str(kf))
+
+    class _FakeLibc:
+        """.nvme 内只挂 0x13；0x13 不出现在 /proc/keys。"""
+
+        def syscall(self, nr, op, *args):
+            if op == nvmet.NvmePskKeyring._KEYCTL_READ:
+                buf, buflen = args[1], args[2]
+                data = struct.pack("<i", 0x13)
+                buf.raw = data + b"\x00" * (buflen - len(data))
+                return len(data)
+            if op == nvmet.NvmePskKeyring._KEYCTL_DESCRIBE:
+                buf, buflen = args[1], args[2]
+                desc = b"psk;0;0;3b010000;NVMe0R01 h s\x00"
+                buf.raw = desc + b"\x00" * (buflen - len(desc))
+                return len(desc)
+            return 0
+
+    monkeypatch.setattr(nk, "_libc", _FakeLibc())
+    assert nk._key_serials("NVMe0R01 h s") == [0x13]

@@ -21,13 +21,13 @@
 
 ```bash
 # 1. 宿主前置（唯一宿主步骤，需 root；幂等，含重启持久化——模块写 /etc/modules-load.d、
-#    configfs 写 /etc/fstab）：
+#    configfs 写 /etc/fstab；tlshd 只检查不代装）：
 sudo bash ../host-prepare.sh
 #    只读诊断（无需 root，部署前排查用）：bash ../host-prepare.sh --check
 
 # 2. 节点侧加入（推荐主路径，仓库根执行）：生成/合并 storager/kurrent.yaml、落 bootstrap
 #    凭据、按 backend 起整套编排（Agent + 本组件），详见 cli/README.md 与节点声明示例；
-#    join 对 nvmet 后端预检宿主前置（模块 + configfs），未就绪报错并指路步骤 1。
+#    join 对 nvmet 后端预检宿主前置（模块 + configfs + tlshd），未就绪报错并指路步骤 1。
 kurrent join <cp-url> --token <bootstrap-token>   # token: kurrent token create 签发
 
 # 3. 仅重启本编排（声明/镜像已就位时；改过组件代码则加 --build）：
@@ -54,12 +54,44 @@ docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
 > Agent 经同一共享卷访问，mTLS 客户端证书鉴权。数据面 4421 仍为宿主监听，暴露面自行用防火墙约束。
 
 > **宿主前置（TLS 数据面，缺任一即数据面不可用）**：内核带 `CONFIG_NVME_TCP_TLS` /
-> `CONFIG_NVME_TARGET_TCP_TLS` / `CONFIG_NVME_KEYRING`，且宿主常驻 **tlshd**（ktls-utils，内核 TLS 握手
-> 走它做用户态 upcall；两端都要）。本服务启动时 `ensure_tls_port()` 建 `ports/2`（`4421`，`tsas=tls1.3`），
-> 失败则 `tls_ready` 保持 false、`/capabilities.port.ready` 如实报 false——控制面据此**拒绝引导**
-> （默认全链路加密，不做明文降级）。
-> 注：`storager/nvmeof/host-prepare.sh` 与 `kurrent join` 目前**只预检 nvmet/nvmet-tcp 与 configfs**，
-> 尚未预检上述 TLS 条件与 tlshd（部署前请手工确认）。
+> `CONFIG_NVME_TARGET_TCP_TLS` / `CONFIG_NVME_KEYRING`（上游 tlshd 还要求 `CONFIG_TLS` 与
+> net/handshake，6.5+），且宿主常驻 **tlshd ≥ 1.5.0**（ktls-utils，内核 TLS 握手走它做用户态
+> upcall；两端都要）。1.5.0 起 tlshd 优先查进程 keyring、再回落会话 keyring——更早的版本会让
+> 会话里残留的旧 PSK 遮蔽 `.nvme` 中的新 PSK，表现为 PSK 轮换后仍按旧值握手。本服务启动时
+> `ensure_tls_port()` 建 `ports/2`（`4421`，`tsas=tls1.3`），失败则 `tls_ready` 保持 false、
+> `/capabilities.port.ready` 如实报 false——控制面据此**拒绝引导**（默认全链路加密，不做明文降级）。
+> `storager/nvmeof/host-prepare.sh` 与 `kurrent join` 预检 nvmet/nvmet-tcp、configfs 与 tlshd
+> 版本/运行状态；上一条的内核编译项仍需手工确认。
+
+### tlshd 1.5.0 安装/升级
+
+发行版包的 ktls-utils 常低于 1.5.0（如 Debian 13 为 1.3.0）：源码安装到 `/usr/local`，保留发行版包
+与其 systemd 单元，只用 drop-in 覆盖 `ExecStart`。
+
+```bash
+# 构建依赖（Debian/Ubuntu）
+sudo apt install -y build-essential pkg-config libgnutls28-dev libkeyutils-dev \
+  libglib2.0-dev libnl-3-dev libnl-genl-3-dev libyaml-dev
+
+curl -sSLO https://github.com/oracle/ktls-utils/releases/download/ktls-utils-1.5.0/ktls-utils-1.5.0.tar.gz
+tar -xzf ktls-utils-1.5.0.tar.gz && cd ktls-utils-1.5.0
+./configure --prefix=/usr/local && make
+sudo make install                        # 产物：/usr/local/sbin/tlshd
+
+sudo install -d /etc/systemd/system/tlshd.service.d
+sudo tee /etc/systemd/system/tlshd.service.d/version-1.5.0.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/sbin/tlshd -c /etc/tlshd/config
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart tlshd
+/usr/local/sbin/tlshd -v 2>&1 | grep 'ktls-utils 1.5.0'
+```
+
+> 不用 `--with-systemd`：上游单元会与发行版单元同名（`/usr/lib/systemd/system/tlshd.service`），
+> 覆盖后升级发行版包容易产生双份二进制。`-c /etc/tlshd/config` 沿用发行版配置。
+> 仅升级 `ktls-utils` 不够：`host-prepare.sh --check` 与 `kurrent join` 都以**服务实际执行的
+> 二进制**为准判定版本。
 
 ## 环境变量
 
@@ -100,11 +132,12 @@ docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
 | `GET` | `/capabilities` | 后端能力（backend=nvmet、cd=false、`port` = 数据面端口含 `port_id`/`trsvcid`/`tsas`/`ready`；数据面关闭时为 `null`） |
 | `POST` | `/port` | 幂等确保数据面端口（NVMe/TCP TLS 1.3，无参数） |
 | `GET` | `/subsystems` | 子系统清单（含 namespaces/hosts） |
-| `POST` | `/subsystems` | `{nqn, backing}` 创建子系统 + namespace/1（严格模式 allow_any_host=0）+ 挂数据面端口（端口未就绪时暂不挂） |
-| `DELETE` | `/subsystems/{nqn}` | 删除（自动摘数据面端口挂载） |
+| `POST` | `/subsystems` | `{nqn, backing}` 创建子系统 + namespace/1（严格模式 allow_any_host=0）+ 挂数据面端口（端口未就绪时暂不挂）；backing 为 512 字节扇区 GPT 时返回 400（导出块 4K，分区表不可读） |
+| `DELETE` | `/subsystems/{nqn}` | 删除（自动摘数据面端口挂载，并清掉该子系统名下全部 `.nvme` PSK） |
 | `PUT` | `/subsystems/{nqn}/hosts` | `{hostnqn, secret}` 登记/更新 host 认证（DHHC-1 明文写入全局 `hosts/<hostnqn>/dhchap_key`，**写 key 即启用认证**——无独立 control 属性——再把该 host symlink 进子系统 `allowed_hosts/` 完成准入） |
 | `DELETE` | `/subsystems/{nqn}/hosts/{hostnqn}` | 移除 host 认证 |
 | `PUT` | `/subsystems/{nqn}/tls` | `{hostnqn, psk}`（64 hex = 32 字节）注入 TLS-PSK 到内核 `.nvme` keyring，identity `NVMe0R01 <hostnqn> <subsysnqn>`；数据面关闭时 409（无可用端口） |
+| `GET` | `/subsystems/{nqn}/tls/{hostnqn}` | 查询该 PSK 是否在位（`{present, serials}`；控制面对账用于发现宿主重启后的 keyring 丢失） |
 | `DELETE` | `/subsystems/{nqn}/tls/{hostnqn}` | 摘除该 host 的 PSK（无则 `deleted:false`，幂等） |
 
 ## 认证模型（按 Worker 跟盘，2026-08-22 裁定）
@@ -157,6 +190,11 @@ nvmet file backend 的逻辑块大小跟随底层 FS 块（典型 4096 B，对 f
 512 字节扇区布局的母盘在 4K 导出下被发起端按 4K 解释，EDK2 找不到 ESP
 （生产实测 sanboot 报 `EFI_NOT_FOUND`）。Agent 建盘时校验母盘布局：512 直接拒绝并给出重建指引；
 `GET /masters` 的 `gpt` 字段（`4k` / `512` / `none`）供前端标注。
+
+引导侧症状：iPXE 报 `Boot from SAN device 0x80 failed: Error 0x7f22208e`（调试日志
+`EFIBLK ... cannot locate file systems`）——即分区表未被识别、系统内没有任何文件系统句柄；
+不是 iPXE/shim 缺陷，按上面的 4K 重建指引处理。本服务在 `POST /subsystems` 建子系统时
+也会校验 backing 的 GPT 布局：512 直接 400，手工/绕过控制面的盘同样挡在导出边界。
 
 制盘要点：在 4K 原生设备（或 `losetup --sector-size 4096` 的 loop 设备）上建分区表——
 `sgdisk` / `parted` 跟随设备逻辑扇区大小；512 布局的存量母盘需在 4K 视图下重建分区表后再投入使用。

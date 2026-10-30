@@ -66,14 +66,14 @@ nvmet-host 管理面不占 TCP：Agent 与 nvmet-host 经共享卷 unix socket `
 # 1. Docker 与 Compose v2
 docker --version && docker compose version
 
-# 2. 存储节点：nvmet 宿主前置（内核模块 + configfs + 重启持久化；幂等）
+# 2. 存储节点：nvmet 宿主前置（内核模块 + configfs + tlshd 版本 + 重启持久化；幂等）
 sudo bash storager/nvmeof/host-prepare.sh
 #    只读诊断（无需 root，部署前排查用）：bash storager/nvmeof/host-prepare.sh --check
 
 # 3. 存储节点：NVMe/TCP TLS 前置——内核需带 CONFIG_NVME_TCP_TLS /
-#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING，且宿主常驻 tlshd
+#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING，且宿主常驻 tlshd >= 1.5.0
 grep -E 'CONFIG_NVME_(TCP_TLS|TARGET_TCP_TLS|KEYRING)' /boot/config-$(uname -r)
-sudo apt install -y ktls-utils        # Debian/Ubuntu；其他发行版取对应包
+sudo apt install -y ktls-utils        # 发行版包低于 1.5.0 时见 storager/nvmeof/nvmet-host/README.md 源码安装
 sudo systemctl enable --now tlshd
 
 # 4. 存储节点：数据盘建议 btrfs 或 xfs（两者均支持 reflink/FICLONE，母盘克隆秒级完成；
@@ -81,7 +81,7 @@ sudo systemctl enable --now tlshd
 #    挂载到 /pool1（示例）：sudo mkfs.btrfs /dev/sdb && sudo mount /dev/sdb /pool1
 ```
 
-> `host-prepare.sh` 只预检 nvmet 模块与 configfs；上面第 3 步的 TLS 条件与 tlshd 目前需手工确认。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
+> `host-prepare.sh` 与 `kurrent join` 预检 nvmet 模块、configfs 与 tlshd（**≥ 1.5.0 且服务运行中**）；第 3 步的内核 TLS 编译项仍需手工确认。tlshd 低于 1.5.0 会让轮换后的旧 PSK 遮蔽新 PSK（1.5.0 起进程 keyring 优先），脚本按失败处理。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
 
 **宿主基线（认证体系成立的前提）**：默认只读检查对外 TCP 监听、Docker 暴露面与凭据文件权限；脚本不修改系统状态。
 
@@ -316,7 +316,8 @@ docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 | DHCP 无应答 | `dnsmasq.conf` 的 `interface=` 是否对应真实网卡（`ip a` 核对）；防火墙 67/69 UDP |
 | Agent 容器反复重启 | `docker logs storager-agent`；多为控制面不可达（`controlPlane.url` 443 未放通）或引导凭据文件缺失（`kurrent join --token <token>` 重写 agent.token；nvmet-host.token 可删后重启 agent 容器触发重新派生） |
 | 控制面 503 / enroll 失败 | nginx 443 与 `/api/cp` 反代是否正常；控制面 `curl -k https://<cp-ip>/api/cp/healthz` |
-| 数据面端口未就绪 / 引导被拒 | 存储节点宿主是否带 NVMe/TCP TLS 内核配置、`tlshd` 是否运行；`docker logs kurrent-nvmet-host` 查 `4421` 建口日志；`/capabilities` 的 `port.ready` 应为 true |
+| 数据面端口未就绪 / 引导被拒 | 存储节点宿主是否带 NVMe/TCP TLS 内核配置、`tlshd >= 1.5.0` 是否运行（`bash storager/nvmeof/host-prepare.sh --check`）；`docker logs kurrent-nvmet-host` 查 `4421` 建口日志；`/capabilities` 的 `port.ready` 应为 true |
+| 引导报 `Error 0x7f22208e`（`Boot from SAN device ... failed`） | 系统盘 GPT 扇区布局与 nvmet 导出块大小不一致：nvmet file backend 按底层 FS 块（典型 4096 B）导出，512 字节扇区 GPT 会被 EDK2 视为无分区。核对 `GET /masters` 的 `gpt` 字段（须为 `4k`），并按 nvmet-host README「盘文件要求」重建 4K 原生 GPT |
 
 ## 附录：声明配置速查
 

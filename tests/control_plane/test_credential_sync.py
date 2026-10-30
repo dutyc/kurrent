@@ -39,8 +39,14 @@ def _push_count() -> int:
     return settings.operations_file.read_text(encoding="utf-8").count('"credential.push"')
 
 
-def _fail_push(w, s, subs, hosts, tls_psk=None):
+def _fail_push(w, s, subs, hosts, tls_psk=None, generation=0):
     raise RuntimeError("agent down")
+
+
+def _ok_push(w, s, subs, hosts, tls_psk=None):
+    expected = len(subs) * len(hosts) if (tls_psk or s is None) else 0
+    return {"worker_id": w, "tls_applied": expected if s else 0,
+            "tls_expected": expected, "tls_revoked": expected if s is None else 0}
 
 
 # ============================ 状态回写与投影 ============================
@@ -66,6 +72,103 @@ def test_push_state_recorded_and_projected(client, auth_headers, mock_agent_clie
     assert "sha256:" in raw and secret not in raw
 
 
+def test_push_degraded_when_host_tls_disabled(client, auth_headers, mock_agent_client):
+    """宿主无 TLS 端口：认证已写但 PSK 未应用 → degraded，不能显示为已送达。"""
+    _setup_agent_and_disk(client, auth_headers)
+
+    def no_tls(w, s, subs, hosts, tls_psk=None, generation=0):
+        return {"tls_applied": 0, "tls_expected": len(subs) * len(hosts),
+                "tls_unavailable": len(subs) * len(hosts),
+                "tls_error": "TLS port disabled"}
+
+    mock_agent_client.set_credential = no_tls
+    res = client.put("/workers/worker-01/credential",
+                     json={"secret": make_secret()}, headers=auth_headers)
+    push = res.json()["push"]
+    assert push["result"] == "degraded"
+    assert push["agents"][0]["result"] == "degraded"
+    assert "TLS port disabled" in push["agents"][0]["error"]
+
+
+def test_push_failed_when_tls_partially_applied(client, auth_headers, mock_agent_client):
+    """部分应用（例如子系统已删）→ failed，不能把未应用当成功。"""
+    _setup_agent_and_disk(client, auth_headers)
+
+    def partial(w, s, subs, hosts, tls_psk=None, generation=0):
+        return {"tls_applied": 0, "tls_expected": 1, "tls_missing": 1,
+                "tls_error": "subsystem not found"}
+
+    mock_agent_client.set_credential = partial
+    res = client.put("/workers/worker-01/credential",
+                     json={"secret": make_secret()}, headers=auth_headers)
+    push = res.json()["push"]
+    assert push["result"] == "failed"
+    assert "not applied" in push["agents"][0]["error"]
+
+
+def test_push_without_tls_report_fails_closed(client, auth_headers, mock_agent_client):
+    """Agent 不回报 tls_applied（旧版/异常）：failed，不再默认 ok。"""
+    _setup_agent_and_disk(client, auth_headers)
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0: {"worker_id": w})
+    res = client.put("/workers/worker-01/credential",
+                     json={"secret": make_secret()}, headers=auth_headers)
+    assert res.json()["push"]["result"] == "failed"
+
+
+def test_reconcile_repushes_when_key_missing(client, auth_headers, mock_agent_client):
+    """台账 ok 但宿主 keyring 已空（重启）：对账回查在位状态并重推。"""
+    _setup_agent_and_disk(client, auth_headers)
+    secret = make_secret()
+    res = client.put("/workers/worker-01/credential",
+                     json={"secret": secret}, headers=auth_headers)
+    assert res.json()["push"]["result"] == "ok"
+
+    mock_agent_client.credential_status = (
+        lambda worker_id, sub_nqns, host_nqns: {
+            "worker_id": worker_id,
+            "keys": [{"sub_nqn": s, "host_nqn": h, "present": False}
+                     for s in sub_nqns for h in host_nqns],
+            "present_all": False,
+        })
+    pushes = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        pushes.append((s, generation)) or _ok_push(w, s, subs, hosts, tls_psk))
+
+    summary = reconcile_credentials_once()
+    assert summary == {"targets": 1, "pushed": 1, "skipped": 0, "failed": 0}
+    assert pushes and pushes[0][0] == secret
+    assert pushes[0][1] > 0
+
+
+def test_generation_advances_and_stale_result_ignored(client, auth_headers, mock_agent_client):
+    """每次推送推进 generation；旧 generation 的结果不能覆盖新台账。"""
+    _setup_agent_and_disk(client, auth_headers)
+    seen = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        seen.append(generation) or _ok_push(w, s, subs, hosts, tls_psk))
+
+    client.put("/workers/worker-01/credential",
+               json={"secret": make_secret()}, headers=auth_headers)
+    client.put("/workers/worker-01/credential",
+               json={"secret": make_secret()}, headers=auth_headers)
+    data = yaml.safe_load(settings.credentials_file.read_text(encoding="utf-8"))
+    assert data["generations"]["worker-01"] >= 2
+    assert seen[0] < seen[1]
+
+    from control_plane.app.routers import workers as wmod
+    # 迟到的旧结果：不应把台账覆盖回 ok/旧 generation
+    with wmod.credential_pushes.locked():
+        before = wmod.credential_pushes.load()["pushes"]["worker-01/ag-01"]
+    assert wmod._set_push_state("worker-01", "ag-01", "failed", None,
+                                before["generation"] - 1, "stale") is False
+    with wmod.credential_pushes.locked():
+        after = wmod.credential_pushes.load()["pushes"]["worker-01/ag-01"]
+    assert after["generation"] == before["generation"] and after["result"] == "ok"
+
+
 def test_push_failure_visible_then_reconcile_recovers(client, auth_headers, mock_agent_client):
     """推送失败可见（failed + error）；对账补推成功；再次对账跳过（不刷屏、无新审计）。"""
     _setup_agent_and_disk(client, auth_headers)
@@ -78,7 +181,7 @@ def test_push_failure_visible_then_reconcile_recovers(client, auth_headers, mock
     count_after_failure = _push_count()
 
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     summary = reconcile_credentials_once()
     assert summary == {"targets": 1, "pushed": 1, "skipped": 0, "failed": 0}
     assert pushes == [secret]
@@ -107,7 +210,7 @@ def test_reconcile_delivers_revocation_after_outage(client, auth_headers, mock_a
     assert body["exists"] is False and body["push"]["result"] == "failed"
 
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     summary = reconcile_credentials_once()
     assert pushes == [None] and summary["pushed"] == 1
     body = client.get("/workers/worker-01/credential", headers=auth_headers).json()
@@ -130,7 +233,7 @@ def test_reconcile_covers_crash_gap(client, auth_headers, mock_agent_client):
     assert body["exists"] is True and body["push"]["result"] == "pending"
 
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     summary = reconcile_credentials_once()
     assert pushes == [secret] and summary["pushed"] == 1
     body = client.get("/workers/worker-01/credential", headers=auth_headers).json()
@@ -158,7 +261,7 @@ def test_reconcile_prunes_stale_records_and_repushes_after_reregister(
     res = client.post("/agents", json=AGENT_BODY, headers=auth_headers)
     assert res.status_code == 201, res.text
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     summary = reconcile_credentials_once()
     assert summary["pushed"] == 1 and len(pushes) == 1
 
@@ -167,7 +270,7 @@ def test_non_nvmet_target_marked_na(client, auth_headers, mock_agent_client):
     """非 nvmet 后端 Agent：推送记 n/a（凭据不适用，非故障；审计 skipped），对账视为已同步。"""
     _setup_agent_and_disk(client, auth_headers)
 
-    def not_nvmet(w, s, subs, hosts, tls_psk=None):
+    def not_nvmet(w, s, subs, hosts, tls_psk=None, generation=0):
         raise AgentAPIError("ag-01", 400, "credential push requires backend=nvmet")
 
     mock_agent_client.set_credential = not_nvmet
@@ -190,7 +293,7 @@ def test_credential_less_worker_not_pushed(client, auth_headers, mock_agent_clie
     test_credentials.py「建盘即签发」。"""
     _setup_agent_and_disk(client, auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
 
     assert not settings.credential_push_file.exists()  # 建盘未触发无意义推送
     summary = reconcile_credentials_once()
@@ -211,7 +314,7 @@ def test_revoke_still_retried_after_history_exists(client, auth_headers, mock_ag
     client.delete("/workers/worker-01/credential", headers=auth_headers)
 
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append(s) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     assert reconcile_credentials_once()["pushed"] == 1
     assert pushes == [None]
 

@@ -22,7 +22,7 @@ echo "FAKE-DOCKER $(pwd) $*" >> "${FAKE_DOCKER_LOG}"
 if [ "$1" = "inspect" ]; then echo healthy; fi
 `
 
-// stubHostReady 注入「宿主前置已就绪」的假环境（假 /proc/mounts + /sys/module）：
+// stubHostReady 注入「宿主前置已就绪」的假环境（假 /proc/mounts + /sys/module + tlshd 版本）：
 // join 的 nvmet 预检在无内核 nvmet 的沙盒里照常通过。真实路径见 hostEnvPaths 缺省值。
 func stubHostReady(t *testing.T) {
 	t.Helper()
@@ -40,11 +40,15 @@ func stubHostReady(t *testing.T) {
 		}
 	}
 	old := hostEnvPaths
-	hostEnvPaths = hostEnv{procMounts: mounts, sysModuleRoot: modRoot}
+	hostEnvPaths = hostEnv{
+		procMounts:    mounts,
+		sysModuleRoot: modRoot,
+		tlshdVersion:  func() (string, error) { return "1.5.0", nil },
+	}
 	t.Cleanup(func() { hostEnvPaths = old })
 }
 
-// breakHost 覆盖为「宿主前置未就绪」的假环境（空 /proc/mounts、空 /sys/module）。
+// breakHost 覆盖为「宿主前置未就绪」的假环境（空 /proc/mounts、空 /sys/module、无 tlshd）。
 func breakHost(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
@@ -53,7 +57,11 @@ func breakHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := hostEnvPaths
-	hostEnvPaths = hostEnv{procMounts: mounts, sysModuleRoot: filepath.Join(root, "module")}
+	hostEnvPaths = hostEnv{
+		procMounts:    mounts,
+		sysModuleRoot: filepath.Join(root, "module"),
+		tlshdVersion:  func() (string, error) { return "", fmt.Errorf("未安装（需 ktls-utils >= %s）", tlshdMinVersion) },
+	}
 	t.Cleanup(func() { hostEnvPaths = old })
 }
 
@@ -568,6 +576,91 @@ func TestJoinNvmetHostPreflightRejects(t *testing.T) {
 	}
 	if _, statErr := os.Stat(logFile); statErr == nil {
 		t.Error("宿主前置未就绪不应启动 compose（docker 已被调用）")
+	}
+}
+
+func TestJoinNvmetHostPreflightTlshd(t *testing.T) {
+	// tlshd 版本是数据面 TLS 的硬前置：缺失/低于 1.5.0 一律 fail fast（compose 不启动）
+	cases := []struct {
+		name    string
+		version func() (string, error)
+		want    []string
+	}{
+		{"missing", func() (string, error) {
+			return "", fmt.Errorf("未安装（需 ktls-utils >= %s）", tlshdMinVersion)
+		}, []string{"tlshd 不可用", "1.5.0", "nvmet-host/README.md"}},
+		{"old", func() (string, error) { return "1.4.9", nil },
+			[]string{"tlshd 版本过低: 1.4.9", ">= 1.5.0"}},
+		{"ok", func() (string, error) { return "1.5.0", nil }, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, storager, logFile := newFakeRepo(t)
+			old := hostEnvPaths.tlshdVersion
+			hostEnvPaths.tlshdVersion = tc.version
+			t.Cleanup(func() { hostEnvPaths.tlshdVersion = old })
+			if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"})
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("tlshd 就绪时 join 应成功: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("tlshd 未就绪应报错")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err 缺 %q:\n%v", want, err)
+				}
+			}
+			if _, statErr := os.Stat(logFile); statErr == nil {
+				t.Error("tlshd 未就绪不应启动 compose（docker 已被调用）")
+			}
+		})
+	}
+}
+
+func TestParseTlshdVersion(t *testing.T) {
+	ver, err := parseTlshdVersion("tlshd, built from ktls-utils 1.5.0 on Oct 27 2026 13:20:47")
+	if err != nil || ver != "1.5.0" {
+		t.Fatalf("parse = %q, %v; want 1.5.0", ver, err)
+	}
+	if _, err := parseTlshdVersion("tlshd, unknown build"); err == nil {
+		t.Fatal("无法解析的输出应报错")
+	}
+}
+
+func TestVersionAtLeast(t *testing.T) {
+	cases := []struct {
+		v, min string
+		want   bool
+	}{
+		{"1.5.0", "1.5.0", true},
+		{"1.5.1", "1.5.0", true},
+		{"1.10.0", "1.5.0", true},
+		{"2.0.0", "1.5.0", true},
+		{"1.4.9", "1.5.0", false},
+		{"1.4", "1.5.0", false},
+		{"1.5", "1.5.0", true},
+	}
+	for _, tc := range cases {
+		if got := versionAtLeast(tc.v, tc.min); got != tc.want {
+			t.Errorf("versionAtLeast(%q, %q) = %v; want %v", tc.v, tc.min, got, tc.want)
+		}
+	}
+}
+
+func TestParseExecStartPath(t *testing.T) {
+	out := "{ path=/usr/local/sbin/tlshd ; argv[]=/usr/local/sbin/tlshd -c /etc/tlshd/config ; ignore_errors=no ; }"
+	if got := parseExecStartPath(out); got != "/usr/local/sbin/tlshd" {
+		t.Fatalf("parseExecStartPath = %q", got)
+	}
+	if got := parseExecStartPath(""); got != "" {
+		t.Fatalf("空输出应返回空路径: %q", got)
 	}
 }
 

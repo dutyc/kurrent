@@ -131,6 +131,7 @@ class NvmePskKeyring:
 
     _SYS_ADD_KEY = 248  # x86_64
     _SYS_KEYCTL = 250
+    _KEYCTL_DESCRIBE = 6
     _KEYCTL_UNLINK = 9
     _KEYCTL_READ = 11
     _KEY_TYPE = "psk"
@@ -189,11 +190,47 @@ class NvmePskKeyring:
             raise OSError(err, f"keyctl(READ keyring) failed: {os.strerror(err)}")
         return [struct.unpack("<i", buf.raw[i:i + 4])[0] for i in range(0, n, 4)]
 
+    def _describe(self, serial: int) -> str | None:
+        """KEYCTL_DESCRIBE 一条 key → description；失败（含 psk 不允许读）→ None。
+
+        /proc/keys 是每进程可见视图；长跑服务看不到旧进程写入的 key，必须用 DESCRIBE
+        枚举 .nvme 内 linked key，否则 unlink 漏删、add_key 复用旧 key。"""
+        buf = ctypes.create_string_buffer(4096)
+        ctypes.set_errno(0)
+        n = self._libc.syscall(self._SYS_KEYCTL, self._KEYCTL_DESCRIBE, serial, buf, len(buf))
+        if n < 0:
+            return None
+        raw = buf.raw[:n].split(b"\x00", 1)[0].decode("utf-8", "replace")
+        parts = raw.split(";", 4)
+        return parts[4] if len(parts) == 5 else None
+
     def _key_serials(self, identity: str) -> list[int]:
         """.nvme 里 description == identity 的全部 key serial（历史重复可能不止一条）。"""
         desc = {s: d for s, ktype, d in self._entries() if ktype == self._KEY_TYPE}
         return [s for s in self._linked_serials(self.keyring_serial())
-                if desc.get(s) == identity]
+                if (self._describe(s) or desc.get(s)) == identity]
+
+    def key_status(self, hostnqn: str, subsysnqn: str) -> dict:
+        """目标端 key 是否在位（只读）：供 Agent/控制面判断轮换或重启后是否需要重推。"""
+        serials = self._key_serials(self.identity(hostnqn, subsysnqn))
+        return {"present": bool(serials), "serials": serials}
+
+    def delete_keys_for_subsystem(self, subsysnqn: str) -> list[str]:
+        """删除 .nvme 中属于某子系统的全部 psk key，返回被清理的 hostnqn。
+
+        删除子系统时 hostnqn 集合可能已不可从 configfs 还原（allowed_hosts 先被摘除），
+        因此按 identity 第三段反查，而不是依赖调用方逐个提供 hostnqn。"""
+        keyring = self.keyring_serial()
+        removed: list[str] = []
+        for serial in self._linked_serials(keyring):
+            desc = self._describe(serial)
+            if not desc:
+                continue
+            parts = desc.split()
+            if len(parts) == 3 and parts[0] == "NVMe0R01" and parts[2] == subsysnqn:
+                self._unlink(serial, keyring)
+                removed.append(parts[1])
+        return removed
 
     def set_key(self, hostnqn: str, subsysnqn: str, psk: bytes) -> int:
         """写入/更新 psk key（幂等），返回 key serial。
@@ -287,6 +324,11 @@ class NvmetManager:
         sub = self._sub_path(nqn)
         if not os.path.isdir(sub):
             raise ValueError(f"subsystem not found: {nqn}")
+        try:
+            self.keyring.delete_keys_for_subsystem(nqn)
+        except (OSError, RuntimeError) as exc:
+            # 子系统仍须删除；key 残留由启动 GC 兜底，不能因 keyring 异常卡住盘删除
+            log.warning(f"tls key cleanup failed for {nqn}: {exc}")
         self.detach_port(nqn)
         ns_base = os.path.join(sub, "namespaces")
         if os.path.isdir(ns_base):
@@ -484,6 +526,31 @@ class NvmetManager:
         nqn = _safe_nqn(nqn)
         return self.keyring.delete_key(hostnqn, nqn)
 
+    def tls_key_status(self, hostnqn: str, nqn: str) -> dict:
+        hostnqn = _safe_nqn(hostnqn, "hostnqn")
+        nqn = _safe_nqn(nqn)
+        return {"nqn": nqn, "hostnqn": hostnqn,
+                **self.keyring.key_status(hostnqn, nqn)}
+
+    def gc_orphan_tls_keys(self) -> list[tuple[str, str]]:
+        """启动 GC：删除 .nvme 中已无对应 configfs 子系统的 psk key。"""
+        base = os.path.join(self.root, "subsystems")
+        existing = set(os.listdir(base)) if os.path.isdir(base) else set()
+        keyring = self.keyring.keyring_serial()
+        removed: list[tuple[str, str]] = []
+        for serial in self.keyring._linked_serials(keyring):
+            desc = self.keyring._describe(serial)
+            if not desc:
+                continue
+            parts = desc.split()
+            if len(parts) != 3 or parts[0] != "NVMe0R01":
+                continue
+            hostnqn, nqn = parts[1], parts[2]
+            if nqn not in existing:
+                self.keyring._unlink(serial, keyring)
+                removed.append((hostnqn, nqn))
+        return removed
+
     def _sub_path(self, nqn: str) -> str:
         base = os.path.join(self.root, "subsystems")
         path = os.path.join(base, _safe_nqn(nqn))
@@ -662,6 +729,17 @@ def set_tls_key(nqn: str, req: TlsKeySet):
             "tls_port": manager.tls_port_id}
 
 
+@app.get("/subsystems/{nqn}/tls/{hostnqn}", dependencies=[Depends(verify_client_cert)])
+def get_tls_key(nqn: str, hostnqn: str):
+    """查询目标端 PSK 是否在位；控制面对账用它识别重启后 keyring 丢失。"""
+    try:
+        return manager.tls_key_status(hostnqn, nqn)
+    except InvalidInput as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(500, f"keyring query failed: {exc}") from exc
+
+
 @app.delete("/subsystems/{nqn}/tls/{hostnqn}", dependencies=[Depends(verify_client_cert)])
 def delete_tls_key(nqn: str, hostnqn: str):
     try:
@@ -700,6 +778,13 @@ if __name__ == "__main__":
         manager.tls_ready = False
         log.error("数据面端口创建失败，控制面将拒绝引导本节点的盘: %s"
                   "（宿主需 nvmet 模块 + nvme-keyring，后者随 nvmet-tcp 自动加载）", exc)
+    # 启动 GC：删除已无子系统的 psk key（删盘/崩溃窗口的残留），避免吊销后旧 key 仍可握手
+    try:
+        orphans = manager.gc_orphan_tls_keys()
+        if orphans:
+            log.warning("已清理孤儿 TLS key: %s", ", ".join(f"{h} -> {n}" for h, n in orphans))
+    except (OSError, RuntimeError) as exc:
+        log.error("孤儿 TLS key 清理失败（不影响管理面）: %s", exc)
     # 迁移：拆除历史明文口（4420），使升级后的宿主收敛到单口
     try:
         removed = manager.remove_legacy_plain_port()

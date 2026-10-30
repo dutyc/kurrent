@@ -361,6 +361,7 @@ const en = {
     credentialUpdated: 'Updated',
     credentialPush: 'Push status',
     pushOk: 'Delivered',
+    pushDegraded: 'Partially applied (node TLS data plane not ready; reconciliation will retry)',
     pushFailed: 'Sync failed (reconciliation will retry)',
     pushPending: 'Pending (reconciliation will replay)',
     pushNa: 'Not applicable (target agent is not an nvmet backend)',

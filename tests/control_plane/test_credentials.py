@@ -22,6 +22,12 @@ def make_secret(key: bytes = b"0123456789abcdef0123456789abcdef") -> str:
     return "DHHC-1:01:" + base64.b64encode(key + zlib.crc32(key).to_bytes(4, "little")).decode()
 
 
+def _ok_push(w, s, subs, hosts, tls_psk=None):
+    expected = len(subs) * len(hosts) if (tls_psk or s is None) else 0
+    return {"worker_id": w, "tls_applied": expected if s else 0,
+            "tls_expected": expected, "tls_revoked": expected if s is None else 0}
+
+
 def _create_worker(client, auth_headers, worker_id: str = "worker-01") -> None:
     res = client.post("/workers", json={"worker_id": worker_id}, headers=auth_headers)
     assert res.status_code == 201
@@ -422,7 +428,7 @@ def test_push_on_credential_set(client, auth_headers, register_claimed_device, m
     _bind_existing_worker(client, auth_headers, register_claimed_device)
     secret = make_secret()
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
     assert res.status_code == 200
@@ -439,7 +445,7 @@ def test_push_on_credential_revoke(client, auth_headers, register_claimed_device
     _bind_existing_worker(client, auth_headers, register_claimed_device)
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.delete("/workers/worker-01/credential", headers=auth_headers)
     assert res.status_code == 200
@@ -455,7 +461,7 @@ def test_push_host_nqn_derives_from_worker_id(client, auth_headers, mock_agent_c
     res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
     assert res.status_code == 200
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     assert pushes[0][3] == [HOST_NQN]
@@ -472,7 +478,7 @@ def test_push_on_bind_unbind(client, auth_headers, register_claimed_device, mock
     secret = make_secret()
     client.put("/workers/worker-01/credential", json={"secret": secret}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
     assert res.status_code == 200
@@ -494,7 +500,7 @@ def test_push_on_disk_create(client, auth_headers, register_claimed_device, mock
     _bound_worker(client, auth_headers, register_claimed_device)
     client.put("/workers/worker-01/credential", json={"secret": make_secret()}, headers=auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -558,7 +564,7 @@ def test_disk_create_issues_credential_on_nvmet(client, auth_headers, mock_agent
     _create_worker(client, auth_headers)
     _make_nvmet(mock_agent_client)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -593,7 +599,7 @@ def test_disk_create_keeps_existing_credential_on_nvmet(client, auth_headers, mo
     before = client.get("/workers/worker-01/credential", headers=auth_headers).json()
     _make_nvmet(mock_agent_client)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -616,7 +622,7 @@ def test_disk_create_no_credential_on_non_nvmet(client, auth_headers, mock_agent
     assert res.status_code == 201, res.text
     _create_worker(client, auth_headers)
     pushes = []
-    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None: pushes.append((w, s, subs, hosts)) or {}
+    mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append((w, s, subs, hosts)) or _ok_push(w, s, subs, hosts, tls_psk)
 
     res = client.post("/workers/worker-01/luns/disk", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -638,8 +644,8 @@ def test_batch_disk_create_issues_credentials(client, auth_headers, mock_agent_c
         _create_worker(client, auth_headers, worker_id)
     _make_nvmet(mock_agent_client)
     pushes = {}
-    mock_agent_client.set_credential = (lambda w, s, subs, hosts, tls_psk=None:
-                                        pushes.__setitem__(w, s) or {})
+    mock_agent_client.set_credential = (lambda w, s, subs, hosts, tls_psk=None, generation=0:
+                                        pushes.__setitem__(w, s) or _ok_push(w, s, subs, hosts, tls_psk))
 
     res = client.post("/workers/luns/disk/batch", json={
         "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
@@ -686,7 +692,7 @@ def test_push_carries_derived_tls_psk(client, auth_headers, register_claimed_dev
     secret = make_secret()
     seen: list = []
     mock_agent_client.set_credential = (
-        lambda w, s, subs, hosts, tls_psk=None: seen.append(tls_psk) or {})
+        lambda w, s, subs, hosts, tls_psk=None, generation=0: seen.append(tls_psk) or _ok_push(w, s, subs, hosts, tls_psk))
 
     assert secret == make_secret()  # 与 KAT 同输入
     assert client.put("/workers/worker-01/credential", json={"secret": secret},

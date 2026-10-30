@@ -106,6 +106,19 @@ def register_claimed_device(client, auth_headers, ec_keypair):
     return _register
 
 
+def fake_push_result(worker_id, secret, sub_nqns, host_nqns, tls_psk=None,
+                     generation=0) -> dict:
+    """测试用 Agent 推送回执：按 sub × host 回报 TLS 应用数量。"""
+    expected = len(sub_nqns) * len(host_nqns) if (tls_psk or secret is None) else 0
+    return {
+        "worker_id": worker_id,
+        "secret": bool(secret),
+        "tls_applied": expected if secret else 0,
+        "tls_expected": expected,
+        "tls_revoked": expected if secret is None else 0,
+    }
+
+
 @pytest.fixture()
 def mock_agent_client(monkeypatch):
     """外置 Agent 客户端：patch AgentRegistry.client → 内存 fake client。
@@ -124,7 +137,13 @@ def mock_agent_client(monkeypatch):
         list_luns=lambda: [],
         list_masters=lambda: {"masters": [{"name": name} for name in FAKE_MASTERS]},
         scan=lambda: {"created": [], "skipped": []},
-        set_credential=lambda worker_id, secret, sub_nqns, host_nqns, tls_psk=None: {"worker_id": worker_id, "secret": bool(secret)},
+        set_credential=fake_push_result,
+        credential_status=lambda worker_id, sub_nqns, host_nqns: {
+            "worker_id": worker_id,
+            "keys": [{"sub_nqn": s, "host_nqn": h, "present": True}
+                     for s in sub_nqns for h in host_nqns],
+            "present_all": bool(sub_nqns and host_nqns),
+        },
     )
     monkeypatch.setattr(agents, "client", lambda agent: fake)
     return fake

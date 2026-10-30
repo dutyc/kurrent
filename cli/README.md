@@ -114,8 +114,8 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
                                               同步地址，收敛启动 agent（幂等可重跑）；
                                               --agent-id 写入声明 metadata.name（token 绑定
                                               的节点身份，token create 输出的命令已携带）；
-                                              nvmet 后端预检宿主前置（内核模块 + configfs），
-                                              未就绪指路 nvmeof/host-prepare.sh
+                                              nvmet 后端预检宿主前置（内核模块 + configfs +
+                                              tlshd >= 1.5.0），未就绪指路 nvmeof/host-prepare.sh
   workers list | workers get <id>             Worker 台账（只读）
   workers credential show <id> [-o json]      查看 NVMe-oF 认证密钥与推送状态
   workers credential set <id> --secret DHHC-1:... | --generate
@@ -187,7 +187,7 @@ $EDITOR control_plane/kurrent.yaml
 ```bash
 # 轮换：密钥就地生成（32 字节随机 + CRC32，DHHC-1 契约），不打印明文
 kurrent workers credential set worker-01 --generate
-#    → 输出逐 Agent 推送状态：已送达 / 未送达（对账线程自动重试，不会静默丢失）
+#    → 输出逐 Agent 推送状态：已送达 / 部分生效（节点 TLS 未就绪） / 未送达（对账线程自动重试）
 
 kurrent workers credential show worker-01    # 密钥哈希前缀 + 推送状态（-o json 原始返回）
 kurrent workers credential revoke worker-01  # 吊销（轮换 = 再 set 一次即可）
