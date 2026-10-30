@@ -247,8 +247,9 @@ curl -s "$BASE_URL/healthz"
 | `firmware[]` | `dhcp-boot=tag:efi64` 声明的 UEFI 固件：`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
 | `stage2[]` | 脚本链文件（`boot.ipxe`、`boot.ipxe.cfg`、`menu.ipxe`）：`file`、`path`、`host_path`、`status`、`size`、`mtime` |
 | `menu` | `status`（ok/unavailable）与 `items`（可选项计数，跳过 `--gap` 行） |
+| `secureboot` | 可选 Secure Boot 产物：`present`、`status`（ok/incomplete/missing）、`artifact`、`path`、`artifact_sha256`、`artifact_size`、`manifest_present`、`manifest_matches`、`signer`、`built_at`、`boot_https_port`、`port_matches`、`boot_ca_present`、`boot_ca_sha256`、`boot_ca_matches` |
 
-`status=incomplete` 表示固件文件存在但缺少 `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` 中的任一项——stock iPXE 同样无法完成设备认证。`status=empty` 是零字节文件，`missing` 是文件不存在，`rejected` 表示路径越出 tftp 根（控制面拒绝且不会读取该路径）。`host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。
+`status=incomplete` 表示固件文件存在但缺少 `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` 中的任一项——stock iPXE 同样无法完成设备认证。`status=empty` 是零字节文件，`missing` 是文件不存在，`rejected` 表示路径越出 tftp 根（控制面拒绝且不会读取该路径）。`host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。`secureboot.status=ok` 要求签名镜像存在、manifest 哈希一致、固件内嵌的引导端口与部署的 `KURRENT_BOOT_HTTPS_PORT` 一致、boot CA 证书就位，且 manifest 记录的 CA 指纹与控制面当前 boot CA 一致（任一项不一致时固件会拒绝本控制面：端口错则拨不通，锚错则握手被拒）；没有 `tftp/secureboot/` 产物时 `present=false`（纯 L1 部署的正常状态），不影响其余检查。
 
 ### curl
 

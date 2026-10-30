@@ -727,6 +727,7 @@ const en = {
     },
     checks: {
       firmware: 'UEFI firmware',
+      secureBoot: 'Secure Boot',
       service: 'Boot service',
       dataPlane: 'Data plane',
       workers: 'Worker readiness',
@@ -758,6 +759,10 @@ const en = {
       agentsNone: 'No enabled nvmet node: Workers have no data plane to log in to.',
       workersPartial: '{nodes} lack a bound device or a system disk.',
       workersNone: 'No Worker has both a bound device and a system disk.',
+      secureBootManifest: 'The signed image hash does not match its manifest: the artifact was replaced or copied incompletely.',
+      secureBootPort: 'The boot HTTPS port baked into the signed image does not match the deployed boot endpoint: the firmware dials the wrong port.',
+      secureBootCa: 'The boot CA certificate is missing, so the pinned trust anchor cannot be checked.',
+      secureBootCaMismatch: 'The manifest boot CA fingerprint does not match the current control-plane boot CA: the firmware will reject this controller certificate.',
     },
     fixLabel: 'Fix',
     fix: {
@@ -768,6 +773,7 @@ const en = {
       static: 'Check the nginx /tftp/ static mapping and host file permissions.',
       dataPlane: 'On the storage node, confirm the nvmet subsystem and the 4421 TLS listener (storager/nvmet-host).',
       workers: 'Bind a device and create a system disk on the Workers page.',
+      secureBoot: 'Re-export snponly-sb.efi, manifest.json and the boot CA certificate from the build host, and align KURRENT_BOOT_HTTPS_PORT with the port baked into the image.',
     },
     nodeReason: {
       health: 'health {health}',

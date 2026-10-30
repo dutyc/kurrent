@@ -207,3 +207,62 @@ test('相对时间与 TLS 标识格式化', () => {
   assert.equal(formatTsas('plain'), 'plain')
   assert.equal(formatTsas(null), '')
 })
+
+test('Secure Boot 可选：无产物不占状态板，有产物时按哈希与 CA 判定', () => {
+  const absent = buildBootChecks({
+    assets: ASSETS, agents: AGENTS, workers: WORKERS, devices: DEVICES, probes: PROBES, now: NOW,
+  })
+  assert.equal(byId(absent).secureBoot, undefined)
+  assert.equal(absent.counted, 5)
+
+  const secureboot = {
+    present: true,
+    status: 'ok',
+    artifact: 'snponly-sb.efi',
+    artifact_sha256: 'a'.repeat(64),
+    manifest_matches: true,
+    port_matches: true,
+    boot_ca_present: true,
+    boot_ca_matches: true,
+    boot_ca_sha256: 'b'.repeat(64),
+    boot_https_port: 4443,
+    signer: 'CN=kurrent-firmware signing',
+  }
+  const healthy = buildBootChecks({
+    assets: { ...ASSETS, secureboot },
+    agents: AGENTS, workers: WORKERS, devices: DEVICES, probes: PROBES, now: NOW,
+  })
+  const check = byId(healthy).secureBoot
+  assert.equal(healthy.counted, 6)
+  assert.equal(check.status, 'normal')
+  assert.equal(check.detail.port, 4443)
+  assert.equal(check.detail.signer, 'CN=kurrent-firmware signing')
+
+  const t = (key) => key
+  const parts = evidenceParts(check, t, 'en-US').map((part) => part.text)
+  assert.ok(parts.includes('snponly-sb.efi'))
+  assert.ok(parts.includes('TLS 4443'))
+  assert.ok(parts.includes('CN=kurrent-firmware signing'))
+
+  const degraded = buildBootChecks({
+    assets: { ...ASSETS, secureboot: { ...secureboot, status: 'incomplete', manifest_matches: false } },
+    agents: AGENTS, workers: WORKERS, devices: DEVICES, probes: PROBES, now: NOW,
+  })
+  assert.equal(byId(degraded).secureBoot.status, 'degraded')
+  assert.equal(byId(degraded).secureBoot.detail.manifestMatches, false)
+  assert.equal(degraded.overall, 'degraded')
+
+  const wrongCa = buildBootChecks({
+    assets: { ...ASSETS, secureboot: { ...secureboot, status: 'incomplete', boot_ca_matches: false } },
+    agents: AGENTS, workers: WORKERS, devices: DEVICES, probes: PROBES, now: NOW,
+  })
+  assert.equal(byId(wrongCa).secureBoot.detail.caMatches, false)
+
+  const wrongPort = buildBootChecks({
+    assets: { ...ASSETS, secureboot: { ...secureboot, status: 'incomplete', port_matches: false, boot_https_port: 8443 } },
+    agents: AGENTS, workers: WORKERS, devices: DEVICES, probes: PROBES, now: NOW,
+  })
+  assert.equal(byId(wrongPort).secureBoot.detail.portMatches, false)
+  assert.equal(byId(wrongPort).secureBoot.detail.port, 8443)
+  assert.equal(byId(wrongPort).secureBoot.status, 'degraded')
+})

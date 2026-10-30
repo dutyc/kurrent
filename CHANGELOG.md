@@ -39,6 +39,7 @@
 
 ### 修复
 
+- **4443 引导入口不再暴露 `/tftp/`**：Secure Boot 的静态脚本全部嵌入签名固件，L1 仍走 443 的 `/tftp/`；4443 只保留 `/file/` 与三个引导端点，减少读取面与路径解析面。nginx 静态断言与部署指南（中英）已同步
 - **组件 CRL 首拉与 Agent 启动扫描增加重试**：nvmet-host / agent 的 CRL 初始拉取改为短重试（吸收控制面或 nginx 启动期的 502），仍失败则保持 fail-closed 并交给周期刷新；Agent 的启动扫描在宿主服务/CRL 未就绪时按指数退避重试，不再一次性放弃导致 4421/subsystems 长期缺失。新增 CRL 重试单测
 
 ---
@@ -50,6 +51,8 @@
 - **组件证书吊销后的自动恢复**：被吊销的组件证书无法再完成 mTLS，组件改为启动时从公开只读入口 `GET /crl/nodes.crl`（nginx 直出，无认证、仅 `GET`/`HEAD`、`Cache-Control: no-store`）取 nodes CRL，用本地 nodes CA 校验签名、issuer 与 `nextUpdate` 后比对本地 client / serving 序列号，命中即用引导凭据重新 enroll——**不再需要手工删除节点上的证书**（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。`kurrent join` 在重启 agent 后等待其写出派生的 nvmet-host 凭据，再自动重启 nvmet-host，恢复只需一条命令
 - **WebUI 身份与访问页**：侧边栏「身份」，路由 `#/identity`（`#/credentials`、`#/certificates` 重定向到此），把凭据与证书两张台账合成一页。页头先给三个任务入口（接入存储节点 / 生成管理令牌 / 收回访问），再按下表四个访问主体分页签：**用户**（users CA，按 CN 聚合，组来自 `users.yml`，当前请求自身的证书不可吊销；下方为用户会话）、**存储节点**（nodes CA，按 `agent_id` 聚合 agent 与 nvmet-host 的 client + serving 当前证书，状态区分有效 / 部分可用 / 已吊销 / 已过期，未登记节点有标注；下方为 bootstrap / 派生节点令牌，一次性已用尽的令牌不再列出）、**控制面**（control CA，只读）、**自动化**（管理 token 与令牌会话，均可逐行吊销）。接入存储节点不要求填写名称：节点标识由前端生成 12 位 hex 并直接写入 join 命令，备注在接入后由 Agent 台账设置；吊销支持原因选择，节点恢复可签发一次性 bootstrap token（明文仅本次可见），`GET /pki/users` 增加 `groups`（组来自 `users.yml`，证书只承载 CN）
 - **L1 引导信任档：吊销设备在 DHCP 层即被拒绝**：`DELETE /devices/{mac}` 现在同时清除该 MAC 的 dnsmasq 静态绑定并写入 `MAC,ignore`，被吊销设备不再取得租约（拒绝点前移到网络层，不再依赖无鉴权端点）；`DELETE /devices/revoked` 清除条目时移除对应封禁行，`POST /devices/report` 重新登记时清除历史遗留封禁。dnsmasq 写文件失败不回滚吊销结果，记 `device.dhcp_block` / `device.dhcp_unblock` 错误事件。部署指南（中英）新增「引导网络边界（L1 信任档）」一节，给出 VLAN/DHCP snooping/DAI/RA guard/端口安全/802.1X 清单与明确的残余风险（同二层伪造 DHCP/ARP 与控制面被攻陷不在 L1 覆盖范围内，L2/L3 未实施）
+- **Secure Boot 引导档（可选，L2）**：控制面启动时幂等生成独立 boot CA（`state/pki/ca/boot/`，10 年）与 4443 叶证书（`state/certs/boot-server.*`，1 年、SAN 复用 `spec.serverCert.san`，剩余有效期不足 30 天在启动时重签且不动 boot CA）；nginx 新增 4443 server，只反代 `/boot-vars`、`/devices/report`、`/devices/challenge` 并提供 `/file/` 静态资产（Secure Boot 脚本已嵌入签名固件，4443 不暴露 `/tftp/`），443 的证书与 TOFU 行为不变。固件侧新增 `build-sb.sh`：内嵌静态脚本、以 `TRUST=` 钉 boot CA 指纹并以 `CERT=` 嵌入 CA 证书、关闭 TOFU，产物经 `sbsign` 签名并附 manifest。宿主端口用 `KURRENT_BOOT_HTTPS_PORT` 配置；新增离线密钥、USB 导出与目标机预检脚本（`tools/secureboot/`）
+- **Secure Boot `db` 的 Redfish 预置工具**：新增 `tools/secureboot/enroll-redfish.sh`，通过 Redfish 读取 Secure Boot 与 `db`、要求已有 Microsoft UEFI CA、幂等导入产物签名证书（默认只追加，绝不清空键）、读回校验 SHA-256（BMC 不暴露 `CertificateString` 时降级为 subject/serial 并告警）、可选 `PATCH SecureBootEnable`。凭据只从 `KURRENT_BMC_USER` / `KURRENT_BMC_PASSWORD` 或 0600 文件读取，`--dry-run` 只读；BMC 不支持时以退出码 3 指向 USB/BIOS 兜底，不静默降级。部署指南（中英）以 USB/BIOS 为受支持路径，Redfish 作为需 BMC 与厂商支持的可选路径；该工具仅完成协议级验证（模拟 BMC），厂商实现须逐型号确认
 
 ### 修复
 
@@ -64,6 +67,7 @@
 
 ### 变更
 
+- **`/boot-assets` 增加 Secure Boot 状态**：返回 `secureboot` 段（签名镜像哈希与 manifest 是否一致、签名者、boot CA 指纹、引导端口及其与 `KURRENT_BOOT_HTTPS_PORT` 是否一致、构建时间）；`tftp/secureboot/` 无产物时 `present=false`，不占引导链状态板；有产物时状态板增加一行 Secure Boot，哈希不一致、端口与部署不一致或 CA 缺失/不匹配判为降级
 - **nvmet-host 管理面收为共享卷 UDS**：管理面不再监听宿主 TCP `4841`，改听共享卷 `/run/kurrent/nvmet/nvmet-host.sock`（目录 0700，mTLS 保留）；Agent 的 nvmet 客户端改为 stdlib `AF_UNIX` + TLS；compose 增加 `kurrent-nvmet-run` 共享卷，健康检查改走 UDS。`host-baseline.sh --fix-4841` 不再需要（保留参数时提示并退出），宿主 4841 无监听
 - **引导链 TFTP 面收窄**：`boot.ipxe.cfg` 改经 HTTPS（nginx `/tftp/`，TOFU 同锚）取回，`boot.ipxe` 只保留一次跳转指针；移除 hostname/uuid/mac/pci/chip 覆盖脚本与 `boot.ipxe.cfg` 的 `boot-url`/`boot-dir`。TFTP 只承载 `snponly.efi` 与 `boot.ipxe`，其余引导脚本全走 HTTPS。dnsmasq 的 TFTP 根改为文件级挂载，仅挂这两个文件；`boot.ipxe.cfg` / `menu.ipxe` 不再能经 TFTP 取到，更新 `snponly.efi` 后需重建/重启 dnsmasq 容器。`https-port` 需与 compose 的 `KURRENT_HTTPS_PORT`、`boot.ipxe`、`boot.ipxe.cfg` 三处同步；`GET /boot-assets` 的脚本链解析同步支持 HTTPS 形式的配置地址
 

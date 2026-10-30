@@ -39,6 +39,7 @@ This guide follows Kurrent's declarative-configuration model: the control-plane 
 | 67 / 69 | UDP | DHCP / TFTP (host network) | Controller server |
 | 80 | TCP | HTTP → 443 automatic 301 upgrade (carries no content or credentials) | Controller server |
 | 443 | TCP | The only entry: HTTPS (WebUI + `/api/cp` reverse proxy to the control plane + component enroll/renew + boot chain) | Controller server |
+| 4443 | TCP | Secure Boot boot entry (dedicated boot CA, optional L2 profile) | Controller server |
 | 4840 | TCP | Storage Agent HTTPS (controller → Agent) | Storage node |
 | 4421 | TCP | NVMe/TCP data plane, single port with **TLS 1.3** (shared by the firmware and kernel boot stages) | Storage node |
 
@@ -56,7 +57,7 @@ The first hop of the boot chain (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe
 - **Revocation closed loop**: `DELETE /devices/{mac}` writes `MAC,ignore` into the dnsmasq binding file, so a revoked device gets no lease; re-registration (`/devices/report`) or purging (`DELETE /devices/revoked`) removes that line.
 - **Minimal TFTP surface**: the TFTP root mounts only `snponly.efi` and `boot.ipxe`; configuration and menu are fetched over HTTPS.
 
-**Residual risk (explicitly out of scope for L1)**: an attacker on the same Layer 2 (or on a host in the same VLAN as a compromised port) can still forge DHCP/ARP, answer ahead of the controller, and replace the first-stage binary or pointer, then use the device's NVRAM key as a signing oracle to fetch the DHHC-1/PSK from `/boot-vars`. The same holds if the controller or TFTP service itself is compromised. The device key is a bearer credential: the controller authenticates "a request holding this key", not "the code that runs with this key". Eliminating this requires L2 (Secure Boot + self-signed iPXE + a pinned trust anchor) or L3 (TPM measured boot/remote attestation), neither of which is in the current implementation.
+**Residual risk (explicitly out of scope for L1)**: an attacker on the same Layer 2 (or on a host in the same VLAN as a compromised port) can still forge DHCP/ARP, answer ahead of the controller, and replace the first-stage binary or pointer, then use the device's NVRAM key as a signing oracle to fetch the DHHC-1/PSK from `/boot-vars`. The same holds if the controller or TFTP service itself is compromised. The device key is a bearer credential: the controller authenticates "a request holding this key", not "the code that runs with this key". L2 (Secure Boot + self-signed iPXE + a pinned trust anchor) is available as an optional profile in 1.8 and off by default; L3 (TPM measured boot/remote attestation) is not implemented.
 
 ## Prerequisites
 
@@ -240,6 +241,29 @@ kurrent agents list                       # node health=ok
 docker logs storager-agent 2>&1 | grep 'pki:'   # re-enroll / self-check records
 docker logs kurrent-nvmet-host 2>&1 | grep 'pki:'
 ```
+
+### 1.8 Secure Boot boot profile (optional, L2)
+
+L1 remains the default. L2 adds two independent anchors: UEFI `db` verifies the first-stage EFI code, and a boot CA embedded in the firmware verifies the boot HTTPS endpoint. The control plane generates them at startup, separate from the users/nodes/control component CAs:
+
+- `state/pki/ca/boot/ca.crt|ca.key`: boot CA, 10 years, signs only boot endpoint certificates.
+- `state/certs/boot-server.crt|boot-server.key`: 4443 leaf certificate, 1 year, SAN reused from `spec.serverCert.san`; every control-plane start checks the remaining validity and re-issues below 30 days without touching the boot CA, so the firmware never needs reflashing.
+
+The nginx 4443 server proxies only `/boot-vars`, `/devices/report` and `/devices/challenge`, and serves `/file/` statically (Secure Boot scripts are embedded in the signed firmware, so 4443 does not expose `/tftp/`); the 443 certificate and TOFU behavior are unchanged. The host port is set with `KURRENT_BOOT_HTTPS_PORT` and must match the firmware build's `BOOT_HTTPS_PORT` — the port is baked into the signed image, and `/boot-assets` reports the comparison as `secureboot.port_matches`.
+
+One-time provisioning:
+
+1. Generate the offline artifact signing key: `tools/secureboot/keygen-offline.sh ~/offline/kurrent-sb` (key mode 0600; the script refuses to write inside the repository or a container).
+2. Start the control plane and export `state/pki/ca/boot/ca.crt`; build `snponly-sb.efi` with `SB_KEY` / `SB_CERT` / `BOOT_CA_CERT` as described in the firmware repository's `docs/secureboot.md`.
+3. Place `dist/secureboot/snponly-sb.efi` and `manifest.json` in the host `tftp/secureboot/`; the `secureboot` section of `/boot-assets` should become `ok`.
+4. Enrol `db` (pick one):
+   - **USB/BIOS (supported path, no BMC required)**: `tools/secureboot/export-usb.sh <usb> <artifact-signing.crt> <snponly-sb.efi> <boot-ca.crt>` produces a public-only bundle; import `db-cert.cer` under Key Management.
+   - **Redfish (optional; requires a BMC with vendor support)**: `KURRENT_BMC_USER=... KURRENT_BMC_PASSWORD=... tools/secureboot/enroll-redfish.sh --bmc <bmc> --cert <artifact-signing.crt> --enable-secureboot`. The tool reads Secure Boot and `db`, requires an existing Microsoft UEFI CA, imports the certificate idempotently and verifies the fingerprint on read-back. Use `--dry-run` for reads only and `--credential-file` for a 0600 file. Exit codes: 0 ok/skipped, 1 precondition, 2 imported but unverifiable, 3 vendor unsupported or transport failure, 4 write failed. This tool is protocol-tested against a mock BMC only; confirm certificate import and Setup Mode behaviour per vendor model, and fall back to USB/BIOS instead of silently degrading.
+5. Target machine: disable CSM, enable Secure Boot, verify state and `db` with `tools/secureboot/check-host.sh <artifact-signing.crt>`, then boot the signed image from local media or HTTP Boot.
+
+The golden image also needs a distribution-signed loader: this project's Ubuntu 26.04 image uses `BOOTX64.EFI` (shim signed by Microsoft UEFI CA 2011) → `grubx64.efi` (GRUB signed by Canonical) → Canonical-signed kernel. The target's `db` must contain Microsoft UEFI CA 2011 (present by default on most servers); if the golden image still has an unsigned GRUB, firmware will refuse to continue after `sanboot`.
+
+The WebUI "Boot chain" page shows a Secure Boot row when SB artifacts exist and hides it otherwise. Boundaries: Secure Boot covers only the first-stage iPXE; loaders after `sanboot` (shim/GRUB/kernel) rely on the distribution's own signature chain, and firmware will refuse to continue if the golden image has no distribution-signed loader. Rotating the boot CA means reflashing firmware; there is no TPM, rollback protection or BMC defense; some PXE stacks do not verify the downloaded NBP, so prefer local media.
 
 ## Step 2: Storage Node
 

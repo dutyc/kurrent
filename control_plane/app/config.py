@@ -227,6 +227,12 @@ class Settings:
         if name == "insecure":
             # 开发模式开关（唯一放行口；生产严禁）：KURRENT_CP_INSECURE=1 显式开启
             return os.getenv("KURRENT_CP_INSECURE", "") == "1"
+        if name == "boot_https_port":
+            # Secure Boot 引导端点端口（nginx 4443）；仅用于资产状态展示。
+            try:
+                return int(os.getenv("KURRENT_BOOT_HTTPS_PORT", "4443"))
+            except ValueError:
+                return 4443
         if name == "openapi_enabled":
             # 交互式 API 文档默认关闭（避免未鉴权枚举接口）；开发环境显式开启
             return os.getenv("KURRENT_CP_OPENAPI", "") == "1"

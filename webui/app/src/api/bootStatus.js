@@ -99,6 +99,11 @@ export function evidenceParts(check, t, locale) {
       if (!detail.total) push(t('assets.evidence.noWorkers'))
       else push(t('assets.evidence.workersReady', { ready: detail.ready, total: detail.total }))
       break
+    case 'secureBoot':
+      push(detail.file, true)
+      if (detail.port) push(`TLS ${detail.port}`)
+      if (detail.signer) push(detail.signer)
+      break
     case 'report':
       if (detail.reason === 'no-report') {
         push(t('assets.evidence.noReport'))
@@ -230,6 +235,25 @@ function reportCheck(devices, now) {
   }
 }
 
+function secureBootCheck(assets) {
+  const secureboot = assets?.secureboot
+  // 可选档：没有签名产物时不占状态板（L1 部署不要求 Secure Boot）
+  if (!secureboot?.present) return null
+  const detail = {
+    file: secureboot.artifact || 'snponly-sb.efi',
+    status: secureboot.status,
+    signer: secureboot.signer || null,
+    manifestMatches: secureboot.manifest_matches === true,
+    portMatches: secureboot.port_matches === true,
+    caPresent: secureboot.boot_ca_present === true,
+    caMatches: secureboot.boot_ca_matches === true,
+    port: secureboot.boot_https_port || null,
+    caSha256: secureboot.boot_ca_sha256 || null,
+  }
+  if (secureboot.status === 'ok') return { status: 'normal', detail }
+  return { status: 'degraded', detail }
+}
+
 export function buildBootChecks({
   assets = null,
   agents = null,
@@ -245,6 +269,8 @@ export function buildBootChecks({
     { id: 'workers', ...workerCheck(workers) },
     { id: 'report', ...reportCheck(devices, now) },
   ]
+  const secureBoot = secureBootCheck(assets)
+  if (secureBoot) checks.splice(1, 0, { id: 'secureBoot', ...secureBoot })
   const counted = checks.filter((check) => check.status !== 'unknown')
   const normal = counted.filter((check) => check.status === 'normal').length
   const overall = counted.some((check) => check.status === 'blocked')

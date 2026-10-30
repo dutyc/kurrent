@@ -39,6 +39,7 @@
 | 67 / 69 | UDP | DHCP / TFTP（host 网络） | 控制面服务器 |
 | 80 | TCP | HTTP → 443 自动 301 升级（不承载内容/凭据） | 控制面服务器 |
 | 443 | TCP | 唯一入口：HTTPS（WebUI + `/api/cp` 反代控制面 + 组件 enroll/renew + 引导链） | 控制面服务器 |
+| 4443 | TCP | Secure Boot 引导入口（独立 boot CA，可选 L2 档） | 控制面服务器 |
 | 4840 | TCP | 存储 Agent HTTPS（控制面 → Agent） | 存储节点 |
 | 4421 | TCP | NVMe/TCP 数据面，单口 **TLS 1.3**（固件引导段与内核段共用） | 存储节点 |
 
@@ -56,7 +57,7 @@ nvmet-host 管理面不占 TCP：Agent 与 nvmet-host 经共享卷 unix socket `
 - **吊销闭环**：`DELETE /devices/{mac}` 会在 dnsmasq 绑定文件写入 `MAC,ignore`，被吊销设备拿不到租约；重新登记（`/devices/report`）或清除条目（`DELETE /devices/revoked`）会移除该行。
 - **TFTP 面最小化**：TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe`，配置与菜单经 HTTPS 取回。
 
-**残余风险（L1 明确不解决）**：同一二层内的攻击者（或与被控端口同 VLAN 的主机）仍可伪造 DHCP/ARP 抢在控制面之前应答，替换首跳二进制或指针，再用设备 NVRAM 中的密钥作为签名预言机取走 `/boot-vars` 中的 DHHC-1/PSK；控制面或 TFTP 服务本身被攻陷时同理。设备密钥只是持有者凭证，控制面认证的是"持有该密钥的请求"，不是"运行该密钥的代码"。要消除该风险需要升级到 L2（Secure Boot + 自签 iPXE + 固定信任锚）或 L3（TPM 度量启动/远程证明），不在当前实现范围内。
+**残余风险（L1 明确不解决）**：同一二层内的攻击者（或与被控端口同 VLAN 的主机）仍可伪造 DHCP/ARP 抢在控制面之前应答，替换首跳二进制或指针，再用设备 NVRAM 中的密钥作为签名预言机取走 `/boot-vars` 中的 DHHC-1/PSK；控制面或 TFTP 服务本身被攻陷时同理。设备密钥只是持有者凭证，控制面认证的是"持有该密钥的请求"，不是"运行该密钥的代码"。L2（Secure Boot + 自签 iPXE + 固定信任锚）以可选档提供，见 1.8，默认不启用；L3（TPM 度量启动/远程证明）不在当前实现范围内。
 
 ## 前置条件
 
@@ -231,6 +232,29 @@ kurrent agents list                       # 节点 health=ok
 docker logs storager-agent 2>&1 | grep 'pki:'   # 重新 enroll / 自检记录
 docker logs kurrent-nvmet-host 2>&1 | grep 'pki:'
 ```
+
+### 1.8 Secure Boot 引导档（可选，L2）
+
+L1 仍是默认行为。L2 增加两个独立锚：UEFI `db` 验证第一段 EFI 代码，固件内嵌的 boot CA 验证引导 HTTPS。控制面启动时自动生成（与组件三分根分离）：
+
+- `state/pki/ca/boot/ca.crt|ca.key`：boot CA，10 年，只签引导端点证书。
+- `state/certs/boot-server.crt|boot-server.key`：4443 叶证书，1 年，SAN 复用 `spec.serverCert.san`；控制面每次启动检查剩余有效期，不足 30 天重签（不换 boot CA，固件无需重刷）。
+
+nginx 的 4443 server 只反代 `/boot-vars`、`/devices/report`、`/devices/challenge`，并静态提供 `/file/`（Secure Boot 脚本已全部嵌入签名固件，4443 不暴露 `/tftp/`）；443 的证书与 TOFU 行为完全不变。宿主端口用 `KURRENT_BOOT_HTTPS_PORT` 调整，必须与固件构建的 `BOOT_HTTPS_PORT` 一致——端口烘在签名镜像里，`/boot-assets` 的 `secureboot.port_matches` 核对这一点。
+
+一次性预置流程：
+
+1. 离线生成产物签名密钥：`tools/secureboot/keygen-offline.sh ~/offline/kurrent-sb`（私钥 0600，脚本拒绝写入仓库或容器）。
+2. 启动控制面，导出 `state/pki/ca/boot/ca.crt`；按固件仓 `docs/secureboot.md` 用 `SB_KEY` / `SB_CERT` / `BOOT_CA_CERT` 构建 `snponly-sb.efi`。
+3. 把 `dist/secureboot/snponly-sb.efi` 与 `manifest.json` 放到宿主 `tftp/secureboot/`，`/boot-assets` 的 `secureboot` 段应变为 `ok`。
+4. 预置 `db`（二选一）：
+   - **USB/BIOS（受支持路径，无需 BMC）**：`tools/secureboot/export-usb.sh <usb> <artifact-signing.crt> <snponly-sb.efi> <boot-ca.crt>` 生成导入包（只含公开证书），目标机 Key Management 导入 `db-cert.cer`。
+   - **Redfish（可选，需 BMC 与厂商支持）**：`KURRENT_BMC_USER=... KURRENT_BMC_PASSWORD=... tools/secureboot/enroll-redfish.sh --bmc <bmc> --cert <artifact-signing.crt> --enable-secureboot`。脚本先读 Secure Boot 与 `db`、确认已有 Microsoft UEFI CA，再幂等导入证书并读回指纹；`--dry-run` 只读，`--credential-file` 接受 0600 文件。退出码 0 成功/跳过、1 前置不满足、2 导入后无法校验、3 厂商不支持或传输失败、4 写入失败。该工具仅完成协议级验证（模拟 BMC），厂商实现须逐型号确认；不支持时改用 USB/BIOS，不要静默降级。
+5. 目标机：关 CSM、开 Secure Boot；用 `tools/secureboot/check-host.sh <artifact-signing.crt>` 复核 Secure Boot 状态与 `db`，然后从本地介质或 HTTP Boot 启动签名镜像。
+
+金盘侧还需发行版签名加载器：本项目 Ubuntu 26.04 金盘的 ESP 使用 `BOOTX64.EFI`（Microsoft UEFI CA 2011 签名的 shim）→ `grubx64.efi`（Canonical 签名的 GRUB）→ Canonical 签名的内核。目标机 `db` 必须包含 Microsoft UEFI CA 2011（多数服务器默认具备）；若金盘仍是未签名的 GRUB，固件会在 `sanboot` 之后拒绝引导。
+
+WebUI「引导链」在存在 SB 产物时多一行 Secure Boot，无产物时该行隐藏。边界：Secure Boot 只覆盖第一段 iPXE；`sanboot` 之后的加载器（shim/GRUB/内核）由发行版自身的签名链决定，金盘若未安装发行版签名的加载器，固件会拒绝继续引导。boot CA 轮换等于固件重刷；不做 TPM、防回滚与 BMC 防护；部分 PXE 固件不校验下载的 NBP，优先使用本地介质。
 
 ## 第 2 步：存储节点
 

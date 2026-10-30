@@ -116,6 +116,14 @@ function Detail({ check, t, locale }) {
     fix = 'assets.fix.workers'
   }
 
+  if (check.id === 'secureBoot') {
+    if (!detail.manifestMatches) rows.push(t('assets.cause.secureBootManifest'))
+    if (!detail.portMatches) rows.push(t('assets.cause.secureBootPort'))
+    if (!detail.caPresent) rows.push(t('assets.cause.secureBootCa'))
+    else if (!detail.caMatches) rows.push(t('assets.cause.secureBootCaMismatch'))
+    fix = 'assets.fix.secureBoot'
+  }
+
   return (
     <div className="boot-detail">
       {rows.map((row, index) =>

@@ -16,7 +16,10 @@ NGINX_DOCKERFILE = ROOT / "webui" / "deploy" / "Dockerfile"
 
 
 def _location_blocks(text: str) -> dict[str, str]:
-    """提取 location 块（本配置没有嵌套 location，按花括号配对截取）。"""
+    """提取 location 块（本配置没有嵌套 location，按花括号配对截取）。
+
+    同名 location 可能在 443 与管理/引导块各出现一次；保留首次出现（443 在前）。
+    """
     blocks: dict[str, str] = {}
     for match in re.finditer(r"location\s+(?:=|~\s*|\^~)?\s*([^\s{]+)\s*\{", text):
         depth, index = 1, match.end()
@@ -26,8 +29,30 @@ def _location_blocks(text: str) -> dict[str, str]:
             elif text[index] == "}":
                 depth -= 1
             index += 1
-        blocks[match.group(1)] = text[match.end():index - 1]
+        blocks.setdefault(match.group(1), text[match.end():index - 1])
     return blocks
+
+
+def _server_blocks(text: str) -> list[str]:
+    """按花括号配对截取每个 server 块（避免把同名 location 混在一起）。"""
+    blocks: list[str] = []
+    for match in re.finditer(r"\bserver\s*\{", text):
+        depth, index = 1, match.end()
+        while depth and index < len(text):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+            index += 1
+        blocks.append(text[match.end():index - 1])
+    return blocks
+
+
+def _server_block(text: str, listen: str) -> str:
+    for block in _server_blocks(text):
+        if re.search(rf"^\s*listen\s+{re.escape(listen)}\b", block, re.M):
+            return block
+    raise AssertionError(f"server block listening on {listen} not found")
 
 
 def _service_block(compose: str, name: str) -> str:
@@ -188,6 +213,38 @@ def test_boot_routes_are_exact_and_never_inject_identity():
 
     for path in ("/boot-vars", "/devices/report", "/devices/challenge"):
         assert f"location = {path} {{" in text
+
+
+def test_secureboot_listener_is_isolated():
+    """4443 只服务 Secure Boot 引导：boot CA 证书、三个引导端点与 /file/；不暴露 /tftp/。"""
+    text = CONF.read_text(encoding="utf-8")
+    block = _server_block(text, "4443")
+    assert "ssl_certificate     /etc/nginx/certs/boot-server.crt;" in block
+    assert "ssl_certificate_key /etc/nginx/certs/boot-server.key;" in block
+    assert "ssl_verify_client" not in block
+    assert "/api/cp/" not in block
+    assert "root /usr/share/nginx/html" not in block
+    assert "proxy-identity-client" not in block
+
+    locations = _location_blocks(block)
+    proxying = {path: body for path, body in locations.items() if "proxy_pass" in body}
+    assert set(proxying) == {"/boot-vars", "/devices/report", "/devices/challenge"}
+    for path, body in proxying.items():
+        assert "proxy-identity-none.conf" in body, path
+    assert 'return 404;' in locations["/"]
+    assert 'return 404;' in locations["/devices/"]
+    assert "alias /data/;" in locations["/file/"]
+    assert "/tftp/" not in locations
+    assert "alias /tftp/;" not in block
+
+
+def test_secureboot_compose_port_and_cert_wait():
+    compose = COMPOSE.read_text(encoding="utf-8")
+    assert '"${KURRENT_BOOT_HTTPS_PORT:-4443}:4443"' in compose
+    assert "KURRENT_BOOT_HTTPS_PORT=${KURRENT_BOOT_HTTPS_PORT:-4443}" in compose
+
+    dockerfile = NGINX_DOCKERFILE.read_text(encoding="utf-8")
+    assert "/etc/nginx/certs/boot-server.crt" in dockerfile
 
 
 def test_edge_hardening_headers_and_tls():

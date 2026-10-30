@@ -9,9 +9,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
 from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
 _SET_RE = re.compile(r"^set\s+([A-Za-z0-9_-]+)\s+(.+?)\s*$")
 _DNSMASQ_BOOT_RE = re.compile(r"^dhcp-boot=tag:([A-Za-z0-9_-]+),([^,\s]+)")
@@ -163,7 +168,10 @@ def _menu_status(text: str) -> dict:
     }
 
 
-def inventory(dnsmasq_conf: str | Path, tftp_dir: str | Path) -> dict:
+def inventory(dnsmasq_conf: str | Path, tftp_dir: str | Path, *,
+              secureboot_dir: str | Path | None = None,
+              boot_ca_path: str | Path | None = None,
+              boot_https_port: int = 4443) -> dict:
     conf = Path(dnsmasq_conf).read_text(encoding="utf-8")
     tftp = Path(tftp_dir)
     boots = _dnsmasq_boots(conf)
@@ -203,4 +211,103 @@ def inventory(dnsmasq_conf: str | Path, tftp_dir: str | Path) -> dict:
         "firmware": firmware,
         "stage2": stage2,
         "menu": _menu_status(menu_text) if menu_text else {"status": "unavailable", "items": 0},
+        "secureboot": secureboot_status(
+            secureboot_dir if secureboot_dir is not None else tftp / "secureboot",
+            boot_ca_path,
+            boot_https_port,
+        ),
     }
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _boot_ca_sha256(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        cert = x509.load_pem_x509_certificate(Path(path).read_bytes())
+    except (OSError, ValueError):
+        return None
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+def _as_port(value) -> int | None:
+    """manifest 里的端口可能是字符串或非法值；无法判定即 None，不猜。"""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port <= 65535 else None
+
+
+def secureboot_status(
+    secureboot_dir: str | Path,
+    boot_ca_path: str | Path | None = None,
+    configured_port: int = 4443,
+) -> dict:
+    """可选 Secure Boot 产物状态：签名镜像 + manifest 哈希 + 固定 CA + 引导端口。"""
+    directory = Path(secureboot_dir)
+    artifact = directory / "snponly-sb.efi"
+    manifest_path = directory / "manifest.json"
+    ca_path = Path(boot_ca_path) if boot_ca_path else None
+    ca_sha256 = _boot_ca_sha256(ca_path)
+    record = {
+        "present": artifact.is_file(),
+        "status": "missing",
+        "artifact": artifact.name,
+        "path": f"/tftp/secureboot/{artifact.name}",
+        "artifact_sha256": None,
+        "artifact_size": None,
+        "manifest_present": manifest_path.is_file(),
+        "manifest_matches": False,
+        "signer": None,
+        "built_at": None,
+        "boot_https_port": configured_port,
+        "port_matches": False,
+        "boot_ca_present": ca_sha256 is not None,
+        "boot_ca_sha256": ca_sha256,
+        "boot_ca_matches": False,
+    }
+    if not record["present"]:
+        return record
+
+    record["artifact_sha256"] = _sha256_file(artifact)
+    record["artifact_size"] = artifact.stat().st_size
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None
+    if isinstance(manifest, dict):
+        record["manifest_matches"] = (
+            manifest.get("artifact_sha256") == record["artifact_sha256"]
+        )
+        record["signer"] = manifest.get("signer")
+        record["built_at"] = manifest.get("built_at")
+        # 端口是固件构建时烘进签名镜像的：与部署端口不一致 = 签名代码拨错端口，
+        # 后果与 CA 不一致相同（引导失败），且改端口不需要重刷固件，必须先校验。
+        manifest_port = _as_port(manifest.get("boot_https_port"))
+        record["boot_https_port"] = manifest_port or configured_port
+        record["port_matches"] = manifest_port is not None and manifest_port == configured_port
+        manifest_ca = manifest.get("boot_ca_sha256")
+        record["boot_ca_sha256"] = manifest_ca or ca_sha256
+        record["boot_ca_matches"] = bool(
+            manifest_ca and ca_sha256
+            and str(manifest_ca).lower() == ca_sha256.lower()
+        )
+    record["status"] = (
+        "ok"
+        if record["manifest_present"] and record["manifest_matches"]
+        and record["port_matches"]
+        and record["boot_ca_present"] and record["boot_ca_matches"]
+        else "incomplete"
+    )
+    return record

@@ -727,6 +727,7 @@ const zh = {
     },
     checks: {
       firmware: 'UEFI 固件',
+      secureBoot: 'Secure Boot',
       service: '引导服务',
       dataPlane: '数据面',
       workers: 'Worker 就绪',
@@ -758,6 +759,10 @@ const zh = {
       agentsNone: '没有启用的 nvmet 节点，Worker 没有可登录的数据面。',
       workersPartial: '{nodes} 未同时具备绑定设备与系统盘。',
       workersNone: '没有 Worker 同时具备绑定设备与系统盘。',
+      secureBootManifest: '签名镜像与 manifest 的哈希不一致：产物被替换或复制不完整。',
+      secureBootPort: '签名镜像内嵌的引导 HTTPS 端口与部署的引导入口不一致：固件会拨错端口。',
+      secureBootCa: 'boot CA 证书缺失：无法核对固定信任锚。',
+      secureBootCaMismatch: 'manifest 中的 boot CA 指纹与控制面当前 boot CA 不一致：固件会拒绝本控制面的证书。',
     },
     fixLabel: '处理',
     fix: {
@@ -768,6 +773,7 @@ const zh = {
       static: '检查 nginx /tftp/ 静态映射与宿主文件权限。',
       dataPlane: '在存储节点确认 nvmet 子系统与 4421 端口 TLS 监听（storager/nvmet-host）。',
       workers: '在 Workers 页绑定设备并创建系统盘。',
+      secureBoot: '从构建机重新导出 snponly-sb.efi、manifest.json 与 boot CA 证书，并把 KURRENT_BOOT_HTTPS_PORT 与固件内嵌端口对齐。',
     },
     nodeReason: {
       health: '健康状态 {health}',

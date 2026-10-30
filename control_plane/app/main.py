@@ -11,8 +11,8 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
-from . import (audit, audit_middleware, cert_bootstrap, config, dnsmasq_conf,
-               maintenance, pki, users)
+from . import (audit, audit_middleware, boot_pki, cert_bootstrap, config,
+               dnsmasq_conf, maintenance, pki, users)
 from .principal import enforce_principal
 from .routers import (agents, boot, boot_assets, certs, devices, enroll,
                       operations, session, settings, tokens, workers)
@@ -101,3 +101,12 @@ try:
     pki.ensure_session_key(config.settings.session_key_file)
 except Exception:
     log.exception("pki: failed to ensure component PKI")
+
+# 启动时幂等生成 Secure Boot 引导 PKI（boot CA 10 年 + 4443 叶证书 1 年）。
+# 与组件三分根完全分离；失败只影响可选 SB 档，不影响 L1 引导与 443 管理面。
+try:
+    boot_pki.ensure_boot_pki(
+        config.settings.pki_dir, config.settings.cert_dir, config.settings.cert_san,
+    )
+except Exception:
+    log.exception("boot-pki: failed to ensure Secure Boot PKI")

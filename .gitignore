@@ -112,5 +112,8 @@ dnsmasq/dnsmasq.leases
 dnsmasq/dhcp-hosts.conf
 dnsmasq/dnsmasq.conf
 
+# Secure Boot 签名产物（由固件仓构建后放入，不入库）
+tftp/secureboot/
+
 # 本地攻击演练报告（仅保留在工作区，不入库）
 reports/
