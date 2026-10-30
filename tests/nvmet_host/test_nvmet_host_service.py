@@ -223,6 +223,48 @@ def test_create_duplicate_409(client, configfs):
     assert res.status_code == 409
 
 
+def test_gpt_layout_detection(nvmet, tmp_path):
+    """backing 布局判据：GPT@4096=4k，GPT@512=512，无签名/不可读=none。"""
+    p512 = tmp_path / "p512.img"
+    p512.write_bytes(b"")
+    with open(p512, "r+b") as f:
+        f.seek(512)
+        f.write(b"EFI PART")
+    p4k = tmp_path / "p4k.img"
+    p4k.write_bytes(b"")
+    with open(p4k, "r+b") as f:
+        f.seek(4096)
+        f.write(b"EFI PART")
+    raw = tmp_path / "raw.img"
+    raw.write_bytes(b"\x00" * 8192)
+    assert nvmet._gpt_layout(str(p512)) == "512"
+    assert nvmet._gpt_layout(str(p4k)) == "4k"
+    assert nvmet._gpt_layout(str(raw)) == "none"
+    assert nvmet._gpt_layout(str(tmp_path / "missing.img")) == "none"
+
+
+def test_create_subsystem_rejects_512_gpt(client, nvmet, configfs, monkeypatch):
+    """512 字节扇区 GPT 在导出边界拒绝（手工/绕过控制面的盘也挡），且不落 configfs。"""
+    seen = {}
+
+    def fake_layout(path):
+        seen["path"] = path
+        return "512"
+
+    monkeypatch.setattr(nvmet, "_gpt_layout", fake_layout)
+    res = client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    assert res.status_code == 400
+    assert "512-byte-sector" in res.json()["detail"]
+    assert seen["path"] == DEVICE_PATH
+    assert not (configfs / "subsystems" / NQN).exists()
+
+
+def test_create_subsystem_allows_4k_gpt(client, nvmet, monkeypatch):
+    monkeypatch.setattr(nvmet, "_gpt_layout", lambda path: "4k")
+    res = client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    assert res.status_code == 201
+
+
 def test_list_subsystems(client, configfs):
     client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
     client.post("/subsystems", json={"nqn": NQN + ".2", "backing": BACKING + "2"})

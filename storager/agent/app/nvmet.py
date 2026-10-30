@@ -406,6 +406,9 @@ class NvmetBackend:
         except NvmetHostError as exc:
             if exc.status == 409:
                 raise HTTPException(409, exc.detail) from exc
+            if exc.status == 400:
+                # 宿主拒绝 backing（如 512 字节扇区 GPT）：是请求问题，不是宿主不可用
+                raise HTTPException(400, exc.detail) from exc
             raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
 
     def delete_target(self, iqn: str) -> None:

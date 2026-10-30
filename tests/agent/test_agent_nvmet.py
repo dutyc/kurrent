@@ -153,6 +153,23 @@ def test_backend_duplicate_409(backend):
     assert exc_info.value.status_code == 409
 
 
+def test_backend_bad_backing_400(backend, monkeypatch):
+    """宿主以 400 拒绝 backing（如 512 GPT）时透传 400，不误报为宿主不可用 503。"""
+    from fastapi import HTTPException
+    from app import nvmet
+
+    b, _, _ = backend
+
+    def reject(nqn, backing):
+        raise nvmet.NvmetHostError(400, "backing GPT is 512-byte-sector layout")
+
+    monkeypatch.setattr(b.host, "create_subsystem", reject)
+    with pytest.raises(HTTPException) as exc_info:
+        b.create_target(IQN_UBUNTU, "/srv/iscsi/worker-01.ubuntu.img", cd=False)
+    assert exc_info.value.status_code == 400
+    assert "512-byte-sector" in exc_info.value.detail
+
+
 def test_backend_delete_404(backend):
     from fastapi import HTTPException
 

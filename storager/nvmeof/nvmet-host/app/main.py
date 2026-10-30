@@ -109,13 +109,26 @@ def _host_disk_path(backing: str) -> str:
     return path
 
 
+def _gpt_layout(path: str) -> str:
+    """GPT 扇区布局：'4k' | '512' | 'none'（判据与 Agent 的 disk_gpt_layout 一致）。"""
+    try:
+        with open(path, "rb") as f:
+            for offset, layout in ((4096, "4k"), (512, "512")):
+                f.seek(offset)
+                if f.read(8) == b"EFI PART":
+                    return layout
+    except OSError:
+        return "none"
+    return "none"
+
+
 # ===================== TLS-PSK 目标端供给（内核全局 .nvme keyring） =====================
 
 
 class NvmePskKeyring:
     """把 TLS-PSK 注入内核全局 `.nvme` keyring（目标端供给）。
 
-    机制（v7.0 内核 + ktls-utils 1.3.0 实测，见 blueprint/nvme-tcp-tls-in-kernel.md §5）：
+    机制（v7.0 内核 + ktls-utils >= 1.5.0 实测，见 blueprint/nvme-tcp-tls-in-kernel.md §5）：
     - nvmet 建 port 时即取该 keyring（`port->keyring`），所以目标端**无需任何 configfs 配置**，
       只要把 psk key 放进去；tlshd 握手时用 ClientHello 里的 identity 在 keyring 里搜同名 key。
     - 一条 psk key：**description == PSK identity**，**payload == PSK 字节**（两端共用同一条）。
@@ -301,9 +314,21 @@ class NvmetManager:
         return os.path.isdir(self._sub_path(nqn))
 
     def create_subsystem(self, nqn: str, backing: str) -> None:
-        """创建子系统 + namespace/1（backing 盘文件）+ 严格模式（allow_any_host=0）。"""
+        """创建子系统 + namespace/1（backing 盘文件）+ 严格模式（allow_any_host=0）。
+
+        backing 为 512 字节扇区 GPT 时拒绝：nvmet file backend 按底层 FS 块（典型 4096 B）
+        导出逻辑块，发起端会把 GPT 头读在错误偏移、找不到分区（iPXE 报 EFIBLK
+        cannot locate file systems / 0x7f22208e）。控制面母盘校验只管控制面路径，
+        这里兜住手工/绕过路径。"""
         nqn = _safe_nqn(nqn)
         device_path = _host_disk_path(backing)
+        if _gpt_layout(device_path) == "512":
+            raise InvalidInput(
+                f"backing GPT is 512-byte-sector layout: {os.path.basename(device_path)}; "
+                "nvmet file backend exports 4K logical blocks and guests cannot read that "
+                "partition table; rebuild the GPT with 4096-byte sectors "
+                "(e.g. losetup --sector-size 4096 then sgdisk/parted)"
+            )
         sub = self._sub_path(nqn)
         if os.path.isdir(sub):
             raise ValueError(f"subsystem exists: {nqn}")
