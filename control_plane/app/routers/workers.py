@@ -348,7 +348,8 @@ def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Requ
 def create_worker_disk(worker_id: str, req: CreateWorkerDiskRequest, request: Request):
     """给指定 Worker 创建系统盘 LUN：传 master 走母盘克隆，传 size 建空白盘。
     os/os_version 为系统备注（人类理解用），同 (os, os_version) 至多一块；
-    盘唯一标识 = os_tag（随机 12 hex），进盘 NQN/文件名（数据面）。"""
+    盘唯一标识 = os_tag（随机 12 hex），进盘 NQN/文件名（数据面）。
+    首块盘自动设为默认启动盘（多盘时用 default-disk 端点切换）。"""
     worker_id = canonical_id(worker_id)
     os_name = canonical_os(req.os)
     os_version = canonical_os_version(req.os_version)
@@ -576,7 +577,7 @@ def batch_create_worker_disks(req: BatchCreateWorkerDiskRequest, request: Reques
                 add_worker_disk(record_, disk_record)
                 if record_.get("state") == "registered":
                     record_["state"] = "ready"
-                # 批量部署约定：创建成功即设为默认启动盘（单盘接口不自动设置）
+                # 批量部署约定：创建成功即设为默认启动盘（单盘接口在首块盘时同样自动设置）
                 record_["default_disk"] = os_tag
                 store.save_workers(data)
                 record("workers.disk.write", "ok", worker_id=worker_id, iqn=disk_record["iqn"])
@@ -611,7 +612,8 @@ def delete_worker_disk(
     ignore_missing_target: bool = Query(False, description="Ignore 404 from Agent while deleting the target."),
 ):
     """删除 Worker 的单个系统盘（按盘标识 os_tag 定位）：可保留或删除 .img 文件；
-    被删盘若是默认启动，联动清除 default_disk 与同名 menu_default；无盘时状态回退 registered。"""
+    被删盘若是默认启动，联动清除 default_disk 与同名 menu_default；若只剩一块盘，
+    它成为默认启动盘；无盘时状态回退 registered。"""
     worker_id = canonical_id(worker_id)
     os_tag = canonical_os_tag(os_tag)
     with store.locked():
@@ -647,8 +649,13 @@ def delete_worker_disk(
                 if not boot:
                     record_.pop("boot", None)
 
+            # 只剩一块盘时它就是默认启动盘（无需人工再设）
+            remaining = worker_disks(record_)
+            if len(remaining) == 1 and remaining[0].get("os_tag"):
+                record_["default_disk"] = str(remaining[0]["os_tag"])
+
             # 无盘时状态回退 registered，等待重新建盘
-            if not worker_disks(record_) and record_.get("state") == "ready":
+            if not remaining and record_.get("state") == "ready":
                 record_["state"] = "registered"
 
             store.save_workers(data)
@@ -957,6 +964,23 @@ def _bound_device_mac_for(worker_id: str) -> str | None:
         if dev.get("bound_worker_id") == worker_id:
             return mac
     return None
+
+
+def migrate_single_disk_default() -> None:
+    """存量迁移：只有一块盘却没有 default_disk 的 Worker，将该盘设为默认启动盘（幂等）。"""
+    try:
+        with store.locked():
+            data = store.load_workers()
+            changed = False
+            for record_ in data["workers"].values():
+                disks = worker_disks(record_)
+                if len(disks) == 1 and not record_.get("default_disk") and disks[0].get("os_tag"):
+                    record_["default_disk"] = str(disks[0]["os_tag"])
+                    changed = True
+            if changed:
+                store.save_workers(data)
+    except Exception:
+        log.exception("workers: single-disk default migration failed")
 
 
 def _persist_failed_worker(

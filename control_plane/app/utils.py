@@ -126,7 +126,8 @@ def worker_disks(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def add_worker_disk(record: dict[str, Any], disk_record: dict[str, Any]) -> None:
-    """写入新系统盘；旧台账若仍是单盘字段 `disk`，先并入 `disks` 完成迁移。"""
+    """写入新系统盘；旧台账若仍是单盘字段 `disk`，先并入 `disks` 完成迁移。
+    只有一块盘时它就是默认启动盘（写 default_disk，无需再单独设置）。"""
     disks = record.get("disks")
     if disks is None:
         legacy = record.get("disk")
@@ -134,6 +135,8 @@ def add_worker_disk(record: dict[str, Any], disk_record: dict[str, Any]) -> None
         record["disks"] = disks
         record.pop("disk", None)
     disks.append(disk_record)
+    if len(disks) == 1 and disk_record.get("os_tag"):
+        record["default_disk"] = str(disk_record["os_tag"])
 
 
 def find_disk_by_os(record: dict[str, Any], os_name: str) -> dict[str, Any] | None:

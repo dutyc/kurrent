@@ -15,6 +15,10 @@
 
 ## 2026-10-30
 
+### 变更
+
+- **单盘 Worker 自动成为默认启动盘**：单盘建盘时直接写入 `default_disk`（批量建盘原有语义不变；第二块及以后不自动改写默认盘）；删盘后只剩一块时该盘自动成为默认盘；控制面启动迁移为存量单盘 Worker 补齐 `default_disk`（幂等）。可观察差异：新建 Worker 无需再调 `PUT /workers/{worker_id}/default-disk` 才能引导系统盘，`/boot-vars` 的 `menu_default` 由 `reboot` 变为 `boot-os`
+
 ### 修复
 
 - **MAC 换绑依赖 dnsmasq 主机名绑定（全新 Worker 无法换绑）**：`PUT /workers/{worker_id}/mac` 此前从 `dnsmasq/dhcp-hosts.conf` 反查旧 MAC，再以"该 hostname 有绑定"为前提替换；没有绑定的新 Worker 直接 `409 no dnsmasq binding`，投影丢失时也无法识别旧设备。现绑定关系以设备台账 `state/devices.yml` 为权威：旧设备按 `bound_worker_id` 反查，dnsmasq 改为幂等 upsert 投影（缺失补写、已有替换、清除该 MAC 的封禁行），投影写入失败回滚设备台账；`GET /workers` 与 Worker 详情的 `mac` 字段同样改从设备台账反查

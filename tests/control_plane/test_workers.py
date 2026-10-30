@@ -233,6 +233,50 @@ class TestWorkerDisks:
         assert disk["filename"] == f"worker-01.ubuntu.{disk['os_tag']}.img"
         assert disk["agent"] == "ag-01"
         assert disk["source"] == {"type": "master", "name": "ubuntu-24.04-master"}
+        # 只有一块盘 → 它就是默认启动盘（菜单不再落到 reboot）
+        assert body["default_disk"] == disk["os_tag"]
+
+    def test_second_disk_keeps_existing_default(self, client, auth_headers, register_agent):
+        """多盘并存不改变已选默认盘：只有首块盘自动成为默认。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        first = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+        }, headers=auth_headers).json()
+        res = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "debian", "os_version": "12", "size": "40G",
+        }, headers=auth_headers)
+        assert res.status_code == 201, res.text
+        assert res.json()["default_disk"] == first["disks"][0]["os_tag"]
+
+    def test_delete_default_promotes_remaining_disk(self, client, auth_headers, register_agent):
+        """删掉默认盘后只剩一块盘：剩余盘成为默认启动盘。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        first = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+        }, headers=auth_headers).json()["disks"][0]
+        second = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "debian", "os_version": "12", "size": "40G",
+        }, headers=auth_headers).json()["disks"][1]
+        assert first["os_tag"] != second["os_tag"]
+
+        body = client.delete(f"/workers/worker-01/luns/disk/{first['os_tag']}",
+                             headers=auth_headers).json()
+        assert body["default_disk"] == second["os_tag"]
+
+    def test_migration_sets_default_for_legacy_single_disk(self, client, auth_headers, register_agent):
+        """存量迁移：单盘却未设 default_disk 的 Worker 在启动迁移后补上默认盘。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        disk = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+        }, headers=auth_headers).json()["disks"][0]
+        client.put("/workers/worker-01/default-disk", json={"disk": None}, headers=auth_headers)
+
+        from control_plane.app.routers.workers import migrate_single_disk_default
+        migrate_single_disk_default()
+        migrate_single_disk_default()  # 幂等
+
+        body = client.get("/workers/worker-01", headers=auth_headers).json()
+        assert body["default_disk"] == disk["os_tag"]
 
     def test_create_disk_disabled_agent_409(self, client, auth_headers, register_agent):
         """enabled=排空语义：显式点名停用节点建盘 → 409（不碰存量是另一条边界，见 trust_chain）。"""

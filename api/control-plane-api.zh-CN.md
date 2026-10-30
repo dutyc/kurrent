@@ -294,7 +294,7 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 | `hostnqn` | 该 Worker 的发起端 Host NQN（盘 NQN 前缀 + `:host.<worker_id>`，与盘 NQN 同域、与 nvmet-host 登记的 host 条目一致）；**默认盘带 NQN 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件补丁 `0005` 支持 `hostnqn` 设置） |
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——2026-08-30 MAIN MENU 动态化：菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
 | `os_version` | 默认启动盘的版本备注（盘记录 `os_version`，`''` = 无版本）——空值不下发，menu.ipxe 的 `os-label` 拼接自适应（有版本显示 `os version`）。Worker 无系统盘时不返回 |
-| `menu_default` | 推导链：`workers.yml` 的 `default_disk`（建盘后单独设置，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。2026-08-30 动态化：菜单 OS 项已收敛为唯一通用项 `boot-os`，OS 语义的默认值（`default_disk`，或 `boot.menu_default` 中的旧系统名）统一归一到 `boot-os`；非 OS 导航值（`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`）原样返回 |
+| `menu_default` | 推导链：`workers.yml` 的 `default_disk`（首块盘自动设为默认；多盘用 7.3 指定，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。2026-08-30 动态化：菜单 OS 项已收敛为唯一通用项 `boot-os`，OS 语义的默认值（`default_disk`，或 `boot.menu_default` 中的旧系统名）统一归一到 `boot-os`；非 OS 导航值（`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`）原样返回 |
 | `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutMs`（默认 1）。单位均为毫秒 |
 
 查找 Worker 的规则（**绑定权威优先**）：
@@ -315,10 +315,10 @@ mac 未命中且 hostname 也未命中 -> dnsmasq 投影（仅存量/无台账�
 默认启动项由 `/boot-vars` 按以下顺序推导：
 
 ```text
-default_disk（建盘后单独设置，见 7.3）-> boot.menu_default（显式配置）-> reboot（未配置）
+default_disk（首块盘自动设为默认；多盘用 7.3 指定）-> boot.menu_default（显式配置）-> reboot（未配置）
 ```
 
-- 推荐做法：创建系统盘后调用 `PUT /workers/{worker_id}/default-disk` 设置默认启动盘（os_tag 引用具体盘）：
+- 只有一块系统盘时无需额外设置：建盘即写入 `default_disk`。多盘并存时调用 `PUT /workers/{worker_id}/default-disk` 指定默认启动盘（os_tag 引用具体盘）：
 
 ```text
 disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_version（如有）>, disk_nqn=<该盘 nqn>
@@ -326,7 +326,7 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 
 - 2026-08-30 起 MAIN MENU 只保留一个通用 OS 项：`menu_default` 归一到 `boot-os`（`boot.menu_default` 里的旧系统名同样归一），`os` / `os-version` 仅作菜单展示，启动身份由 `disk_nqn` 承载
 
-- 也可以不设置 `default_disk`，改用 `boot.menu_default` 指定 iPXE 菜单默认项（如安装期 `menu-install`、退出 `exit`）
+- 也可以显式清除 `default_disk`（`PUT /workers/{worker_id}/default-disk`，`{"disk": null}`），改用 `boot.menu_default` 指定 iPXE 菜单默认项（如安装期 `menu-install`、退出 `exit`）
 - 两者都没有时，`menu_default` 返回 `reboot`（短超时循环重启，等待管理员建盘 / 设置默认盘；`exit` 仅出现在显式设置时）
 
 ### 注册窗口期注册（Zero-touch Provisioning）
@@ -395,7 +395,7 @@ set menu-default boot-os
 set menu-timeout 5000
 ```
 
-已注册但未配置默认启动（无系统盘 / 未设 `default_disk` / 未显式设 `boot.menu_default`）时返回：
+已注册但未配置默认启动（无系统盘 / 显式清除了 `default_disk` / 未显式设 `boot.menu_default`）时返回：
 
 ```ipxe
 #!ipxe
@@ -1325,7 +1325,7 @@ Control Plane 会：
 
 不传 `boot` 时：
 
-- `menu_default` 默认使用 `default_disk`（建盘后单独设置，见 7.3）；未设置时默认 `reboot`（循环重启等待配置，见 5 节）；
+- `menu_default` 默认使用 `default_disk`（首块盘自动设为默认；多盘用 7.3 指定）；未设置时默认 `reboot`（循环重启等待配置，见 5 节）；
 - `menu_timeout` 已配置默认启动时默认使用 `spec.boot.menuTimeoutMs`（当前 `5000`）；处于 `reboot` 循环时固定用 `spec.boot.autoBootTimeoutMs`（当前 `1`，见 5 节）。
 
 因此大多数 Worker 不需要传 `boot`。例如：
@@ -1394,10 +1394,10 @@ Windows 安装期如果希望默认进入安装菜单，可以这样传：
 3. 选择存储 Agent（`disk_agent` 指定；不传则交给放置策略：候选须启用且数据面就绪，`type=master` 时还要求该节点本地存在这块母盘——无可用候选返回 `503`，`detail.excluded` 逐节点说明原因）
 4. 拼接盘 NQN（`base-nqn:worker-id.os.<os_tag>`）与 backing filename（`worker-id.os.<os_tag>.img`）
 5. 调用 Agent 创建磁盘 target（母盘克隆或空白盘）
-6. 更新 `state/workers.yml` 中该 Worker 的 `disks` 台账（追加到数组），首次建盘时 `state` 由 `registered` 转为 `ready`
+6. 更新 `state/workers.yml` 中该 Worker 的 `disks` 台账（追加到数组），首次建盘时 `state` 由 `registered` 转为 `ready`；**该盘同时写入 `default_disk`**（Worker 只有这一块盘，无需再调 default-disk）
 7. **建盘即签发**：盘落在 nvmet 后端节点时，若该 Worker 尚无认证密钥，控制面就地生成 DHHC-1 密钥并推送（审计 `credential.issue`，见 7.7）——已有密钥不轮换（按 Worker 跟盘，多盘共用一把）；非 nvmet 后端不签发（DHHC-1 是 NVMe-oF 专属，iSCSI 走 CHAP）
 
-端点位于 `/luns/` 命名空间下，为将来数据盘（`/luns/data`）预留；多盘场景下，默认启动哪个盘由 `PUT /workers/{worker_id}/default-disk` 的 `disk`（os_tag）决定。
+端点位于 `/luns/` 命名空间下，为将来数据盘（`/luns/data`）预留；多盘场景下，默认启动哪个盘由 `PUT /workers/{worker_id}/default-disk` 的 `disk`（os_tag）决定（第二块及以后的盘不会自动改写默认盘）。
 
 ### Path 参数
 
@@ -1520,7 +1520,7 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
 
 `dry_run=true` 只返回计划（`plan` / `warnings`）不建盘。**预览与执行共用同一份放置实现**，所以 `plan` 里的落点即随后执行的结果（逐行 `action` 为 `create` / `skip` / `error`）。注意 `targets` 方式的计划**不探测节点**（只按台账判断 create/skip/error），`workers` 方式的候选则在放置阶段逐个探过。
 
-与单盘一致：`master` 走母盘克隆、`empty` 建空白盘；同一 (os, os_version) 至多一块，已存在则**自动跳过**（不算失败）。**创建成功的 Worker 自动将 `default_disk` 设为本次批量盘的 `os_tag`**——批量部署直接进入默认启动，无需再调 `PUT /workers/{worker_id}/default-disk`（单盘接口不自动设置）。落在 nvmet 后端节点的 Worker 同样**建盘即签发**认证密钥（各 Worker 密钥互不相同，一次到位，见 7.1 步骤 7 与 7.7）。逐项独立执行，单项失败不影响其余，返回 `succeeded` / `skipped` / `failed` 汇总；目标 Agent 不存在或已停用（排空）的项进入 `failed`（`agent not found` / `agent ... disabled`），其余项照常。
+与单盘一致：`master` 走母盘克隆、`empty` 建空白盘；同一 (os, os_version) 至多一块，已存在则**自动跳过**（不算失败）。**创建成功的 Worker 自动将 `default_disk` 设为本次批量盘的 `os_tag`**——批量部署直接进入默认启动，无需再调 `PUT /workers/{worker_id}/default-disk`（单盘接口在首块盘时同样自动设置）。落在 nvmet 后端节点的 Worker 同样**建盘即签发**认证密钥（各 Worker 密钥互不相同，一次到位，见 7.1 步骤 7 与 7.7）。逐项独立执行，单项失败不影响其余，返回 `succeeded` / `skipped` / `failed` 汇总；目标 Agent 不存在或已停用（排空）的项进入 `failed`（`agent not found` / `agent ... disabled`），其余项照常。
 
 #### 请求体字段
 
@@ -1790,7 +1790,7 @@ curl -s -X PUT "$BASE_URL/workers/worker-01/default-disk" \
 1. 校验 Worker 存在且已挂载该 `os_tag` 对应的盘（不存在时返回 `404`）
 2. 调用该盘所在 Agent 删除 iSCSI target
 3. 从 `state/workers.yml` 的 `disks` 数组中移除该盘记录
-4. 联动清理：被删盘若为默认启动盘（`default_disk` 等于该盘 `os_tag`），一并清除 `default_disk` 与同名（同 os）的 `boot.menu_default`（防止 iPXE 启动到已删除的系统盘）
+4. 联动清理：被删盘若为默认启动盘（`default_disk` 等于该盘 `os_tag`），一并清除 `default_disk` 与同名（同 os）的 `boot.menu_default`（防止 iPXE 启动到已删除的系统盘）；**若删后只剩一块盘，该盘成为默认启动盘**
 5. 删完最后一块盘时 `state` 由 `ready` 回退 `registered`（等待重新建盘）
 
 ### Query 参数
@@ -1816,7 +1816,7 @@ curl -s -X DELETE "$BASE_URL/workers/worker-01/luns/disk/0d26b6f33a89?delete_fil
 
 ### 成功返回
 
-返回该 Worker 的完整台账（`disks` 已不含被删系统盘；若为默认盘，`default_disk`/`boot.menu_default` 已被清除；无盘时 `state=registered`）。
+返回该 Worker 的完整台账（`disks` 已不含被删系统盘；若为默认盘，`default_disk`/`boot.menu_default` 已被清除，只剩一块盘时该盘自动成为默认启动盘；无盘时 `state=registered`）。
 
 ### 常见错误
 

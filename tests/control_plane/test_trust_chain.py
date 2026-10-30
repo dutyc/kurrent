@@ -275,7 +275,7 @@ class TestBootVarsWithDisk:
         assert "set storager-ip ag-01" in res.text  # storager_ip 缺省回退 base_url 主机名
         assert "set iscsi-sep :::1:" in res.text  # stgt 后端差异连接符
         assert "set os ubuntu" in res.text  # 盘 os 投影（默认盘 = 唯一盘）
-        assert "set menu-default reboot" in res.text  # 单盘建盘不自动设 default_disk → reboot
+        assert "set menu-default boot-os" in res.text  # 单盘建盘自动成为默认盘 → 通用 OS 项
 
     def test_backend_from_capabilities_not_stale_tags(self, client, auth_headers, ec_keypair, mock_agent_client):
         """后端类型以 Agent 自报的能力为准，登记信息里的过期标签不得覆盖实况。

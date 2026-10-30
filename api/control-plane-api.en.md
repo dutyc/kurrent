@@ -306,7 +306,7 @@ The response of `/boot-vars` is a projection of the inventory:
 | `hostnqn` | The Worker’s initiator Host NQN (disk NQN prefix + `:host.<worker_id>`, in the same namespace as the disk NQN and matching the host entry registered in nvmet-host); **injected when the default disk carries an NQN**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch `0005` supports the `hostnqn` setting) |
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — 2026-08-30 MAIN MENU dynamicization: the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
 | `os_version` | Version annotation of the default boot disk (disk record `os_version`; `''` = no version) — omitted when empty; the `os-label` assembly in menu.ipxe adapts (shows `os version` when present). Not returned when the Worker has no system disk. |
-| `menu_default` | Derived chain: `workers.yml` `default_disk` (set separately after disk creation; os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). 2026-08-30 dynamicization: since the menu OS item has converged to the single generic item `boot-os`, any OS-semantics default (`default_disk`, or legacy OS names in `boot.menu_default`) is normalized to `boot-os`; non-OS navigation values (`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`) are returned as-is |
+| `menu_default` | Derived chain: `workers.yml` `default_disk` (the first disk is set as default automatically; use 7.3 for multi-disk, os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). 2026-08-30 dynamicization: since the menu OS item has converged to the single generic item `boot-os`, any OS-semantics default (`default_disk`, or legacy OS names in `boot.menu_default`) is normalized to `boot-os`; non-OS navigation values (`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`) are returned as-is |
 | `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutMs` (default 1). Units are milliseconds. |
 
 Worker lookup rules (**binding authority first**):
@@ -327,15 +327,15 @@ not identified and mac provided ->
 The default boot item is derived by `/boot-vars` in the following order:
 
 ```text
-default_disk (set separately after disk creation, see 7.3) -> boot.menu_default (explicit config) -> reboot (not configured)
+default_disk (the first disk is set as default automatically; use 7.3 for multi-disk) -> boot.menu_default (explicit config) -> reboot (not configured)
 ```
 
-- Recommended approach: after creating a system disk, call `PUT /workers/{worker_id}/default-disk` to set the default boot disk (os_tag references a specific disk):
+- With a single system disk no extra call is needed: disk creation writes `default_disk`. When multiple disks coexist, call `PUT /workers/{worker_id}/default-disk` to choose the default boot disk (os_tag references a specific disk):
   ```text
   disk=<os_tag> -> menu_default=boot-os, os=<disk os>, os-version=<disk os_version if any>, disk_nqn=<disk nqn>
   ```
   Since 2026-08-30, the MAIN MENU keeps a single generic OS item: `menu_default` is normalized to `boot-os` (legacy OS names in `boot.menu_default` are also normalized), while `os` / `os-version` are display-only and `disk_nqn` carries the boot identity consumed by the generic item.
-- Alternatively, you can leave `default_disk` unset and use `boot.menu_default` to specify a default item on the iPXE menu (e.g., `menu-install` during installation, or `exit`).
+- Alternatively, you can explicitly clear `default_disk` (`PUT /workers/{worker_id}/default-disk`, `{"disk": null}`) and use `boot.menu_default` to specify a default item on the iPXE menu (e.g., `menu-install` during installation, or `exit`).
 - When neither is configured, `menu_default` returns `reboot` (a short-timeout reboot loop waiting for the admin to create a disk / set a default disk; `exit` is only used when explicitly configured).
 
 ### Registration-Window Enrollment (Zero-touch Provisioning)
@@ -404,7 +404,7 @@ set menu-default boot-os
 set menu-timeout 5000
 ```
 
-Registered but no default boot configured (no system disk / no `default_disk` / no explicit `boot.menu_default`):
+Registered but no default boot configured (no system disk / `default_disk` explicitly cleared / no explicit `boot.menu_default`):
 
 ```ipxe
 #!ipxe
@@ -1361,7 +1361,7 @@ The Control Plane will:
 
 When `boot` is omitted:
 
-- `menu_default` defaults to `default_disk` (set separately after disk creation, see 7.3); if not set, defaults to `reboot` (loop reboot waiting for configuration, see section 5).
+- `menu_default` defaults to `default_disk` (the first disk is set as default automatically; use 7.3 for multi-disk); if not set, defaults to `reboot` (loop reboot waiting for configuration, see section 5).
 - `menu_timeout` defaults to `spec.boot.menuTimeoutMs` (currently `5000`) when a default boot is configured; in the `reboot` loop it is fixed to `spec.boot.autoBootTimeoutMs` (currently `1`, see section 5).
 
 Therefore, most Workers do not need to pass `boot`. For example:
@@ -1439,10 +1439,10 @@ Creates a system disk LUN for a given Worker. System disks are categorized by (o
 3. Select a storage Agent (`disk_agent` if given; otherwise the placement policy decides: candidates must be enabled with a ready data plane, and for `type=master` must hold that master locally — no usable candidate returns `503` with `detail.excluded` explaining each node).
 4. Assemble the disk NQN (`base-nqn:worker-id.os.<os_tag>`) and backing filename (`worker-id.os.<os_tag>.img`).
 5. Call the Agent to create the disk target (master clone or empty disk).
-6. Update the Worker’s `disks` inventory in `state/workers.yml` (append to array). On the first disk creation, `state` transitions from `registered` to `ready`.
+6. Update the Worker’s `disks` inventory in `state/workers.yml` (append to array). On the first disk creation, `state` transitions from `registered` to `ready`; **that disk is also written to `default_disk`** (it is the Worker’s only disk, so no extra default-disk call is needed).
 7. **Issue on disk creation**: when the disk lands on an nvmet-backed node and the Worker has no key yet, the Control Plane generates a DHHC-1 key locally and pushes it (audited as `credential.issue`, see 7.7) — an existing key is not rotated (key follows the Worker; multiple disks share one key). Non-nvmet backends get no key (DHHC-1 is NVMe-oF-specific; iSCSI uses CHAP).
 
-This endpoint resides under the `/luns/` namespace to reserve space for future data disks (`/luns/data`). In a multi-disk scenario, the default boot disk is determined by the `disk` (os_tag) parameter of `PUT /workers/{worker_id}/default-disk`.
+This endpoint resides under the `/luns/` namespace to reserve space for future data disks (`/luns/data`). In a multi-disk scenario, the default boot disk is determined by the `disk` (os_tag) parameter of `PUT /workers/{worker_id}/default-disk` (the second and later disks never rewrite the default automatically).
 
 ### Path Parameters
 
@@ -1565,7 +1565,7 @@ Placement semantics for the `workers` form — placement is a system decision; t
 
 `dry_run=true` returns the plan (`plan` / `warnings`) without creating anything. **Preview and execution share the same placement implementation**, so the node in `plan` is exactly what execution will do (each row's `action` is `create` / `skip` / `error`). Note that a plan for the `targets` form does **not** probe the nodes (it judges create/skip/error from inventory alone), whereas every candidate of the `workers` form was probed during placement.
 
-Same as single-disk creation: `master` clones from a master image, `empty` creates a blank disk. At most one disk per (os, os_version) is allowed; if a Worker already has one it is **automatically skipped** (not considered a failure). **Successfully created Workers automatically set `default_disk` to the batch disk’s `os_tag`** — batch deployment goes directly to the default boot without needing an extra `PUT /workers/{worker_id}/default-disk` call (single-disk creation does NOT set this automatically). Workers placed on nvmet-backed nodes also get their authentication key **issued on disk creation** (each Worker gets its own distinct key, in one pass — see 7.1 step 7 and 7.7). Each item is processed independently; a failure of one does not affect the others. Returns a summary of `succeeded` / `skipped` / `failed`. Items whose target Agent does not exist or is disabled (drain) land in `failed` (`agent not found` / `agent ... disabled`); the remaining items proceed as usual.
+Same as single-disk creation: `master` clones from a master image, `empty` creates a blank disk. At most one disk per (os, os_version) is allowed; if a Worker already has one it is **automatically skipped** (not considered a failure). **Successfully created Workers automatically set `default_disk` to the batch disk’s `os_tag`** — batch deployment goes directly to the default boot without needing an extra `PUT /workers/{worker_id}/default-disk` call (single-disk creation sets it automatically too when it is the first disk). Workers placed on nvmet-backed nodes also get their authentication key **issued on disk creation** (each Worker gets its own distinct key, in one pass — see 7.1 step 7 and 7.7). Each item is processed independently; a failure of one does not affect the others. Returns a summary of `succeeded` / `skipped` / `failed`. Items whose target Agent does not exist or is disabled (drain) land in `failed` (`agent not found` / `agent ... disabled`); the remaining items proceed as usual.
 
 #### Request Body Fields
 
@@ -1835,7 +1835,7 @@ Deletes a single system disk of a given Worker (by the disk-level random identif
 1. Verify the Worker exists and has a disk with that `os_tag` (returns `404` if not).
 2. Call the hosting Agent to delete the iSCSI target.
 3. Remove the disk entry from the Worker’s `disks` array in `state/workers.yml`.
-4. Cleanup linkage: if the deleted disk was the default boot disk (`default_disk` equals its `os_tag`), both `default_disk` and any matching (same-OS) `boot.menu_default` are cleared (to prevent iPXE from booting to a deleted disk).
+4. Cleanup linkage: if the deleted disk was the default boot disk (`default_disk` equals its `os_tag`), both `default_disk` and any matching (same-OS) `boot.menu_default` are cleared (to prevent iPXE from booting to a deleted disk); **if exactly one disk remains, it becomes the default boot disk**.
 5. When the last disk is deleted, `state` reverts from `ready` to `registered` (waiting for a new disk to be created).
 
 ### Query Parameters
@@ -1861,7 +1861,7 @@ curl -s -X DELETE "$BASE_URL/workers/worker-01/luns/disk/0d26b6f33a89?delete_fil
 
 ### Success Response
 
-Returns the full Worker inventory (with `disks` no longer containing the deleted system disk; if it was the default, `default_disk`/`boot.menu_default` are cleared; if no disks remain, `state=registered`).
+Returns the full Worker inventory (with `disks` no longer containing the deleted system disk; if it was the default, `default_disk`/`boot.menu_default` are cleared, and when exactly one disk remains it becomes the default boot disk; if no disks remain, `state=registered`).
 
 ### Common Errors
 

@@ -66,6 +66,7 @@ for _route in app.routes:
 
 # 启动时执行一次旧数据迁移（幂等；失败仅记日志，不阻断启动）
 devices.migrate_legacy_devices()
+workers.migrate_single_disk_default()
 
 # 启动时按 spec.networking 生成 dnsmasq.conf（yml 是权威，conf 为派生物；失败仅记日志，不阻断启动）
 try:
