@@ -32,7 +32,8 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 log = logging.getLogger("agent")
 
-RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（与控制面 config 一致）
+RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（控制面可经 enroll/renew 下发覆盖）
+POLICY_FILENAME = "policy.json"  # 控制面下发的组件策略（renew_threshold）
 PUBLIC_NODES_CRL_PATH = "/crl/nodes.crl"
 CRL_FETCH_TIMEOUT = 3.0
 SELF_CHECK_ENV = "KURRENT_PKI_SELF_CHECK"
@@ -69,6 +70,16 @@ def _write_pem(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
     if path.name.endswith(".key"):
         os.chmod(path, 0o600)
+
+
+def _renew_threshold(pki_dir: Path) -> float:
+    """控制面下发的轮换阈值（policy.json）；缺失/非法回落内置默认。"""
+    try:
+        value = float(json.loads(
+            (Path(pki_dir) / POLICY_FILENAME).read_text(encoding="utf-8")).get("renew_threshold"))
+    except (OSError, ValueError, TypeError):
+        return RENEW_THRESHOLD
+    return value if 0 < value <= 1 else RENEW_THRESHOLD
 
 
 def _cert_remaining_ratio(cert_path: Path) -> float | None:
@@ -111,7 +122,7 @@ class PkiClient:
     def ready(self) -> bool:
         """证书就绪、剩余生命周期高于阈值，且两个信任锚都已落盘。"""
         ratio = _cert_remaining_ratio(self.pki_dir / "client.crt")
-        return (ratio is not None and ratio > RENEW_THRESHOLD
+        return (ratio is not None and ratio > _renew_threshold(self.pki_dir)
                 and (self.pki_dir / "ca-control.crt").is_file()
                 and (self.pki_dir / "ca-nodes.crt").is_file())
 
@@ -276,6 +287,11 @@ class PkiClient:
         _write_pem(self.pki_dir / "serving.crt", certs["serving.crt"].encode())
         _write_pem(self.pki_dir / "ca-nodes.crt", data["ca_nodes_crt"].encode())
         _write_pem(self.pki_dir / "ca-control.crt", data["ca_control_crt"].encode())
+        # 轮换阈值随 enroll/renew 下发（控制面 spec.pki.renewThreshold）：供后续启动判定
+        threshold = data.get("renew_threshold")
+        if isinstance(threshold, (int, float)) and 0 < float(threshold) <= 1:
+            (self.pki_dir / POLICY_FILENAME).write_text(
+                json.dumps({"renew_threshold": float(threshold)}) + "\n", encoding="utf-8")
         # nvmet-host 派生凭据落盘（agent 组件）：控制面按 backend=nvmet 能力签发随响应
         # 下发；写入共享凭据目录供 nvmet-host 容器引导（缺失响应 = 非 nvmet 后端/旧控制面）
         if self.derived_token_file and data.get("nvmet_token"):
