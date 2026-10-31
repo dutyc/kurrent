@@ -48,6 +48,20 @@ def test_minimal_accepts_and_injects_defaults(tmp_path):
     assert cfg.spec.boot.menu_timeout_ms == 5000
     assert cfg.spec.boot.auto_boot_timeout_ms == 1
     assert cfg.spec.agent_timeout_sec == 10
+    # 新增策略块默认值
+    assert cfg.spec.pki.bootstrap_token_max_ttl_minutes == 1440
+    assert cfg.spec.pki.bootstrap_token_max_uses == 100
+    assert cfg.spec.pki.crl_refresh_hours == 12
+    assert cfg.spec.server_cert.rotate_on_change is False
+    assert cfg.spec.auth.session_ttl_hours == 12
+    assert cfg.spec.auth.admin_cert_days == 365
+    assert cfg.spec.auth.user_cert_days_max == 3650
+    assert cfg.spec.auth.token_ttl_hours == 24
+    assert cfg.spec.auth.token_max_ttl_hours == 720
+    assert cfg.spec.registration.window_max_ttl_minutes == 60
+    assert cfg.spec.registration.window_max_devices == 1000
+    assert cfg.spec.credentials.rotation_days == 90
+    assert cfg.spec.credentials.reconcile_interval_seconds == 60
 
 
 def test_unknown_field_rejected(tmp_path):
@@ -128,3 +142,97 @@ def test_ensure_dnsmasq_conf_idempotent(tmp_path, monkeypatch):
     assert ensure_dnsmasq_conf(conf) is True  # 首次生成
     assert ensure_dnsmasq_conf(conf) is False  # 内容一致不重写
     assert "interface=eth-test0" in conf.read_text(encoding="utf-8")
+
+
+# ── 声明期语义校验（错误在 kurrent init 之前暴露）──
+
+@pytest.mark.parametrize("old,new,needle", [
+    ("192.168.80.2", "10.1.1.1", "outside subnet"),                    # 网关不在服务网段
+    ("192.168.80.50,192.168.80.100", "192.168.80.100,192.168.80.50", "start must not exceed end"),
+    ("192.168.80.50,192.168.80.100", "192.168.80.0,192.168.80.100", "network or broadcast"),
+    ("192.168.80.50,192.168.80.100", "10.0.0.10,10.0.0.20", "outside subnet"),
+    ("223.5.5.5", "not-an-ip", "not an IP"),
+])
+def test_networking_semantic_errors(tmp_path, old, new, needle):
+    with pytest.raises(RuntimeError, match=needle):
+        _load(tmp_path, MINIMAL.replace(old, new, 1))
+
+
+def test_networking_rejects_ipv6_subnet(tmp_path):
+    with pytest.raises(RuntimeError, match="IPv4"):
+        _load(tmp_path, MINIMAL.replace("192.168.80.0/24", "fd00::/64", 1))
+
+
+def test_api_version_is_locked(tmp_path):
+    with pytest.raises(RuntimeError, match="apiVersion"):
+        _load(tmp_path, MINIMAL.replace("kurrent.io/v1", "kurrent.io/v2", 1))
+
+
+def test_server_cert_san_rejected_when_invalid(tmp_path):
+    body = MINIMAL + "  serverCert:\n    san: \"IP:not-an-ip,DNS:localhost\"\n"
+    with pytest.raises(RuntimeError, match="san"):
+        _load(tmp_path, body)
+
+
+def test_bootstrap_default_ttl_must_not_exceed_max(tmp_path):
+    body = MINIMAL + "  pki:\n    bootstrapTokenTtlMinutes: 120\n    bootstrapTokenMaxTtlMinutes: 60\n"
+    with pytest.raises(RuntimeError, match="bootstrapTokenTtlMinutes"):
+        _load(tmp_path, body)
+
+
+def test_admin_cert_days_must_not_exceed_user_max(tmp_path):
+    body = MINIMAL + "  auth:\n    adminCertDays: 4000\n    userCertDaysMax: 365\n"
+    with pytest.raises(RuntimeError, match="adminCertDays"):
+        _load(tmp_path, body)
+
+
+def test_token_default_ttl_must_not_exceed_max(tmp_path):
+    body = MINIMAL + "  auth:\n    tokenTtlHours: 900\n    tokenMaxTtlHours: 720\n"
+    with pytest.raises(RuntimeError, match="tokenTtlHours"):
+        _load(tmp_path, body)
+
+
+def test_crl_refresh_must_be_below_next_update(tmp_path):
+    body = MINIMAL + "  pki:\n    crlRefreshHours: 168\n"
+    with pytest.raises(RuntimeError, match="crlRefreshHours"):
+        _load(tmp_path, body)
+
+
+def test_credentials_zero_disables(tmp_path):
+    body = MINIMAL + "  credentials:\n    rotationDays: 0\n    reconcileIntervalSeconds: 0\n"
+    cfg = _load(tmp_path, body)
+    assert cfg.spec.credentials.rotation_days == 0
+    assert cfg.spec.credentials.reconcile_interval_seconds == 0
+
+
+def test_config_hash_is_stable_and_sensitive(tmp_path):
+    from control_plane.app.config_schema import config_hash
+
+    first = _load(tmp_path, MINIMAL)
+    again = _load(tmp_path, MINIMAL)
+    assert config_hash(first) == config_hash(again)
+    changed = _load(tmp_path, MINIMAL.replace("enp3s0", "enp4s0", 1))
+    assert config_hash(changed) != config_hash(first)
+
+
+def test_settings_reflect_declaration(tmp_path, monkeypatch):
+    from control_plane.app import config as cfg
+
+    body = MINIMAL + '''  auth:
+    sessionTtlHours: 2
+  registration:
+    windowMaxTtlMinutes: 15
+    windowMaxDevices: 7
+  credentials:
+    rotationDays: 0
+    reconcileIntervalSeconds: 0
+'''
+    loaded = _load(tmp_path, body)
+    monkeypatch.setattr(cfg, "CONFIG", loaded)
+    monkeypatch.delenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS", raising=False)
+    monkeypatch.delenv("KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL", raising=False)
+    assert cfg.settings.session_ttl_seconds == 7200
+    assert cfg.settings.registration_window_max_ttl_minutes == 15
+    assert cfg.settings.registration_window_max_devices == 7
+    assert cfg.settings.credential_rotation_days == 0
+    assert cfg.settings.credential_reconcile_interval == 0

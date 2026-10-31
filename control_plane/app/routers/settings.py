@@ -6,11 +6,7 @@
 from fastapi import Depends, HTTPException, Request
 
 from ..auth import authenticate, authorize_request
-from ..config import (
-    REGISTRATION_WINDOW_MAX_DEVICES_UPPER,
-    REGISTRATION_WINDOW_TTL_MAX_MINUTES,
-    REGISTRATION_WINDOW_TTL_MIN_MINUTES,
-)
+from ..config import REGISTRATION_WINDOW_TTL_MIN_MINUTES, settings
 from ..models import OpenRegistrationWindowRequest, SetEnforcementRequest
 from ..stores import record, runtime_settings
 from ..trust import enforcement_enabled, window_open, window_record, window_status
@@ -27,26 +23,39 @@ router = PrincipalRouter(
 @router.get("/settings/registration-window")
 def get_registration_window():
     """查询注册窗口状态：时间维度（open / 开启时刻 / TTL / 关闭时刻 / 剩余秒数）
-    + 额度维度（max_devices / admitted / remaining_devices / quota_exhausted）。
+    + 额度维度（max_devices / admitted / remaining_devices / quota_exhausted）
+    + limits（当前声明的 TTL/额度上限，WebUI 按它做输入约束）。
     TTL 到期自动关闭（懒计算，不主动清理）；额度用尽不再放行新设备（不主动清窗口记录）。
     未配置/已关闭 → open=false。"""
-    return window_status()
+    return _window_payload()
+
+
+def _window_payload() -> dict:
+    """窗口状态 + 当前声明的上限（WebUI 按 limits 收敛输入控件）。"""
+    status = window_status()
+    status["limits"] = {
+        "ttl_minutes_min": REGISTRATION_WINDOW_TTL_MIN_MINUTES,
+        "ttl_minutes_max": settings.registration_window_max_ttl_minutes,
+        "max_devices": settings.registration_window_max_devices,
+    }
+    return status
 
 
 @router.post("/settings/registration-window", status_code=201)
 def open_registration_window(req: OpenRegistrationWindowRequest, request: Request):
-    """开启注册窗口（部署期）：TTL 硬上限 60 分钟（代码层不可配永久），注册只在窗口期可发生。
-    max_devices 为放行额度（台），省略/null = 不限；已放行数派生自设备台账
-    （窗口期内 source=ipxe 且 first_seen >= 开启时刻的条目），不另存计数器。
+    """开启注册窗口（部署期）：TTL 上限来自声明 spec.registration（不可配置为永久），
+    注册只在窗口期可发生。max_devices 为放行额度（台），省略/null = 不限；已放行数
+    派生自设备台账（窗口期内 source=ipxe 且 first_seen >= 开启时刻的条目），不另存计数器。
     已开启 → 409（先关闭再开）；过期残留记录可直接重开（覆盖）。"""
-    if not (REGISTRATION_WINDOW_TTL_MIN_MINUTES <= req.ttl_minutes <= REGISTRATION_WINDOW_TTL_MAX_MINUTES):
+    ttl_max = settings.registration_window_max_ttl_minutes
+    devices_max = settings.registration_window_max_devices
+    if not (REGISTRATION_WINDOW_TTL_MIN_MINUTES <= req.ttl_minutes <= ttl_max):
         raise HTTPException(
             400,
-            f"ttl_minutes must be within {REGISTRATION_WINDOW_TTL_MIN_MINUTES}-"
-            f"{REGISTRATION_WINDOW_TTL_MAX_MINUTES}",
+            f"ttl_minutes must be within {REGISTRATION_WINDOW_TTL_MIN_MINUTES}-{ttl_max}",
         )
-    if req.max_devices is not None and not (1 <= req.max_devices <= REGISTRATION_WINDOW_MAX_DEVICES_UPPER):
-        raise HTTPException(400, f"max_devices must be within 1-{REGISTRATION_WINDOW_MAX_DEVICES_UPPER}")
+    if req.max_devices is not None and not (1 <= req.max_devices <= devices_max):
+        raise HTTPException(400, f"max_devices must be within 1-{devices_max}")
     record_ = {"opened_at": now_iso(), "ttl_minutes": req.ttl_minutes, "max_devices": req.max_devices}
     with runtime_settings.locked():
         if window_open():
@@ -54,7 +63,7 @@ def open_registration_window(req: OpenRegistrationWindowRequest, request: Reques
         runtime_settings.set("registration_window", record_)
     record("settings.registration_window", "open", ttl_minutes=req.ttl_minutes,
            max_devices=req.max_devices, client=client_host(request))
-    return window_status()
+    return _window_payload()
 
 
 @router.delete("/settings/registration-window")

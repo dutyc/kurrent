@@ -155,3 +155,55 @@ def test_join_generated_shape(tmp_path):
     node = _load(tmp_path, data)
     assert node.spec.agent.disk_dir == "/data/storager_img"
     assert node.spec.control_plane.url == "https://10.0.0.1"
+
+
+# ── 声明期语义校验（join/config validate 在写盘前暴露）──
+
+@pytest.mark.parametrize("mutate,needle", [
+    (lambda d: d.update(apiVersion="kurrent.io/v2"), "apiVersion"),
+    (lambda d: d.update(kind="OtherConfiguration"), "kind"),
+    (lambda d: d["metadata"].update(name=""), "name"),
+    (lambda d: d["metadata"].update(name="Storage-01"), "name"),
+    (lambda d: d["spec"]["agent"].update(diskDir="relative/path"), "absolute"),
+    (lambda d: d["spec"]["agent"].update(nqnBase="nqn.not-a-date"), "nqnBase"),
+    (lambda d: d["spec"]["agent"].update(advertiseUrl="ftp://host:4840"), "http(s)"),
+    (lambda d: d["spec"]["controlPlane"].update(url="not-a-url"), "http(s)"),
+])
+def test_semantic_validation_rejected(tmp_path, mutate, needle):
+    data = _valid()
+    mutate(data)
+    with pytest.raises(RuntimeError, match="invalid node configuration") as exc:
+        _load(tmp_path, data)
+    assert needle in str(exc.value)
+
+
+def test_config_tool_validate_and_show(tmp_path, capsys):
+    from app import config_tool
+
+    raw = _dump(_valid())
+    assert config_tool.run("validate", raw) == 0
+    assert "backend=nvmet" in capsys.readouterr().out
+    assert config_tool.run("show", raw) == 0
+    shown = yaml.safe_load(capsys.readouterr().out)
+    assert shown["spec"]["agent"]["backend"] == "nvmet"
+    assert shown["spec"]["controlPlane"]["url"] == "https://127.0.0.1"
+
+
+def test_config_tool_reports_unknown_field(capsys):
+    from app import config_tool
+
+    data = _valid()
+    data["spec"]["agent"]["unknownField"] = 1
+    assert config_tool.run("validate", _dump(data)) == 2
+    assert "unknownField" in capsys.readouterr().err
+
+
+def test_renew_threshold_policy_file(tmp_path):
+    """控制面下发的轮换阈值落盘后参与 ready() 判定（缺失回落 0.2）。"""
+    from app import pki_client
+
+    assert pki_client._renew_threshold(tmp_path) == pki_client.RENEW_THRESHOLD
+    (tmp_path / pki_client.POLICY_FILENAME).write_text('{"renew_threshold": 0.5}\n')
+    assert pki_client._renew_threshold(tmp_path) == 0.5
+    (tmp_path / pki_client.POLICY_FILENAME).write_text('{"renew_threshold": 7}\n')
+    assert pki_client._renew_threshold(tmp_path) == pki_client.RENEW_THRESHOLD

@@ -294,9 +294,9 @@ def issue_user_cert(pki_dir: Path, cn: str, csr_pem: bytes, days: int | None = N
     cn = cn.strip()
     if not USER_CN_PATTERN.fullmatch(cn):
         raise ValueError("invalid cn: use letters, digits, dot, underscore, dash, @ (max 64)")
-    days = int(days if days is not None else config.ADMIN_CERT_DAYS)
-    if days < 1 or days > config.USER_CERT_DAYS_MAX:
-        raise ValueError(f"days must be between 1 and {config.USER_CERT_DAYS_MAX}")
+    days = int(days if days is not None else config.settings.admin_cert_days)
+    if days < 1 or days > config.settings.user_cert_days_max:
+        raise ValueError(f"days must be between 1 and {config.settings.user_cert_days_max}")
     try:
         parsed = _parse_csr(csr_pem)
     except ValueError as exc:
@@ -801,7 +801,7 @@ def ensure_admin_credentials(pki_dir: Path, ca_cert, ca_key, admin_conf_path: Pa
                              cn: str | None = None, days: int | None = None) -> tuple[Path, Path]:
     """幂等签发管理端 client cert（subject 仅 CN=cn）并确保管理凭据文件 admin.conf。"""
     cn = cn or config.ADMIN_CN
-    days = days or config.ADMIN_CERT_DAYS
+    days = days or config.settings.admin_cert_days
     cert_dir = pki_dir / "users" / cn
     cert_dir.mkdir(parents=True, exist_ok=True)
     cert_path = cert_dir / "client.crt"
@@ -1150,24 +1150,24 @@ def issue_bootstrap_token(pki_dir: Path, agent_id: str = "", component: str = "a
             raise ValueError("ttl_hours only applies to admin tokens")
         if scopes:
             raise ValueError("scopes only apply to admin tokens")
-        minutes = (config.BOOTSTRAP_TOKEN_TTL_MINUTES_DEFAULT
+        minutes = (config.settings.bootstrap_token_ttl_minutes_default
                    if ttl_minutes is None else int(ttl_minutes))
-        if not 1 <= minutes <= config.BOOTSTRAP_TOKEN_TTL_MINUTES_MAX:
+        if not 1 <= minutes <= config.settings.bootstrap_token_ttl_minutes_max:
             raise ValueError(
-                f"ttl_minutes must be between 1 and {config.BOOTSTRAP_TOKEN_TTL_MINUTES_MAX}")
-        if not 1 <= int(max_uses) <= config.BOOTSTRAP_TOKEN_MAX_USES_UPPER:
+                f"ttl_minutes must be between 1 and {config.settings.bootstrap_token_ttl_minutes_max}")
+        if not 1 <= int(max_uses) <= config.settings.bootstrap_token_max_uses_upper:
             raise ValueError(
-                f"max_uses must be between 1 and {config.BOOTSTRAP_TOKEN_MAX_USES_UPPER}")
+                f"max_uses must be between 1 and {config.settings.bootstrap_token_max_uses_upper}")
         ttl = _dt.timedelta(minutes=minutes)
         token_scopes: list[str] = []
         token_groups = groups or []
         max_uses = int(max_uses)
     else:
         token_scopes = normalize_token_scopes(scopes)
-        hours = config.TOKEN_TTL_HOURS_DEFAULT if ttl_hours is None else int(ttl_hours)
-        if not 1 <= hours <= config.TOKEN_TTL_HOURS_MAX:
+        hours = config.settings.token_ttl_hours_default if ttl_hours is None else int(ttl_hours)
+        if not 1 <= hours <= config.settings.token_ttl_hours_max:
             raise ValueError(
-                f"ttl_hours must be between 1 and {config.TOKEN_TTL_HOURS_MAX}")
+                f"ttl_hours must be between 1 and {config.settings.token_ttl_hours_max}")
         ttl = _dt.timedelta(hours=hours)
         token_groups = groups if groups is not None else groups_for_scopes(token_scopes)
         max_uses = 0  # 管理 token 不按次数消耗

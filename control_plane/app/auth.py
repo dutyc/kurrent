@@ -29,7 +29,7 @@ from fastapi import HTTPException, Request, Response
 
 from . import pki, sessions, state, users
 from .config import (ADMIN_GROUP, CLIENT_CERT_DN_HEADER, CLIENT_CLASS_HEADER,
-                     SESSION_TTL_SECONDS, settings)
+                     settings)
 
 log = logging.getLogger("control-plane")
 
@@ -153,7 +153,7 @@ def session_cookie_kwargs() -> dict:
         "secure": True,
         "samesite": "lax",
         "path": "/",
-        "max_age": SESSION_TTL_SECONDS,
+        "max_age": settings.session_ttl_seconds,
     }
 
 
@@ -161,7 +161,7 @@ def start_session(ident: Identity) -> tuple[str, int, int]:
     """按当前身份登记服务端会话，返回 (cookie_value, exp, epoch)。"""
     cert_fp = ident.fingerprint if ident.method in {"cert", "session"} else ""
     jti, exp, epoch = sessions.create(ident.name, ident.groups,
-                                      ttl_seconds=SESSION_TTL_SECONDS, cert_fp=cert_fp,
+                                      ttl_seconds=settings.session_ttl_seconds, cert_fp=cert_fp,
                                       scopes=ident.scopes)
     return sign_session(jti, exp, epoch), exp, epoch
 
@@ -284,12 +284,12 @@ def _refresh_session(request: Request, response: Response) -> None:
     data = verify_session(raw)
     if not data:
         return
-    if int(data.get("exp", 0)) - time.time() >= SESSION_TTL_SECONDS / 2:
+    if int(data.get("exp", 0)) - time.time() >= settings.session_ttl_seconds / 2:
         return
     key = getattr(request.state, "session_key", None)
     if not key:
         return
-    exp = sessions.renew(key, SESSION_TTL_SECONDS)
+    exp = sessions.renew(key, settings.session_ttl_seconds)
     response.set_cookie(value=sign_session(str(data.get("jti", "")), exp, sessions.epoch()),
                         **session_cookie_kwargs())
 

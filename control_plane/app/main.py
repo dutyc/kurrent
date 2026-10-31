@@ -12,10 +12,11 @@ from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
 from . import (audit, audit_middleware, cert_bootstrap, config, dnsmasq_conf,
-               maintenance, pki, users)
+               maintenance, nginx_reload, pki, runtime_status, users)
 from .principal import enforce_principal
 from .routers import (agents, boot, boot_assets, certs, devices, enroll,
                       operations, session, settings, tokens, workers)
+from .routers import config as config_status
 
 log = logging.getLogger("control-plane")
 
@@ -57,6 +58,7 @@ app.include_router(tokens.router)
 app.include_router(certs.router)
 app.include_router(session.router)
 app.include_router(enroll.router)
+app.include_router(config_status.router)
 
 # 默认拒绝的导入期校验：任何 APIRoute 没有 principal 声明就启动失败，
 # 防止后续新增路由绕过主体类矩阵。
@@ -68,17 +70,30 @@ for _route in app.routes:
 devices.migrate_legacy_devices()
 workers.migrate_single_disk_default()
 
-# 启动时按 spec.networking 生成 dnsmasq.conf（yml 是权威，conf 为派生物；失败仅记日志，不阻断启动）
+# 派生件按声明生成；失败记录到 runtime_status（/healthz 503 → kurrent init 回滚声明）
+runtime_status.reset()
+
+# 启动时按 spec.networking 生成 dnsmasq.conf（yml 是权威，conf 为派生物）
 try:
     dnsmasq_conf.ensure_dnsmasq_conf(config.DEFAULT_DNSMASQ_CONF)
-except Exception:
+except Exception as exc:
     log.exception("dnsmasq: failed to render dnsmasq.conf")
+    runtime_status.record_error("dnsmasq.conf 生成失败", exc)
 
-# 启动时幂等生成 TOFU 引导链服务器证书（失败仅记日志，不阻断启动；轮换 = 删 state/certs/ 重启）
+# 启动时幂等生成 TOFU 引导链服务器证书；声明漂移默认只报告，rotateOnChange=true 时重签
 try:
-    cert_bootstrap.ensure_server_cert(config.settings.cert_dir, config.settings.cert_san, config.settings.cert_days)
-except Exception:
+    cert_result = cert_bootstrap.ensure_server_cert(
+        config.settings.cert_dir, config.settings.cert_san,
+        config.settings.cert_days, config.settings.cert_rotate_on_change)
+    if cert_result.get("rotated"):
+        try:
+            nginx_reload.reload_nginx()
+        except Exception as exc:
+            log.exception("cert: rotated but nginx reload failed")
+            runtime_status.record_warning("服务器证书已轮换但 nginx reload 失败", exc)
+except Exception as exc:
     log.exception("cert: failed to ensure server certificate")
+    runtime_status.record_error("服务器证书生成失败", exc)
 
 # 启动时幂等生成组件 PKI：三分根（users/nodes/control）+ 控制面自身 client cert +
 # 管理凭据（admin 证书/admin.conf/会话密钥）——CLI 自动发现 admin.conf 走 443 mTLS。
@@ -99,5 +114,6 @@ try:
     # clients.crl（users + nodes），即使尚无吊销条目。
     pki.write_nginx_crl(config.settings.pki_dir)
     pki.ensure_session_key(config.settings.session_key_file)
-except Exception:
+except Exception as exc:
     log.exception("pki: failed to ensure component PKI")
+    runtime_status.record_error("组件 PKI 初始化失败", exc)

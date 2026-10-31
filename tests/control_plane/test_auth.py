@@ -10,6 +10,7 @@ import yaml
 from cryptography.x509.oid import NameOID
 
 from control_plane.app import auth as auth_mod
+from control_plane.app import config as cp_config
 from control_plane.app import pki
 from control_plane.app.config import settings
 
@@ -139,10 +140,10 @@ class TestSession:
 
     def test_session_expired_401(self, client, secure, monkeypatch):
         """登记已过期 → 401（过期判定在服务端登记，不只看 Cookie exp）。"""
-        monkeypatch.setattr(auth_mod, "SESSION_TTL_SECONDS", -1)
+        monkeypatch.setattr(cp_config.CONFIG.spec.auth, "session_ttl_hours", -1)
         token = issue_admin_token()
         res = client.post("/session", headers={"Authorization": f"Bearer {token}"})
-        monkeypatch.setattr(auth_mod, "SESSION_TTL_SECONDS", 12 * 3600)
+        monkeypatch.setattr(cp_config.CONFIG.spec.auth, "session_ttl_hours", 12)
         assert client.get("/whoami", headers=self._cookie_header(res)).status_code == 401
 
     def test_logout_clears_session(self, client, secure):

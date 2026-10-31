@@ -1,6 +1,6 @@
 import './Input.css'
 
-export default function Input({ label, value, onChange, placeholder, type = 'text', required, disabled, error, name, style }) {
+export default function Input({ label, value, onChange, placeholder, type = 'text', required, disabled, error, name, style, min, max }) {
   return (
     <div className="field" style={style}>
       {label && (
@@ -19,6 +19,8 @@ export default function Input({ label, value, onChange, placeholder, type = 'tex
         placeholder={placeholder}
         required={required}
         disabled={disabled}
+        min={min}
+        max={max}
         autoComplete="off"
       />
       {error && <span className="field-error">{error}</span>}

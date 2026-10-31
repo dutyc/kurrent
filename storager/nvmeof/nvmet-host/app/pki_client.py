@@ -32,7 +32,8 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 log = logging.getLogger("nvmet-host.pki")
 
-RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（与控制面 config 一致）
+RENEW_THRESHOLD = 0.2  # 剩余生命周期低于该比例触发轮换（控制面可经 enroll/renew 下发覆盖）
+POLICY_FILENAME = "policy.json"  # 控制面下发的组件策略（renew_threshold）
 PUBLIC_NODES_CRL_PATH = "/crl/nodes.crl"
 CRL_FETCH_TIMEOUT = 3.0
 SELF_CHECK_ENV = "KURRENT_PKI_SELF_CHECK"
@@ -67,6 +68,16 @@ def _write_pem(path: Path, data: bytes) -> None:
         os.chmod(path, 0o600)
 
 
+def _renew_threshold(pki_dir: Path) -> float:
+    """控制面下发的轮换阈值（policy.json）；缺失/非法回落内置默认。"""
+    try:
+        value = float(json.loads(
+            (Path(pki_dir) / POLICY_FILENAME).read_text(encoding="utf-8")).get("renew_threshold"))
+    except (OSError, ValueError, TypeError):
+        return RENEW_THRESHOLD
+    return value if 0 < value <= 1 else RENEW_THRESHOLD
+
+
 def _cert_remaining_ratio(cert_path: Path) -> float | None:
     """证书剩余生命周期比例；文件缺失/损坏返回 None。"""
     try:
@@ -99,7 +110,7 @@ class PkiClient:
     def ready(self) -> bool:
         """证书就绪、剩余生命周期高于阈值，且两个信任锚都已落盘。"""
         ratio = _cert_remaining_ratio(self.pki_dir / "client.crt")
-        return (ratio is not None and ratio > RENEW_THRESHOLD
+        return (ratio is not None and ratio > _renew_threshold(self.pki_dir)
                 and (self.pki_dir / "ca-control.crt").is_file()
                 and (self.pki_dir / "ca-nodes.crt").is_file())
 
@@ -249,6 +260,10 @@ class PkiClient:
         _write_pem(self.pki_dir / "serving.crt", certs["serving.crt"].encode())
         _write_pem(self.pki_dir / "ca-nodes.crt", data["ca_nodes_crt"].encode())
         _write_pem(self.pki_dir / "ca-control.crt", data["ca_control_crt"].encode())
+        threshold = data.get("renew_threshold")
+        if isinstance(threshold, (int, float)) and 0 < float(threshold) <= 1:
+            (self.pki_dir / POLICY_FILENAME).write_text(
+                json.dumps({"renew_threshold": float(threshold)}) + "\n", encoding="utf-8")
         log.info("pki: %s done (cn=%s)", "renew" if renew else "enroll", self.cn)
 
     def _cp_context(self, with_client_cert: bool) -> ssl.SSLContext:

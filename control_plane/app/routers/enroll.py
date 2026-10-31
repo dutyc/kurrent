@@ -101,6 +101,9 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
         # 节点信任锚：control 用于校验控制面客户端；nodes 用于校验同伴组件
         "ca_nodes_crt": pki.ca_cert_pem(config.settings.pki_dir, "nodes").decode(),
         "ca_control_crt": pki.ca_cert_pem(config.settings.pki_dir, "control").decode(),
+        # 组件侧证书轮换阈值（声明 spec.pki.renewThreshold）：节点落盘后按它决定
+        # 剩余生命周期低于多少时 renew；旧节点忽略该字段（保留内置默认）
+        "renew_threshold": config.settings.renew_threshold,
     }
     # 首次引导即拿到吊销表：入站按 serial 校验 peer，出站 TLS 加载同一份。
     # CRL 生成失败不让 enroll 失败（节点会以 degraded 状态启动并重试拉取）。

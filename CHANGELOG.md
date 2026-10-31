@@ -13,6 +13,27 @@
 
 ---
 
+## 2026-10-31
+
+### 新增
+
+- **声明配置闭环（CLI + API）**：新增 `kurrent config validate`（在组件镜像内按运行时 pydantic schema 全量校验候选声明）、`kurrent config show`（输出注入默认值后的生效声明）与 `kurrent config status`（经 443 读取运行态声明、`configHash`、dnsmasq.conf 与服务器证书漂移）。控制面新增已认证只读端点 `GET /config`；`schema` 拆分为 `control_plane/app/config_schema.py` 与 `storager/agent/app/config_schema.py`，`config_tool.py` 与运行时共用同一模型（CLI 不再维护第二套字段白名单）
+- **可声明策略块**：控制面新增 `spec.auth`（`sessionTtlHours` / `adminCertDays` / `userCertDaysMax` / `tokenTtlHours` / `tokenMaxTtlHours`）、`spec.registration`（`windowMaxTtlMinutes` / `windowMaxDevices`）、`spec.credentials`（`rotationDays` / `reconcileIntervalSeconds`）与 `spec.pki.crlRefreshHours` / `bootstrapTokenMaxTtlMinutes` / `bootstrapTokenMaxUses`；注册窗口 GET/POST 返回 `limits`，WebUI 按声明上限收敛 TTL/额度输入
+- **服务器证书漂移可见与显式轮换**：`state/certs/metadata.json` 记录生成时的 SAN/days；声明变化时默认只报告漂移（日志 + `GET /config` 的 `derived.serverCert.drift`），设 `spec.serverCert.rotateOnChange: true` 才重签并 reload nginx（TOFU 指纹变化，已入池设备需重新信任）
+
+### 变更
+
+- **`kurrent init` 原子化**：写盘前构建校验镜像并做全量 schema 校验；校验失败不改动声明。启动后控制面未通过健康检查或 dnsmasq 未能保持运行 → 返回非零并自动回滚上一份声明、恢复旧配置运行（不再降级为警告）；启动期派生件（dnsmasq.conf/证书/PKI）失败使 `/healthz` 返回 503
+- **`kurrent join` 写盘前全量校验**：合并后的节点声明先在 storager-agent 镜像内按运行时 schema 校验（未知字段、非绝对 diskDir、非法 NQN/URL 当场失败），通过后才写入 `storager/kurrent.yaml`、bootstrap token 并启动容器；agent 启动后增加「保持运行」核验
+- **声明语义收紧**：`apiVersion` / `kind` 锁定为 `kurrent.io/v1` / `ControlPlaneConfiguration|NodeConfiguration`；控制面 networking 增加跨字段校验（网关、DHCP 池必须在服务网段内且不占用网络/广播地址）；SAN 非法条目不再静默忽略；节点身份字符集、NQN 命名域、URL scheme、磁盘绝对路径在声明期约束。「协议契约/安全边界」（nonce TTL、注册窗口 TTL 下限等）仍留在代码，不进入声明
+- **注册窗口上限改为声明来源**：`spec.registration.windowMaxTtlMinutes`（默认 60）/ `windowMaxDevices`（默认 1000）；默认行为不变。`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` / `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` / `KURRENT_CP_CRL_REFRESH_INTERVAL` 保留为临时覆盖，声明是缺省来源
+
+### 修复
+
+- **`spec.pki.renewThreshold` 此前只校验不生效**：控制面 enroll/renew 响应新增 `renew_threshold`，组件落盘 `policy.json` 并按该阈值决定证书续期；旧组件忽略字段、保留内置 0.2
+
+---
+
 ## 2026-10-30
 
 ### 新增

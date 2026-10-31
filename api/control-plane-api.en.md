@@ -230,7 +230,7 @@ Notes:
 
 ### Description
 
-Health check endpoint. Does not change any state and requires no authentication.
+Health check endpoint. Does not change any state and requires no authentication. When a startup-derived artifact (`dnsmasq.conf`, server certificate, component PKI) fails it returns `503 {"status":"degraded"}` — `kurrent init` uses this to roll back the declaration; error details are only returned by the authenticated `GET /config`.
 
 ### curl
 
@@ -503,7 +503,7 @@ If `storager_ip` is not configured, the Control Plane falls back to the host por
 
 #### Description
 
-The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL has a hard cap of 60 minutes (a permanent window cannot be configured at the code level) and auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
+The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL and quota caps come from the `spec.registration` declaration (`windowMaxTtlMinutes` defaults to 60, `windowMaxDevices` to 1000; a permanent window cannot be configured), and the window auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
 
 The signature enforcement switch (transition-period compatibility): when off, keyless devices may still receive menu variables but **credentials are never injected** (credentials require a verified signature); when on, `/boot-vars` applies the 4th injection condition to bound devices — missing `mac` → rejected as `missing_mac`; no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
 
@@ -522,11 +522,12 @@ Queries the registration window status (no record / already expired → `open=fa
 | `admitted` | int | Devices admitted within this window (derived, see below) |
 | `remaining_devices` | int \| null | Quota left; `null` = unlimited |
 | `quota_exhausted` | bool | Whether the quota is used up (no further devices join the pool; the window record is not cleared) |
+| `limits` | object | Declared caps: `ttl_minutes_min` / `ttl_minutes_max` / `max_devices` (the WebUI constrains inputs by it) |
 
 `admitted` is a **derived** value with no stored counter: it counts device-ledger entries with `source == "ipxe"` and `first_seen >= opened_at`. Manual registration (`POST /devices`, `source=manual`) and manifest import therefore do not consume quota, and devices that existed before the window opened (including key-only claims) are not counted.
 
 ```json
-{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false}
+{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false, "limits": {"ttl_minutes_min": 1, "ttl_minutes_max": 60, "max_devices": 1000}}
 ```
 
 #### POST /settings/registration-window
@@ -537,8 +538,8 @@ Opens the registration window (status 201). If already open → 409 (close it fi
 
 | Field | Required | Type | Description |
 |---|---|---|---|
-| `ttl_minutes` | Yes | int | 1-60 (returns 400 outside the range) |
-| `max_devices` | No | int \| null | Admission quota (devices), 1-1000 (returns 400 outside the range); omitted/`null` = unlimited, still bounded by the TTL |
+| `ttl_minutes` | Yes | int | 1 to `spec.registration.windowMaxTtlMinutes` (default 60; outside returns 400) |
+| `max_devices` | No | int \| null | Admission quota (devices), 1 to `spec.registration.windowMaxDevices` (default 1000; outside returns 400); omitted/`null` = unlimited, still bounded by the TTL |
 
 ```bash
 # Time-boxed only
@@ -552,7 +553,7 @@ curl -X POST "$BASE_URL/settings/registration-window" \
   -d '{"ttl_minutes": 30, "max_devices": 20}'
 ```
 
-**Response**: same as GET (window status after opening).
+**Response**: same as GET (window status after opening, including `limits`).
 
 #### DELETE /settings/registration-window
 
@@ -627,6 +628,26 @@ curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>
 
 ```json
 { "mac": "00:0c:29:b9:8b:2d", "rotated": true }
+```
+
+---
+
+### 5.4 GET /config (declaration status)
+
+Returns the effective declaration loaded by the running process, its canonical `configHash`, and derived-artifact consistency (requires management-plane auth: `human` or `automation`). It answers "which declaration is running, and do derived artifacts match it"; it never returns private keys or secrets.
+
+| Field | Description |
+|---|---|
+| `apiVersion` / `kind` / `metadata.name` | Declaration identity |
+| `spec` | Effective config (camelCase aliases, defaults injected; identical to `kurrent config show`) |
+| `configHash` | Canonical SHA-256 of the effective config (sorted compact JSON; comparable with the hash printed by `kurrent config validate`) |
+| `derived.dnsmasqConf` | `path` and `matchesDeclaration` (whether the on-disk dnsmasq.conf equals the rendering of the current declaration) |
+| `derived.serverCert` | `present` / `fingerprint` / `san` / `days` / `notAfter` / `drift` (`san` / `days` / `expired` / `missing`) / `rotateOnChange`; drift is reported by default and only rotated when `rotateOnChange=true` |
+| `startup.errors` / `startup.warnings` | Startup-derived failures/warnings (non-empty `errors` makes `/healthz` return 503) |
+
+```bash
+kurrent config status     # CLI wrapper (443 mTLS / Bearer)
+curl -s --cert "$CERT" --key "$KEY" "$BASE_URL/config"
 ```
 
 ---
@@ -1040,6 +1061,7 @@ First-report auto-registration: when an `agent` component enrolls (`POST /enroll
 
 - Token validation: format / registry entry / component match / binding match (`agent_id` equals the ledger entry) / not expired; on success an allowance is **reserved atomically** and released if certificate issuance fails; single-use by default (`max_uses` can raise it)
 - `/enroll/renew` uses the component’s existing client cert (nginx forces mTLS on that path; the issuer must be the nodes CA → class=component; human certs get `403`), and re-signs only when CN == `<prefix>-<agent_id>`
+- The response includes `renew_threshold` (`spec.pki.renewThreshold`, default 0.2): components persist it as `policy.json` and renew when the certificate's remaining lifetime drops below it; legacy components ignore the field (keep the built-in default)
 - `nvmet-host` components are **not auto-registered** (they share the agent_id; the agent component must be registered first — otherwise 400, container restart retries; the allowance is not consumed)
 - A non-empty `base_url` must start with `http://` / `https://`, otherwise 400 (no auto-registration)
 - When an already-registered agent enrolls/renews again, `base_url` / `remark` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move or remark change, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` are **left untouched**, and fields the node does not report keep their current values

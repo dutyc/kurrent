@@ -16,7 +16,8 @@
 #   join 同步为 .env 的 KURRENT_DISK_DIR 插值键，compose 挂载源）
 #
 # 校验语义（pydantic v2）：未知字段拒绝（extra="forbid"）、必填缺失报错、
-# 默认值注入——配置错误在容器启动即失败，杜绝 .env 自由键值的静默偏差。
+# 默认值注入、身份/路径/NQN 语义校验——kurrent join 与 kurrent config validate
+# 在写盘前用 agent 镜像内同一份 schema 校验，配置错误不会等到容器启动才暴露。
 # 容器内路径固定 /etc/kurrent/kurrent.yaml（KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
@@ -24,7 +25,7 @@ metadata:
   # 节点身份 = agent_id（控制面 agents.yml 登记键、组件证书 CN）：机器身份——由
   # bootstrap token 绑定（kurrent token create --agent-id；省略则生成 12 位 hex 随机
   # 标识，与盘 os_tag 同构），join 写入并持久化，勿手工改写；身份须稳定，多节点
-  # 各自一个、天然不冲突
+  # 各自一个、天然不冲突。模板留空：join 必须写入（空值在 validate 时拒绝）
   name: ""
   # 备注（可选，人类识别用）：手工输入的唯一字段（如 storage-nvmet-01 / 生产存储）。
   # 随首次 enroll 登记进控制面台账（WebUI Agent 卡片展示、编辑表单可改），
@@ -37,7 +38,7 @@ spec:
     # 控制面可达地址（enroll 自动登记写入 agents.yml base_url；kurrent join 默认推导
     # https://<cp-host>:4840，特殊场景（NAT 等）手工编辑本键覆盖）
     # advertiseUrl: https://host.docker.internal:4840
-    # 宿主存储路径（必填；数据目录声明，compose 挂载源经 .env 插值同步）
+    # 宿主存储路径（必填，绝对路径；数据目录声明，compose 挂载源经 .env 插值同步）
     diskDir: /storager_img
     # 盘标识命名空间（必填；权威：NQN，iSCSI 数据面 IQN 由此派生）
     # 控制面不声明 NQN 域：Host NQN 与盘 NQN 的 base 均以本字段为权威

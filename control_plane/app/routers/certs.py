@@ -30,7 +30,7 @@ router = PrincipalRouter(
 
 
 class IssueUserCertRequest(BaseModel):
-    """签发参数：csr 必填（私钥留在申请者本地）；days 缺省 365，上限 USER_CERT_DAYS_MAX。"""
+    """签发参数：csr 必填（私钥留在申请者本地）；days 缺省 365，上限 spec.auth.userCertDaysMax。"""
 
     csr: str = ""
     days: int | None = None

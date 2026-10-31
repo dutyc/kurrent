@@ -74,6 +74,7 @@ var (
 	nvmetTokenWaitTimeout  = 60 * time.Second
 	nvmetTokenPollInterval = 1 * time.Second
 	nvmetTokenWaiter       = waitForTokenFile
+	agentStartupWatch      = 2 * time.Second
 )
 
 // waitForTokenFile 等待 agent 完成 enroll 并写出派生凭据。调用前 join 已删除旧文件，
@@ -222,6 +223,13 @@ func joinRun(o joinOpts) error {
 	default:
 		return fmt.Errorf("%s: spec.agent.backend 非法: %s（nvmet|stgt|lio）", o.configFile, backend)
 	}
+	var composeDir string
+	switch backend {
+	case "nvmet":
+		composeDir = filepath.Join(o.dir, "nvmeof")
+	case "stgt", "lio":
+		composeDir = filepath.Join(o.dir, "iscsi")
+	}
 	// nvmet 后端：宿主前置预检（内核模块 + configfs；内核 nvmet target 无法容器化，
 	// 未就绪则节点起服后数据面不可用）——fail fast 并给出一键修复命令。
 	if backend == "nvmet" {
@@ -254,6 +262,17 @@ func joinRun(o joinOpts) error {
 	if err != nil {
 		return fmt.Errorf("序列化 %s: %w", target, err)
 	}
+	// 写盘前用 agent 镜像内同一份 schema 全量校验：未知字段/非法值当场失败，
+	// 不会等容器启动才崩溃（合并保留的未知字段按 extra="forbid" 拒绝）。
+	fmt.Println("==> kurrent join: building validation image (storager-agent)")
+	if err := composeRun(composeDir, "build", "storager-agent"); err != nil {
+		return fmt.Errorf("构建 storager-agent 镜像失败: %w", err)
+	}
+	summary, err := runConfigTool("storager-agent", "validate", out)
+	if err != nil {
+		return fmt.Errorf("%s 声明校验失败（未写入）:\n%s", target, err)
+	}
+	fmt.Printf("==> kurrent join: %s\n", strings.TrimSpace(summary))
 	if err := os.WriteFile(target, out, 0o644); err != nil {
 		return fmt.Errorf("写入 %s: %w", target, err)
 	}
@@ -300,13 +319,6 @@ func joinRun(o joinOpts) error {
 		return err
 	}
 
-	var composeDir string
-	switch backend {
-	case "nvmet":
-		composeDir = filepath.Join(o.dir, "nvmeof")
-	case "stgt", "lio":
-		composeDir = filepath.Join(o.dir, "iscsi")
-	}
 	fmt.Printf("==> kurrent join: agent=%s backend=%s cp=%s\n", agentID, backend, cpURL)
 	fmt.Printf("==> kurrent join: node configuration -> %s\n", target)
 	fmt.Printf("==> kurrent join: bootstrap token -> %s（nvmet-host.token 由 agent enroll 派生自动生成）\n", tokenFile)
@@ -317,6 +329,9 @@ func joinRun(o joinOpts) error {
 	fmt.Println("==> kurrent join: restarting storager-agent (apply declaration & token)")
 	if err := composeRun(composeDir, "--env-file", "../.env", "restart", "storager-agent"); err != nil {
 		return err
+	}
+	if !waitContainerRunning("storager-agent", agentStartupWatch) {
+		return fmt.Errorf("storager-agent 启动后未保持运行；docker logs storager-agent 查看原因")
 	}
 	if backend == "nvmet" {
 		nvmetTokenPath := filepath.Join(bootstrapDir, "nvmet-host.token")

@@ -76,13 +76,22 @@ const usageText = `kurrent —— Kurrent 控制面 CLI
   config print init-defaults|node-defaults   输出声明模板（重定向为
                                               control_plane/kurrent.yaml 或
                                               storager/kurrent.yaml 后编辑）
-  init [--config PATH] [--dir PATH]          控制面初始化：校验声明并收敛启动控制面
+  config validate [--node] [--config PATH] [--dir REPO]
+  config show     [--node] [--config PATH] [--dir REPO]
+                                              在组件镜像内按运行时 schema 全量校验 /
+                                              输出生效声明（默认值已注入）；--node 或
+                                              kind=NodeConfiguration 时校验节点声明
+  config status                              运行态声明、configHash、dnsmasq.conf 与
+                                              服务器证书漂移（经 443 管理面）
+  init [--config PATH] [--dir PATH]          控制面初始化：全量校验声明并收敛启动；
+                                              健康检查失败回滚上一份声明并非零退出
                                               （默认读 control_plane/kurrent.yaml；
                                               --config 指定其他声明文件则应用之）
   join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]
                                               节点侧加入：
                                               声明 kurrent.yaml 缺失自动生成、已存在则读入并
-                                              同步地址，收敛启动 agent（幂等可重跑）；
+                                              同步地址；写盘前在 agent 镜像内全量校验，
+                                              收敛启动 agent（幂等可重跑）；
                                               --agent-id 写入声明 metadata.name（token 绑定
                                               的节点身份，token create 输出的命令已携带）；
                                               nvmet 后端预检宿主前置（内核模块 + configfs），

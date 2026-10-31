@@ -166,10 +166,11 @@ curl -s "$BASE_URL/workers" \
 | `DELETE` | `/devices/{mac}` | 注销设备（吊销，见 16.5） |
 | `DELETE` | `/devices/revoked` | 清除全部已吊销设备（可选 `dry_run` 预览，见 16.5.1） |
 | `GET` | `/settings/registration-window` | 查询注册窗口状态（见 5.1） |
-| `POST` | `/settings/registration-window` | 开启注册窗口（TTL 1-60 分钟硬上限；可选放行额度 `max_devices` 1-1000 台，见 5.1） |
+| `POST` | `/settings/registration-window` | 开启注册窗口（TTL/额度上限来自声明 `spec.registration`，见 5.1） |
 | `DELETE` | `/settings/registration-window` | 提前关闭注册窗口（见 5.1） |
 | `GET` | `/settings/enforcement` | 查询设备身份验签强制开关（见 5.1） |
 | `PUT` | `/settings/enforcement` | 切换设备身份验签强制开关（见 5.1） |
+| `GET` | `/config` | 运行态声明配置与派生件一致性（见 5.4） |
 | `GET` | `/agents` | 查询 Agent 列表与能力 |
 | `POST` | `/agents` | 注册新 Agent（写入 agents.yml，重复 id 返回 409） |
 | `POST` | `/agents/probe` | 探测 Agent 并自动推导注册参数（预览，不写文件） |
@@ -218,7 +219,7 @@ curl -s "$BASE_URL/workers" \
 
 ### 说明
 
-健康检查接口，不改状态，不需要鉴权。
+健康检查接口，不改状态，不需要鉴权。启动期派生件（`dnsmasq.conf`、服务器证书、组件 PKI）失败时返回 `503 {"status":"degraded"}`——`kurrent init` 据此回滚声明；错误详情只在已认证的 `GET /config` 返回。
 
 ### curl
 
@@ -494,7 +495,7 @@ agents:
 
 #### 说明
 
-注册窗口是部署期的受控注册通道（2026-08-21 裁定取代原 `auto-register` 永久开关，旧端点已删除）：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 硬上限 60 分钟（代码层不可配永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——密钥认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
+注册窗口是部署期的受控注册通道（2026-08-21 裁定取代原 `auto-register` 永久开关，旧端点已删除）：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 与额度上限来自声明 `spec.registration`（`windowMaxTtlMinutes` 默认 60、`windowMaxDevices` 默认 1000；不可配置为永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——密钥认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
 
 验签强制开关（过渡期兼容）：关闭时无密钥设备仍可拿到菜单变量，但**凭据一律不注入**（凭据只认验签）；开启后 `/boot-vars` 对已绑定设备执行注入四条件第 4 条——缺 `mac` → `missing_mac` 拒绝；无 `key_hash` → `no_key` 拒绝；缺 `nonce`/`sig` → `missing_sig` 拒绝；重放或签名无效 → 拒绝。已认领设备带无效签名在过渡期同样拒绝（伪造签名不放行）。建议全部存量设备完成密钥认领后再开启。
 
@@ -513,11 +514,12 @@ agents:
 | `admitted` | int | 窗口期内已放行设备数（派生值，见下） |
 | `remaining_devices` | int \| null | 剩余额度；`null` = 不限 |
 | `quota_exhausted` | bool | 额度是否已用尽（用尽后新设备不再入池，窗口记录不主动清除） |
+| `limits` | object | 当前声明的上限：`ttl_minutes_min` / `ttl_minutes_max` / `max_devices`（WebUI 按它收敛输入） |
 
 `admitted` 为**派生值**，不存计数器：窗口期内设备台账中 `source == "ipxe"` 且 `first_seen >= opened_at` 的条目数。因此管理员手动登记（`POST /devices`，`source=manual`）与清单导入不占额度，窗口开启前的存量设备（含仅认领密钥者）也不计入。
 
 ```json
-{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false}
+{"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false, "limits": {"ttl_minutes_min": 1, "ttl_minutes_max": 60, "max_devices": 1000}}
 ```
 
 #### POST /settings/registration-window
@@ -528,8 +530,8 @@ agents:
 
 | 字段 | 必填 | 类型 | 说明 |
 |---|---|---|---|
-| `ttl_minutes` | 是 | int | 1-60（超出返回 400） |
-| `max_devices` | 否 | int \| null | 放行额度（台），1-1000（超出返回 400）；省略/`null` = 不限，仍受 TTL 约束 |
+| `ttl_minutes` | 是 | int | 1 到 `spec.registration.windowMaxTtlMinutes`（默认 60，超出返回 400） |
+| `max_devices` | 否 | int \| null | 放行额度（台），1 到 `spec.registration.windowMaxDevices`（默认 1000，超出返回 400）；省略/`null` = 不限，仍受 TTL 约束 |
 
 ```bash
 # 只限时
@@ -543,7 +545,7 @@ curl -X POST "$BASE_URL/settings/registration-window" \
   -d '{"ttl_minutes": 30, "max_devices": 20}'
 ```
 
-**响应**：同 GET（开启后的窗口状态）。
+**响应**：同 GET（开启后的窗口状态，含 `limits`）。
 
 #### DELETE /settings/registration-window
 
@@ -618,6 +620,26 @@ curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>
 
 ```json
 { "mac": "00:0c:29:b9:8b:2d", "rotated": true }
+```
+
+---
+
+### 5.4 GET /config（声明配置状态）
+
+返回运行进程加载的生效声明、规范化 `configHash` 与派生件一致性（需管理面认证：`human` 或 `automation`）。用于回答「现在运行的是哪份声明、派生物是否与之一致」；不返回任何私钥/密钥。
+
+| 字段 | 说明 |
+|---|---|
+| `apiVersion` / `kind` / `metadata.name` | 声明身份 |
+| `spec` | 生效配置（camelCase alias，默认值已注入；与 `kurrent config show` 输出一致） |
+| `configHash` | 生效配置的规范化 SHA-256（排序键紧凑 JSON；与 `kurrent config validate` 输出的哈希可比对） |
+| `derived.dnsmasqConf` | `path` 与 `matchesDeclaration`（磁盘上的 dnsmasq.conf 是否等于当前声明渲染结果） |
+| `derived.serverCert` | `present` / `fingerprint` / `san` / `days` / `notAfter` / `drift`（`san` / `days` / `expired` / `missing`） / `rotateOnChange`；漂移默认只报告，`rotateOnChange=true` 才重签 |
+| `startup.errors` / `startup.warnings` | 启动期派生失败/告警（`errors` 非空时 `/healthz` 返回 503） |
+
+```bash
+kurrent config status     # CLI 封装（443 mTLS / Bearer）
+curl -s --cert "$CERT" --key "$KEY" "$BASE_URL/config"
 ```
 
 ---
@@ -1027,6 +1049,7 @@ curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
 
 - token 校验：格式 / 登记存在 / 组件匹配 / 绑定匹配（`agent_id` 与 token 登记一致）/ 未过期；通过后**原子占用一次额度**，证书签发失败退回，默认一次性（`max_uses` 可提高）
 - `/enroll/renew` 凭据 = 组件现有 client cert（nginx 该路径强制 mTLS，issuer 必须是 nodes CA → class=component；人类证书 `403`），校验 CN == `<前缀>-<agent_id>` 后重签
+- 响应附带 `renew_threshold`（声明 `spec.pki.renewThreshold`，默认 0.2）：组件落盘为 `policy.json`，按证书剩余生命周期低于该比例时 renew；旧组件忽略该字段（保留内置默认）
 - `nvmet-host` 组件**不自动登记**（与 agent 共享 agent_id，须 agent 组件先行在册；否则 400，容器重启重试；额度不消耗）
 - `base_url` 非空时必须为 `http://` / `https://` 开头，否则 400（不自动登记）
 - 已登记 agent 再次 enroll/renew 时**按节点声明刷新** `base_url` / `remark` / `role.cd`（声明权威：节点文件说了算，节点搬家/改备注后 renew 即对齐，无需重装）；控制面属性 `enabled` / `storager_ip` / `tags` **不碰**，节点未上报的字段保留现有值

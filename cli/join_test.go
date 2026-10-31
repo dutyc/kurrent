@@ -19,7 +19,29 @@ var nodeIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 const fakeDocker = `#!/usr/bin/env bash
 echo "FAKE-DOCKER $(pwd) $*" >> "${FAKE_DOCKER_LOG}"
-if [ "$1" = "inspect" ]; then echo healthy; fi
+if [ -n "${FAKE_DOCKER_FAIL:-}" ] && [[ "$*" == *"$FAKE_DOCKER_FAIL"* ]]; then
+  echo "fake docker failure: $*" >&2
+  exit 1
+fi
+if [ "$1" = "inspect" ]; then
+  case "$*" in
+    *State.Running*) echo "${FAKE_DOCKER_RUNNING:-true}" ;;
+    *State.Health*) echo "${FAKE_DOCKER_HEALTH:-healthy}" ;;
+    *) echo healthy ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  if [ -n "${FAKE_DOCKER_RUN_EXIT:-}" ]; then
+    echo "${FAKE_DOCKER_RUN_ERROR:-spec.agent.unknownField: Extra inputs are not permitted}" >&2
+    exit "$FAKE_DOCKER_RUN_EXIT"
+  fi
+  echo "ok: fake validation"
+  exit 0
+fi
+if [ "$1" = "logs" ]; then
+  echo "fake container logs"
+fi
 `
 
 // stubHostReady 注入「宿主前置已就绪」的假环境（假 /proc/mounts + /sys/module + tlshd 版本）：
@@ -74,6 +96,12 @@ func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	oldWaiter := nvmetTokenWaiter
 	nvmetTokenWaiter = func(string, time.Duration, time.Duration) error { return nil }
 	t.Cleanup(func() { nvmetTokenWaiter = oldWaiter })
+	oldHold, oldAgentHold, oldRollback := dnsmasqStartupWatch, agentStartupWatch, rollbackHealthWait
+	dnsmasqStartupWatch, agentStartupWatch = 20*time.Millisecond, 20*time.Millisecond
+	rollbackHealthWait = 50 * time.Millisecond
+	t.Cleanup(func() {
+		dnsmasqStartupWatch, agentStartupWatch, rollbackHealthWait = oldHold, oldAgentHold, oldRollback
+	})
 	repo = t.TempDir()
 	controlPlane = filepath.Join(repo, "control_plane")
 	storager = filepath.Join(repo, "storager")
@@ -804,5 +832,26 @@ func TestWaitForTokenFile(t *testing.T) {
 	}
 	if err := waitForTokenFile(filepath.Join(t.TempDir(), "missing"), 30*time.Millisecond, 5*time.Millisecond); err == nil {
 		t.Fatal("缺失文件应超时")
+	}
+}
+
+func TestJoinRejectsInvalidDeclarationBeforeWrite(t *testing.T) {
+	_, _, storager, _ := newFakeRepo(t)
+	t.Setenv("FAKE_DOCKER_RUN_EXIT", "3")
+	err := joinRun(joinOpts{
+		dir:        storager,
+		configFile: filepath.Join(storager, "kurrent.yaml"),
+		cpURL:      "https://192.168.1.10",
+		token:      "tok",
+		agentID:    "node-01",
+	})
+	if err == nil || !strings.Contains(err.Error(), "声明校验失败（未写入）") {
+		t.Fatalf("err = %v, want 写盘前校验失败", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(storager, "kurrent.yaml")); !os.IsNotExist(statErr) {
+		t.Error("校验失败却写入了 kurrent.yaml")
+	}
+	if _, statErr := os.Stat(filepath.Join(storager, "bootstrap", "agent.token")); !os.IsNotExist(statErr) {
+		t.Error("校验失败却写入了 bootstrap token")
 	}
 }

@@ -32,12 +32,17 @@ const STATE_OPTIONS = (t) => [
   { value: 'revoked', label: 'revoked' },
 ]
 
-// 注册窗口 TTL 选项（服务端硬上限 1-60 分钟，代码层不可配永久）
-const TTL_OPTIONS = (t) =>
-  [5, 15, 30, 60].map((v) => ({ value: String(v), label: t('devices.regWindow.ttlUnit', { n: v }) }))
+// 注册窗口 TTL 选项：上限来自声明 spec.registration.windowMaxTtlMinutes（随 GET 返回的 limits）
+const TTL_OPTIONS = (t, max) => {
+  const values = [5, 15, 30, 60].filter((v) => v <= max)
+  if (!values.includes(max)) values.push(max)
+  values.sort((a, b) => a - b)
+  return values.map((v) => ({ value: String(v), label: t('devices.regWindow.ttlUnit', { n: v }) }))
+}
 
-// 注册窗口放行额度服务端上限（与 control_plane config REGISTRATION_WINDOW_MAX_DEVICES_UPPER 对齐）
-const MAX_DEVICES_UPPER = 1000
+// 缺省上限（limits 未加载时的兜底，与 schema 默认值一致）
+const DEFAULT_MAX_DEVICES_UPPER = 1000
+const DEFAULT_MAX_TTL_MINUTES = 60
 
 // 解析配对清单：每行 mac, worker_id[, manufacturer, product, serial, uuid]（逗号/制表符分隔，# 注释行忽略）
 function parseManifestLines(text) {
@@ -103,6 +108,9 @@ export default function Devices() {
   const [countdown, setCountdown] = useState(0) // 本地逐秒递减的剩余秒数（以服务端 remaining_seconds 为基准）
   const [enforcement, setEnforcementState] = useState(null)
   const [enforcementBusy, setEnforcementBusy] = useState(false)
+  const windowLimits = regWindow?.limits || {}
+  const maxDevicesUpper = windowLimits.max_devices ?? DEFAULT_MAX_DEVICES_UPPER
+  const maxTtlMinutes = windowLimits.ttl_minutes_max ?? DEFAULT_MAX_TTL_MINUTES
 
   // ===== 页面介绍弹层 =====
   const [guideOpen, setGuideOpen] = useState(false)
@@ -237,8 +245,8 @@ export default function Devices() {
     setWindowBusy(true)
     setWindowError(null)
     const maxDevices = maxChoice === '' ? null : Number(maxChoice)
-    if (maxDevices !== null && (!Number.isInteger(maxDevices) || maxDevices < 1 || maxDevices > MAX_DEVICES_UPPER)) {
-      setWindowError(t('devices.regWindow.maxInvalid', { max: MAX_DEVICES_UPPER }))
+    if (maxDevices !== null && (!Number.isInteger(maxDevices) || maxDevices < 1 || maxDevices > maxDevicesUpper)) {
+      setWindowError(t('devices.regWindow.maxInvalid', { max: maxDevicesUpper }))
       setWindowBusy(false)
       return
     }
@@ -259,7 +267,7 @@ export default function Devices() {
     setWindowError(null)
     try {
       await closeRegistrationWindow()
-      setRegWindow({ open: false, opened_at: null, ttl_minutes: null, closes_at: null, remaining_seconds: 0, max_devices: null, admitted: 0, remaining_devices: null, quota_exhausted: false })
+      await fetchRegistrationWindow()  // 保留 limits（关闭后的表单按声明上限收敛）
       setCountdown(0)
     } catch (e) {
       setWindowError(e.message)
@@ -1046,13 +1054,15 @@ export default function Devices() {
                 name="reg-ttl"
                 value={ttlChoice}
                 onChange={(e) => setTtlChoice(e.target.value)}
-                options={TTL_OPTIONS(t)}
+                options={TTL_OPTIONS(t, maxTtlMinutes)}
                 style={{ minWidth: 110 }}
               />
               <Input
                 label=""
                 name="reg-max"
                 type="number"
+                min="1"
+                max={maxDevicesUpper}
                 value={maxChoice}
                 onChange={(e) => setMaxChoice(e.target.value.replace(/\D/g, '').slice(0, 4))}
                 placeholder={t('devices.regWindow.maxPlaceholder')}

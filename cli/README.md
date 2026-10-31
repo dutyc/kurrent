@@ -105,7 +105,15 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
   config print init-defaults|node-defaults   输出声明模板（重定向为
                                               control_plane/kurrent.yaml 或
                                               storager/kurrent.yaml 后编辑）
-  init [--config PATH] [--dir PATH]          控制面初始化：校验声明并收敛启动控制面
+  config validate [--node] [--config PATH] [--dir REPO]
+  config show     [--node] [--config PATH] [--dir REPO]
+                                              在组件镜像内按运行时 schema 全量校验 /
+                                              输出生效声明（默认值已注入）；--node 或
+                                              kind=NodeConfiguration 时校验节点声明
+  config status                              运行态声明、configHash、dnsmasq.conf 与
+                                              服务器证书漂移（经 443 管理面）
+  init [--config PATH] [--dir PATH]          控制面初始化：全量校验声明并收敛启动；
+                                              健康检查失败回滚上一份声明并非零退出
                                               （默认读 control_plane/kurrent.yaml；
                                               --config 指定其他声明文件则应用之）
   join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]
@@ -140,10 +148,21 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
 ./kurrent config print init-defaults > control_plane/kurrent.yaml
 $EDITOR control_plane/kurrent.yaml
 
-# 2) 一条命令到运行态：校验声明 → 启动/重启控制面 → 等待 /healthz → 重启 dnsmasq 加载新 conf
+# 2) 写盘前全量校验（组件镜像内与运行时同一 schema；未知字段/跨字段语义/策略上限）
+./kurrent config validate
+./kurrent config show        # 可选：查看注入默认值后的生效声明
+
+# 3) 一条命令到运行态：构建校验镜像 → 全量校验 → 应用声明 → 启动/重启 → 等待 /healthz
+#    → 重启 dnsmasq 并核验其保持运行
 ./kurrent init
 #    → 幂等可重跑：改声明后重跑即生效；--config 指向其他路径 = 应用该声明为控制面配置
+#    → 校验失败不写盘；启动失败自动回滚上一份声明并恢复运行，退出码非零
+
+# 4) 运行态核对：生效声明、configHash、dnsmasq.conf 与证书漂移
+./kurrent config status
 ```
+
+**更新声明**：编辑 `control_plane/kurrent.yaml` → `config validate` → `init`。`serverCert` 的 SAN/天数变化默认只报告漂移（`config status`），设 `rotateOnChange: true` 才重签（TOFU 指纹变化，已入池设备需重新信任）。
 
 ## 一键加入流程
 
@@ -167,7 +186,7 @@ $EDITOR control_plane/kurrent.yaml
 ./kurrent agents list
 ```
 
-预置声明（可选）：`kurrent config print node-defaults > storager/kurrent.yaml` 生成带注释模板后编辑（改 backend/diskDir/advertiseUrl 等），再执行 join——join 读入并更新，手工字段保留。
+预置声明（可选）：`kurrent config print node-defaults > storager/kurrent.yaml` 生成带注释模板后编辑（改 backend/diskDir/advertiseUrl 等），再执行 join——join 读入并更新，手工字段保留。模板 `metadata.name` 留空（join 写入身份）；单独校验用 `kurrent config validate --node`（仓库内执行，使用 storager-agent 镜像）。
 
 要点：
 

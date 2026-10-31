@@ -49,6 +49,21 @@ check_code 401 "伪造 X-Client-Cert-DN 被拒" \
     "$(code -H 'X-Client-Cert-DN: CN=admin,O=admin' "$BASE/api/cp/devices")"
 check_code 200 "admin 证书访问管理面" \
     "$(code --cert "$CERT" --key "$KEY" "$BASE/api/cp/devices")"
+check_code 401 "/config 拒绝伪造身份头" \
+    "$(code -H 'X-Client-Cert-DN: CN=admin,O=admin' "$BASE/api/cp/config")"
+CONFIG_JSON=$(curl -sk --max-time 5 --cert "$CERT" --key "$KEY" "$BASE/api/cp/config")
+if printf '%s' "$CONFIG_JSON" | grep -q '"configHash"'; then
+    pass "GET /config 返回生效声明与 configHash"
+else
+    fail "GET /config 未返回 configHash"
+fi
+WINDOW_JSON=$(curl -sk --max-time 5 --cert "$CERT" --key "$KEY" \
+    "$BASE/api/cp/settings/registration-window")
+if printf '%s' "$WINDOW_JSON" | grep -q '"limits"'; then
+    pass "注册窗口返回声明上限 limits"
+else
+    fail "注册窗口未返回 limits"
+fi
 check_code 404 "/devices/import 不对 443 暴露" "$(code -X POST -d '{}' "$BASE/devices/import")"
 check_code 404 "OpenAPI 默认关闭" "$(code "$BASE/api/cp/openapi.json")"
 check_code 401 "renew 强制客户端证书" "$(code -X POST "$BASE/api/cp/enroll/renew")"

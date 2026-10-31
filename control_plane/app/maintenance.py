@@ -2,8 +2,8 @@
 
 nginx 只在启动/reload 时读取 ssl_crl；CRL 的 nextUpdate 是 7 天，而吊销是低频事件。
 若控制面连续运行超过 7 天且没有吊销操作，nginx 手里会是一张过期 CRL，OpenSSL 的
-CRL 校验会拒绝全部客户端证书——管理面失联。这里按 CRL_REFRESH_HOURS（默认 12h）
-重签并 reload，保证长跑安全边界。
+CRL 校验会拒绝全部客户端证书——管理面失联。这里按 spec.pki.crlRefreshHours
+（默认 12h，schema 约束小于 7 天）重签并 reload，保证长跑安全边界。
 
 间隔可用 KURRENT_CP_CRL_REFRESH_INTERVAL（秒）覆盖；<=0 关闭（测试环境）。
 """
@@ -13,7 +13,7 @@ import os
 import threading
 
 from . import audit, pki
-from .config import CRL_REFRESH_HOURS, settings
+from .config import settings
 from .nginx_reload import reload_nginx
 
 log = logging.getLogger("control-plane")
@@ -22,11 +22,11 @@ log = logging.getLogger("control-plane")
 def refresh_interval_seconds() -> int:
     raw = os.getenv("KURRENT_CP_CRL_REFRESH_INTERVAL")
     if raw is None:
-        return CRL_REFRESH_HOURS * 3600
+        return int(settings.crl_refresh_hours) * 3600
     try:
         return int(raw)
     except ValueError:
-        return CRL_REFRESH_HOURS * 3600
+        return int(settings.crl_refresh_hours) * 3600
 
 
 def refresh_crl_once(*, reload: bool = True) -> dict:

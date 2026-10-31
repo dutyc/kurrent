@@ -19,16 +19,36 @@ spec:
   # 组件 PKI 策略（三分根 CA users/nodes/control + 绑 agent_id 的 bootstrap token 引导 + 证书轮换）
   pki:
     bootstrapTokenTtlMinutes: 60
+    bootstrapTokenMaxTtlMinutes: 1440
+    bootstrapTokenMaxUses: 100
     componentCertDays: 90
     renewThreshold: 0.2
+    crlRefreshHours: 12
   # TOFU 引导链服务器证书（自签，启动时幂等生成；nginx 只读挂载 state/certs）
   serverCert:
     san: "IP:127.0.0.1,DNS:localhost"
     days: 3650
+    # 声明变化时是否重签（默认 false：仅报告漂移；重签会改变 TOFU 指纹）
+    rotateOnChange: false
   # iPXE 引导行为
   boot:
     defaultArch: x86_64
     menuTimeoutMs: 5000
     autoBootTimeoutMs: 1
+  # 管理面策略：会话 TTL、证书有效期、自动化 token TTL 上限
+  auth:
+    sessionTtlHours: 12
+    adminCertDays: 365
+    userCertDaysMax: 3650
+    tokenTtlHours: 24
+    tokenMaxTtlHours: 720
+  # 设备注册窗口上限（窗口只在部署期短开，不可配置为永久）
+  registration:
+    windowMaxTtlMinutes: 60
+    windowMaxDevices: 1000
+  # DHHC-1 定期轮换与推送对账（0 = 关闭对应后台任务）
+  credentials:
+    rotationDays: 90
+    reconcileIntervalSeconds: 60
   # 调用存储 Agent 超时（秒）
   agentTimeoutSec: 10

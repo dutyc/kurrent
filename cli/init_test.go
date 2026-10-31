@@ -217,3 +217,97 @@ func TestPrintNodeDefaults(t *testing.T) {
 		}
 	}
 }
+
+// ── 声明生命周期：全量校验先于写盘、健康失败回滚、dnsmasq 起服核验 ──
+
+func TestInitFullSchemaValidationFailureDoesNotApply(t *testing.T) {
+	repo, cp, _, logFile := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	external := filepath.Join(repo, "cluster.yaml")
+	newBody := strings.Replace(cpYAML, "192.168.80.50,192.168.80.100", "192.168.80.60,192.168.80.90", 1)
+	if err := os.WriteFile(external, []byte(newBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_DOCKER_RUN_EXIT", "3")
+	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "声明校验失败") ||
+		!strings.Contains(err.Error(), "unknownField") {
+		t.Fatalf("err = %v, want 全量校验失败（含字段错误）", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
+	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
+		t.Error("校验失败却改写了 control_plane/kurrent.yaml")
+	}
+	log := readLog(t, logFile)
+	if strings.Contains(log, "compose up -d") || strings.Contains(log, "compose restart") {
+		t.Errorf("校验失败后仍启动了控制面:\n%s", log)
+	}
+}
+
+func TestInitRollsBackOnHealthFailure(t *testing.T) {
+	repo, cp, _, logFile := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	external := filepath.Join(repo, "cluster.yaml")
+	newBody := strings.Replace(cpYAML, "192.168.80.50,192.168.80.100", "192.168.80.60,192.168.80.90", 1)
+	if err := os.WriteFile(external, []byte(newBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_DOCKER_HEALTH", "unhealthy")
+	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "回滚到上一份声明") {
+		t.Fatalf("err = %v, want 回滚提示", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
+	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
+		t.Error("健康检查失败后未恢复上一份声明")
+	}
+	log := readLog(t, logFile)
+	if n := strings.Count(log, "compose restart kurrent-control-plane"); n < 2 {
+		t.Errorf("期望应用重启 + 回滚重启两次控制面，实际 %d:\n%s", n, log)
+	}
+	if !strings.Contains(log, "compose restart kurrent-dnsmasq") {
+		t.Errorf("回滚后应重启 dnsmasq 加载旧 conf:\n%s", log)
+	}
+}
+
+func TestInitFailsWhenDnsmasqDoesNotStayRunning(t *testing.T) {
+	repo, cp, _, _ := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	external := filepath.Join(repo, "cluster.yaml")
+	newBody := strings.Replace(cpYAML, "192.168.80.50,192.168.80.100", "192.168.80.60,192.168.80.90", 1)
+	if err := os.WriteFile(external, []byte(newBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_DOCKER_RUNNING", "false")
+	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "dnsmasq 未能保持运行") {
+		t.Fatalf("err = %v, want dnsmasq 起服失败", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
+	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
+		t.Error("dnsmasq 起服失败后未恢复上一份声明")
+	}
+}
+
+func TestInitBuildFailureBeforeApply(t *testing.T) {
+	repo, cp, _, _ := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	external := filepath.Join(repo, "cluster.yaml")
+	if err := os.WriteFile(external, []byte(cpYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_DOCKER_FAIL", "build")
+	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "构建控制面镜像失败") {
+		t.Fatalf("err = %v, want 构建失败", err)
+	}
+}
+
+func readLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}

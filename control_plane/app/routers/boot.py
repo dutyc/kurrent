@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
-from .. import audit, ratelimit
+from .. import audit, ratelimit, runtime_status
 from ..principal import PrincipalRouter, principal
 
 from ..config import settings
@@ -39,6 +39,9 @@ router = PrincipalRouter()
 @router.get("/healthz")
 @principal("anonymous")
 def healthz():
+    """进程存活 + 声明派生自检：启动期派生失败返回 503（详情只在已认证 GET /config）。"""
+    if runtime_status.errors():
+        return JSONResponse(status_code=503, content={"status": "degraded"})
     return {"status": "ok"}
 
 

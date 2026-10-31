@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from control_plane.app import auth as auth_mod
+from control_plane.app import config as cp_config
 from control_plane.app import pki, sessions
 from control_plane.app.config import settings
 
@@ -98,7 +99,7 @@ class TestSessionRegistry:
         assert client.get("/whoami", headers=token_session).status_code == 200
 
     def test_legacy_cookie_ignored(self, client, secure, monkeypatch):
-        monkeypatch.setattr(auth_mod, "SESSION_TTL_SECONDS", 3600)
+        monkeypatch.setattr(cp_config.CONFIG.spec.auth, "session_ttl_hours", 1)
         jti, exp, epoch = sessions.create("token:x", ["admin"], ttl_seconds=3600)
         client.cookies.set("kurrent_session", auth_mod.sign_session(jti, exp, epoch))
         assert client.get("/whoami").status_code == 401
