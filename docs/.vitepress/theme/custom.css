@@ -71,3 +71,13 @@
   font-family: var(--k-serif);
   letter-spacing: 0.04em;
 }
+
+/* 统一侧边栏：当前页用字重与左侧竖线定位 */
+.VPSidebarItem.level-1.is-active > .item > .link > .text {
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.VPSidebarItem.level-1.is-active > .item > .indicator {
+  background-color: var(--vp-c-text-1);
+}

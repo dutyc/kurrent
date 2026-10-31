@@ -8,7 +8,10 @@ const props = defineProps({
 
 const { site } = useData()
 // 自定义首页的链接须自行拼 base 与 .html（Pages 构建关闭 cleanUrls）
-const docHref = (path) => `${site.value.base}${path}${__KURRENT_DOCS_CLEAN__ ? '' : '.html'}`
+const docHref = (path) => {
+  const suffix = __KURRENT_DOCS_CLEAN__ ? '' : (path.endsWith('/') ? 'index.html' : '.html')
+  return `${site.value.base}${path}${suffix}`
+}
 const homeHref = computed(() => (props.lang === 'en' ? `${site.value.base}en/` : site.value.base))
 const linkHref = (href) => (href.startsWith('http') ? href : docHref(href.replace(/^\//, '')))
 const langHref = computed(() => (props.lang === 'en' ? site.value.base : `${site.value.base}en/`))
@@ -16,13 +19,13 @@ const langLabel = props.lang === 'en' ? '中文' : 'English'
 const langHreflang = props.lang === 'en' ? 'zh-CN' : 'en'
 
 const zh = {
-  nav: { proposition: '命题', unit: '单元', state: '状态', docs: '文档', github: 'GitHub ↗' },
+  nav: { docs: '文档', github: 'GitHub ↗' },
   meta: 'Stateless compute · System as the unit',
   quote: '周流六虚，上下无常<br>刚柔相易，唯变所适<br><span>——《周易·系辞下》</span>',
   eyebrow: '云原生 · 无状态 · 裸金属',
   h1: ['计算不该', '被硬件占有。'],
   lede: 'Kurrent 把身份、系统与状态从机器上剥离。<strong>节点保持空，系统成为调度的唯一单元。</strong>机器只是系统此刻所在的位置。',
-  cta: ['部署指南', '它如何成立'],
+  cta: ['项目概述', '它如何成立'],
   propCap: '命题 / PROPOSITION',
   prop: [
     ['节点', '只提供位置，<b>不持有身份与状态</b>。'],
@@ -75,11 +78,12 @@ const zh = {
   s4: {
     side: '文档',
     items: [
-      ['01', '部署指南', '控制面与存储节点，从声明到收敛。', '/guide/deployment'],
-      ['02', '使用流程', '入池、绑定、建盘、默认系统与凭据。', '/guide/usage'],
-      ['03', '架构', '控制面、数据面与交付链的边界。', 'https://github.com/dutyc/kurrent/blob/main/about/zh/ARCHITECTURE.md'],
-      ['04', 'API 参考', '控制面接口与引导变量的权威定义。', 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.zh-CN.md'],
-      ['05', 'CLI 参考', '命令行接口、凭据与日常操作。', 'https://github.com/dutyc/kurrent/blob/main/cli/README.md'],
+      ['01', '项目概述', '从命题、对象模型到一次完整交付。', '/guide/overview'],
+      ['02', '快速开始', '控制面、存储节点与第一个可启动系统。', '/guide/quickstart'],
+      ['03', '核心概念', '设备、Worker、系统盘、引导链与凭据。', '/concepts/entities'],
+      ['04', '架构', '控制面、数据面、固件与信任边界。', '/architecture/'],
+      ['05', '固件', '构建产物、设备预置与固件契约。', '/firmware/'],
+      ['06', '参考', '配置键表、CLI、API 与固件契约。', '/reference/configuration'],
     ],
   },
   footer: {
@@ -90,13 +94,13 @@ const zh = {
 }
 
 const en = {
-  nav: { proposition: 'Proposition', unit: 'Unit', state: 'State', docs: 'Docs', github: 'GitHub ↗' },
+  nav: { docs: 'Docs', github: 'GitHub ↗' },
   meta: 'Stateless compute · System as the unit',
   quote: 'The six lines flow, above and below without constancy; the firm and the yielding interchange — it adapts to whatever change may come. — the I Ching · Great Commentary',
   eyebrow: 'Cloud-native · Stateless · Bare metal',
   h1: ['Compute should not', 'be owned by hardware.'],
   lede: 'Kurrent strips identity, system and state away from the machine. <strong>The node stays empty; the system becomes the only unit of scheduling.</strong> The machine is merely where the system happens to be.',
-  cta: ['Deployment Guide', 'How it holds'],
+  cta: ['Project Overview', 'How it holds'],
   propCap: 'Proposition',
   prop: [
     ['Node', 'Provides location only; <b>holds no identity or state</b>.'],
@@ -149,11 +153,12 @@ const en = {
   s4: {
     side: 'Docs',
     items: [
-      ['01', 'Deployment Guide', 'Controller and storage node, from declaration to convergence.', '/en/guide/deployment'],
-      ['02', 'Usage Guide', 'Enrollment, binding, disks, default system and credentials.', '/en/guide/usage'],
-      ['03', 'Architecture', 'The boundaries of control plane, data plane and delivery chain.', 'https://github.com/dutyc/kurrent/blob/main/about/en/ARCHITECTURE.md'],
-      ['04', 'API Reference', 'Authoritative definitions of control-plane APIs and boot variables.', 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.en.md'],
-      ['05', 'CLI Reference', 'Command surface, credentials and day-to-day operations.', 'https://github.com/dutyc/kurrent/blob/main/cli/README.md'],
+      ['01', 'Project Overview', 'From the proposition and object model to one delivery.', '/en/guide/overview'],
+      ['02', 'Quick Start', 'Controller, storage node and the first bootable system.', '/en/guide/quickstart'],
+      ['03', 'Concepts', 'Devices, Workers, disks, boot chain and credentials.', '/en/concepts/entities'],
+      ['04', 'Architecture', 'Control plane, data plane, firmware and trust boundaries.', '/en/architecture/'],
+      ['05', 'Firmware', 'Build artifacts, device provisioning and the firmware contract.', '/en/firmware/'],
+      ['06', 'Reference', 'Configuration keys, CLI, API and the firmware contract.', '/en/reference/configuration'],
     ],
   },
   footer: {
@@ -183,10 +188,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
         </a>
         <div class="mast-meta">{{ c.meta }}</div>
         <nav class="mast-nav">
-          <a href="#proposition">{{ c.nav.proposition }}</a>
-          <a href="#unit">{{ c.nav.unit }}</a>
-          <a href="#state">{{ c.nav.state }}</a>
-          <a href="#docs">{{ c.nav.docs }}</a>
+          <a :href="docHref(lang === 'en' ? 'en/guide/overview' : 'guide/overview')">{{ c.nav.docs }}</a>
           <a href="https://github.com/dutyc/kurrent" target="_blank" rel="noopener">{{ c.nav.github }}</a>
           <a class="lang" :href="langHref" :hreflang="langHreflang">{{ langLabel }}</a>
         </nav>
@@ -202,7 +204,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <h1>{{ c.h1[0] }}<br>{{ c.h1[1] }}</h1>
           <p class="lede" v-html="c.lede"></p>
           <div class="links">
-            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/deployment' : 'guide/deployment')">{{ c.cta[0] }} <span>→</span></a>
+            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/overview' : 'guide/overview')">{{ c.cta[0] }} <span>→</span></a>
             <a class="link" href="#unit">{{ c.cta[1] }} <span>↓</span></a>
           </div>
         </div>

@@ -8,7 +8,7 @@
 
 设备**只有在注册窗口开启且带有效公钥时**才会自动入池：
 
-1. WebUI → **Devices** → 开启注册窗口（TTL 1–60 分钟，可选放行额度 `max_devices`）。
+1. WebUI → **Devices** → 开启注册窗口（TTL 按声明 `spec.registration.windowMaxTtlMinutes` 收敛，默认 60 分钟；可选放行额度 `max_devices`）。
 2. 设备出现在池中（`pooled`）；已入池的存量设备在窗口期内带公钥上报即完成密钥认领。
 3. 全部设备认领后，可开启**验签强制**：此后的 `/boot-vars` 只接受通过挑战-应答验签的已绑定设备。
 
@@ -23,7 +23,7 @@
 
 绑定权威是设备台账的 `bound_worker_id`。dnsmasq 的主机名只是绑定操作的派生投影，更新可能滞后，**不参与引导身份判定**。
 
-解绑后设备回池，Worker 的系统盘保留。
+解绑后设备回池，Worker 的系统盘保留。三实体的完整语义与换绑规则见[设备、Worker 与系统盘](../concepts/entities.md)。
 
 ## 3. 创建系统盘
 
@@ -42,9 +42,13 @@
 Worker 详情 → 系统盘 → **设为默认**。默认盘决定：
 
 - iPXE 菜单超时后自动选中哪一项；
-- `/boot-vars` 投影哪块盘的连接信息（完整 `disk_nqn`、`storager_ip`、TLS PSK 与端口）。
+- `/boot-vars` 投影哪块盘的连接信息（完整 `disk-nqn`、`storager-ip`、TLS PSK 与端口）。
 
-未设置默认盘时，控制面返回 `menu-default=reboot`（1 ms 超时循环重启），避免静默进入错误的系统。同一 Worker 可挂多块系统盘，菜单里可手动选择其他盘。
+未设置默认盘时，控制面返回 `menu-default=reboot`（1 ms 超时循环重启），避免静默进入错误的系统。同一 Worker 可挂多块系统盘；要切换系统盘，在 Worker 详情中把另一块盘设为默认盘，下一次启动生效。
+
+Worker 只有一块系统盘时，创建后自动设为默认盘；删除默认盘后，若仍有剩余系统盘，控制面自动提升其中一块为默认盘。
+
+系统盘、母盘与数据面的完整语义见[存储与数据面](../concepts/storage.md)。
 
 ## 5. 开机链
 
@@ -54,9 +58,9 @@ DHCP → TFTP（snponly.efi + boot.ipxe 指针）→ iPXE
   → /devices/report            设备信息与公钥上报
   → /devices/challenge         一次性 nonce
   → sign(nonce‖mac)            设备私钥签名
-  → /boot-vars                 验签通过后下发 disk_nqn / storager_ip / hostnqn / TLS PSK 与端口
+  → /boot-vars                 验签通过后下发 disk-nqn / storager-ip / hostnqn / TLS PSK 与端口
   → menu.ipxe                  超时选择默认盘
-  → sanboot nvme://<storager>:4421/<disk_nqn>   TLS 1.3 + DH-HMAC-CHAP
+  → sanboot nvme://<storager>:4421/<disk-nqn>   TLS 1.3 + DH-HMAC-CHAP
   → GRUB → 操作系统
 ```
 
@@ -76,13 +80,15 @@ kurrent workers credential revoke worker-01     # 吊销：下次启动拒绝引
 
 TLS PSK 由认证密钥派生，因此轮换/吊销认证密钥即原子地轮换/吊销 PSK。推送失败由控制面周期对账自动重试，状态在 Worker 详情「NVMe-oF 凭据」页可见。
 
+凭据的签发、轮换与吊销语义见[存储与数据面](../concepts/storage.md)与[身份与访问](../concepts/identity.md)。
+
 密钥明文只出现在链路必要范围（控制面与 Agent 的 0600 状态文件、存储节点 configfs 与内核 `.nvme` keyring），不引入应用层加密；磁盘与宿主访问边界由部署方负责。
 
 ## 7. 日常操作
 
 | 操作 | 位置 | 语义 |
 | --- | --- | --- |
-| 删除系统盘 | Worker 详情 → 系统盘 | 可保留或删除盘文件；若是默认盘，`default_disk` 自动清除 |
+| 删除系统盘 | Worker 详情 → 系统盘 | 可保留或删除盘文件；若删除的是默认盘，自动提升剩余盘，无剩余盘时清除默认项 |
 | 删除 Worker | Workers 页 | 解绑设备、清除该 Worker 的凭据条目与推送台账；盘文件按选项处理 |
 | 节点排空 | Agents 页 → 停用 | `enabled=false`：不再接收新盘，存量盘照常服务 |
 | 审计 | `kurrent ops list` | 设备注册/认领、绑定、建盘、凭据签发/推送/吊销等操作记录 |

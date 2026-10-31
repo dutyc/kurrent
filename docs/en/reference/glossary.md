@@ -1,0 +1,55 @@
+# Glossary
+
+| Term | Meaning |
+| --- | --- |
+| Device | A bare-metal machine's identity record in the control plane, keyed by MAC. The authority for bindings is `bound_worker_id` in the device ledger. |
+| Worker | The object that owns a compute identity and system disks. The same Worker can run on different devices over time. |
+| System disk | A bootable disk image cloned from a master, owned by a Worker, and distinguished by `os_tag`. |
+| Master | A cloneable template stored under a storage node's `diskDir` with `_tpl_` in the filename. Must use 4K-native GPT. |
+| `os_tag` | The 12-hex identifier of a system disk, distinguishing multiple systems under one Worker. |
+| Default disk | The system disk a Worker boots automatically. A Worker's only disk becomes the default automatically. |
+| Pooled | A registered device not yet bound to a Worker. |
+| Bound | A device bound to a Worker and able to enter that Worker's boot chain. |
+| Revoked | A device that is no longer updated, admitted, or re-registrable. |
+| Binding | The one-to-one authorization from a device to a Worker. Binding is authentication; rebinding is cold migration. |
+| Readiness | Whether a Worker can boot: a bound device, a system disk, and a usable data plane. |
+| Cold migration | Power off device A, switch the binding to B, and boot the same Worker's system disk on B. |
+| Drain | Setting a node's `enabled` to false: no new disks, existing disks keep serving. |
+| Registration window | A time window in which unknown devices may register into the pool, bounded by TTL and device quota. |
+| Enrollment | A component exchanging a bootstrap token for a client certificate and registering with the control plane. |
+| Bootstrap token | A single-use bootstrap credential bound to a node identity, used for node enrollment. |
+| Management token | A management-plane Bearer token for scripts and WebUI sign-in; only a digest is stored. |
+| Session | A server-registered login state; deleting the ledger entry invalidates it. |
+| Principal class | `human` / `component` / `automation` / `anonymous`; routes authorize by class and deny by default. |
+| CA | Certificate authority. The control plane maintains users, nodes, and control roots for people, node components, and control-plane clients. |
+| CRL | Certificate revocation list; component faces fetch it periodically and reject revoked serials. |
+| TOFU | Trust On First Use: pin the server leaf fingerprint on the first HTTPS handshake and reject mismatches afterwards. |
+| NQN | NVMe Qualified Name, the identifier for NVMe-oF subsystems and hosts. |
+| Host NQN | The host-side NQN derived from a node's `nqnBase` and the Worker, used for target-side host authorization. |
+| IQN | iSCSI Qualified Name, used by the iSCSI backend. |
+| `nqnBase` | The node-declared NQN namespace from which Host NQNs and disk NQNs are derived. |
+| DHHC-1 | The text format of a DH-HMAC-CHAP key: `DHHC-1:01:<base64(key+CRC32)>`. |
+| TLS PSK | The NVMe/TCP TLS pre-shared key derived from the DHHC-1 key, with the same lifecycle. |
+| NVMe/TCP | NVMe over TCP, the current primary data-plane transport. |
+| Data plane | Block-device transport between devices and storage nodes, bypassing the control plane. |
+| SAN boot | Booting directly from a network storage disk; implemented here with iPXE `sanboot`. |
+| iPXE | The open-source network boot firmware used by this project. |
+| PXE | Preboot Execution Environment; devices obtain the first-hop firmware over DHCP + TFTP. |
+| TFTP | The first-hop file transfer protocol; currently serves only `snponly.efi` and the `boot.ipxe` pointer. |
+| `snponly` | An iPXE artifact using only the UEFI SNP stack, for NICs without a native driver. |
+| NBFT | NVMe Boot Firmware Table, the discovery table describing network boot targets. |
+| NBCT | NVMe Boot Credentials Table, the session credential table handed from firmware to initramfs. |
+| initramfs | The temporary root filesystem used early in boot, reconnecting the data plane via NBFT/NBCT. |
+| `keep-san` | An iPXE option that keeps the SAN connection alive for later boot stages. |
+| Reflink | Copy-on-write cloning; fast master-to-system-disk copies depend on filesystem support. |
+| `configHash` | The canonical SHA-256 of the effective declaration, confirming which configuration is loaded at runtime. |
+| Drift | A mismatch between the declaration and derived files or certificates; reported by `config status`. |
+| Registration quota | The maximum number of devices admitted in one registration window. |
+
+## Related pages
+
+- [Devices, Workers, and System Disks](../concepts/entities.md)
+- [Boot Chain](../concepts/boot-chain.md)
+- [Storage and Data Plane](../concepts/storage.md)
+- [Identity and Access](../concepts/identity.md)
+- [Firmware Contract](./firmware-contract.md)

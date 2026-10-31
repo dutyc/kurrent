@@ -7,6 +7,116 @@ import { defineConfig } from 'vitepress'
 // 站点 base（head 数组中的链接不自动加 base 前缀，须与 favicon 等拼接同源）
 const base = process.env.VITEPRESS_BASE || '/'
 
+const zhSidebar = [
+  {
+    text: '开始',
+    items: [
+      { text: '项目概述', link: '/guide/overview' },
+      { text: '快速开始', link: '/guide/quickstart' },
+      { text: '部署指南', link: '/guide/deployment' },
+      { text: '使用流程', link: '/guide/usage' },
+      { text: '日常运维', link: '/guide/operations' },
+    ],
+  },
+  {
+    text: '核心概念',
+    items: [
+      { text: '设备、Worker 与系统盘', link: '/concepts/entities' },
+      { text: '引导链', link: '/concepts/boot-chain' },
+      { text: '存储与数据面', link: '/concepts/storage' },
+      { text: '身份与访问', link: '/concepts/identity' },
+      { text: '声明式配置', link: '/concepts/configuration' },
+    ],
+  },
+  {
+    text: '架构',
+    items: [
+      { text: '架构总览', link: '/architecture/' },
+      { text: '安全模型', link: '/architecture/security' },
+    ],
+  },
+  {
+    text: '固件',
+    items: [
+      { text: '固件概述', link: '/firmware/' },
+      { text: '构建与产物', link: '/firmware/build' },
+      { text: '预置与刷写', link: '/firmware/provision' },
+    ],
+  },
+  {
+    text: '参考',
+    items: [
+      { text: '配置参考', link: '/reference/configuration' },
+      { text: 'CLI 参考', link: '/reference/cli' },
+      { text: 'API 参考', link: '/reference/api' },
+      { text: '固件契约', link: '/reference/firmware-contract' },
+      { text: '术语表', link: '/reference/glossary' },
+    ],
+  },
+  {
+    text: '项目',
+    items: [
+      { text: '路线图', link: '/about/roadmap' },
+      { text: '参与贡献', link: '/about/contributing' },
+    ],
+  },
+]
+
+const enSidebar = [
+  {
+    text: 'Getting Started',
+    items: [
+      { text: 'Overview', link: '/en/guide/overview' },
+      { text: 'Quick Start', link: '/en/guide/quickstart' },
+      { text: 'Deployment', link: '/en/guide/deployment' },
+      { text: 'Usage', link: '/en/guide/usage' },
+      { text: 'Operations', link: '/en/guide/operations' },
+    ],
+  },
+  {
+    text: 'Concepts',
+    items: [
+      { text: 'Devices, Workers and Disks', link: '/en/concepts/entities' },
+      { text: 'Boot Chain', link: '/en/concepts/boot-chain' },
+      { text: 'Storage and Data Plane', link: '/en/concepts/storage' },
+      { text: 'Identity and Access', link: '/en/concepts/identity' },
+      { text: 'Declarative Configuration', link: '/en/concepts/configuration' },
+    ],
+  },
+  {
+    text: 'Architecture',
+    items: [
+      { text: 'Overview', link: '/en/architecture/' },
+      { text: 'Security Model', link: '/en/architecture/security' },
+    ],
+  },
+  {
+    text: 'Firmware',
+    items: [
+      { text: 'Overview', link: '/en/firmware/' },
+      { text: 'Build and Artifacts', link: '/en/firmware/build' },
+      { text: 'Provisioning', link: '/en/firmware/provision' },
+    ],
+  },
+  {
+    text: 'Reference',
+    items: [
+      { text: 'Configuration', link: '/en/reference/configuration' },
+      { text: 'CLI', link: '/en/reference/cli' },
+      { text: 'API', link: '/en/reference/api' },
+      { text: 'Firmware Contract', link: '/en/reference/firmware-contract' },
+      { text: 'Glossary', link: '/en/reference/glossary' },
+    ],
+  },
+  {
+    text: 'Project',
+    items: [
+      { text: 'Roadmap', link: '/en/about/roadmap' },
+      { text: 'Contributing', link: '/en/about/contributing' },
+    ],
+  },
+]
+
 export default defineConfig({
   lang: 'zh-CN',
   title: 'Kurrent（周流）',
@@ -32,22 +142,9 @@ export default defineConfig({
         logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: '首页', link: '/' },
-          { text: '指南', link: '/guide/deployment' },
-          { text: '架构', link: 'https://github.com/dutyc/kurrent/blob/main/about/zh/ARCHITECTURE.md' },
-          { text: 'API', link: 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.zh-CN.md' },
-          { text: 'CLI', link: 'https://github.com/dutyc/kurrent/blob/main/cli/README.md' },
+          { text: '项目概述', link: '/guide/overview' },
         ],
-        sidebar: {
-          '/guide/': [
-            {
-              text: '部署与使用',
-              items: [
-                { text: '部署指南', link: '/guide/deployment' },
-                { text: '使用流程', link: '/guide/usage' },
-              ],
-            },
-          ],
-        },
+        sidebar: zhSidebar,
         outline: { label: '本页目录' },
         docFooter: { prev: '上一篇', next: '下一篇' },
         darkModeSwitchLabel: '主题',
@@ -70,22 +167,9 @@ export default defineConfig({
         logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: 'Home', link: '/en/' },
-          { text: 'Guide', link: '/en/guide/deployment' },
-          { text: 'Architecture', link: 'https://github.com/dutyc/kurrent/blob/main/about/en/ARCHITECTURE.md' },
-          { text: 'API', link: 'https://github.com/dutyc/kurrent/blob/main/api/control-plane-api.en.md' },
-          { text: 'CLI', link: 'https://github.com/dutyc/kurrent/blob/main/cli/README.md' },
+          { text: 'Overview', link: '/en/guide/overview' },
         ],
-        sidebar: {
-          '/en/guide/': [
-            {
-              text: 'Deployment & Usage',
-              items: [
-                { text: 'Deployment Guide', link: '/en/guide/deployment' },
-                { text: 'Usage Guide', link: '/en/guide/usage' },
-              ],
-            },
-          ],
-        },
+        sidebar: enSidebar,
         outline: { label: 'On this page' },
         docFooter: { prev: 'Previous', next: 'Next' },
         darkModeSwitchLabel: 'Theme',
