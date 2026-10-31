@@ -142,6 +142,39 @@ def test_reconcile_repushes_when_key_missing(client, auth_headers, mock_agent_cl
     assert pushes[0][1] > 0
 
 
+def test_reconcile_key_check_uses_agent_config(client, auth_headers, mock_agent_client,
+                                               monkeypatch):
+    """keyring 在位回查必须用 AgentConfig 建客户端。
+
+    AgentRegistry.client 接收 AgentConfig 并读其 base_url；传 agent_id 字符串会抛
+    AttributeError，被 except 吞掉后一律按“不在位”处理，退化为每分钟重推。
+    """
+    _setup_agent_and_disk(client, auth_headers)
+    res = client.put("/workers/worker-01/credential",
+                     json={"secret": make_secret()}, headers=auth_headers)
+    assert res.json()["push"]["result"] == "ok"
+
+    from control_plane.app.stores import agents
+
+    seen = []
+
+    def factory(agent):
+        seen.append(agent)
+        assert getattr(agent, "base_url", ""), "client() must receive AgentConfig"
+        return mock_agent_client
+
+    monkeypatch.setattr(agents, "client", factory)
+    pushes = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        pushes.append(1) or _ok_push(w, s, subs, hosts, tls_psk))
+
+    summary = reconcile_credentials_once()
+    assert summary == {"targets": 1, "pushed": 0, "skipped": 1, "failed": 0}
+    assert not pushes
+    assert seen and seen[0].id == "ag-01"
+
+
 def test_generation_advances_and_stale_result_ignored(client, auth_headers, mock_agent_client):
     """每次推送推进 generation；旧 generation 的结果不能覆盖新台账。"""
     _setup_agent_and_disk(client, auth_headers)

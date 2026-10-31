@@ -1386,7 +1386,7 @@ def reconcile_credentials_once() -> dict[str, int]:
                 continue
             try:
                 host_nqns = [_host_nqn_for(_base_nqn_from_target(sub_nqns[0]), worker_id)]
-                status = agents.client(agent_id).credential_status(
+                status = agents.client(agents.get(agent_id)).credential_status(
                     worker_id, sub_nqns, host_nqns)
                 keys = status.get("keys") or []
                 in_place = (

@@ -53,6 +53,7 @@
 - **PSK 轮换后旧密钥遮蔽新密钥（F-02）的检测与部署闭环**：ktls-utils 1.5.0 起 tlshd 优先查进程 keyring、再回落会话 keyring，更早版本会让会话中的旧 PSK 遮蔽 `.nvme` 中的新 PSK，而推送侧只看 HTTP 200 无法发现。现以逐对应用结果判定推送、对账回查 keyring 在位并清理旧 PSK，同时把 tlshd ≥ 1.5.0 作为 nvmet 宿主硬前置
 - **nvmet-host 拒绝 512 字节扇区 GPT 的 backing**：建子系统时校验盘文件 GPT 布局，512 布局返回 400 并给出 4K 重建指引；此前只有控制面的母盘校验，手工/绕过路径仍可能建出不可引导的盘（演练中 iPXE 报 `EFIBLK cannot locate file systems` / `0x7f22208e`）。Agent 将宿主的 400 透传为 400，不再误报 503
 - **MAC 换绑依赖 dnsmasq 主机名绑定（全新 Worker 无法换绑）**：`PUT /workers/{worker_id}/mac` 此前从 `dnsmasq/dhcp-hosts.conf` 反查旧 MAC，再以"该 hostname 有绑定"为前提替换；没有绑定的新 Worker 直接 `409 no dnsmasq binding`，投影丢失时也无法识别旧设备。现绑定关系以设备台账 `state/devices.yml` 为权威：旧设备按 `bound_worker_id` 反查，dnsmasq 改为幂等 upsert 投影（缺失补写、已有替换、清除该 MAC 的封禁行），投影写入失败回滚设备台账；`GET /workers` 与 Worker 详情的 `mac` 字段同样改从设备台账反查
+- **凭据对账的 keyring 在位回查用错客户端参数**：`reconcile_credentials_once()` 把 `agent_id` 字符串直接传给需要 AgentConfig 的 `AgentRegistry.client`，真实客户端在读取 `base_url` 时抛 `AttributeError`，被兜底分支当作“key 不在位”——台账已 ok 的 Worker 仍每分钟重推一次 PSK。现先 `agents.get(agent_id)` 取 AgentConfig 再建客户端；在位时正常跳过，缺失时仍重推
 
 ---
 
