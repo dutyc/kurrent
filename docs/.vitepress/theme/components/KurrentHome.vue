@@ -69,7 +69,7 @@ const zh = {
     h2: '已验证发行版。',
     sub: '下列发行版已完成整机冷启动验证；验证范围不构成发行版限制。',
     items: [
-      ['/ 整机启动', 'Debian 12/13<br>Ubuntu 24.04/26.04<br>Fedora 44', '冷启动至系统登录'],
+      ['/ 整机启动', '7 个发行版', 'Debian 12/13 · Ubuntu 24.04/26.04<br>Fedora 44 · AlmaLinux 10.2 · openSUSE Leap 16.0<br>冷启动至系统登录'],
       ['/ 数据面', '4421', 'NVMe/TCP · TLS 1.3<br>固件段与内核段共用'],
       ['/ 认证', 'DHHC-1', '建盘即签发<br>轮换 / 吊销即时生效'],
       ['/ 明文', '无', '缺密钥或端口未就绪<br>拒绝引导'],
@@ -78,12 +78,11 @@ const zh = {
   s4: {
     side: '文档',
     items: [
-      ['01', '项目概述', '从命题、对象模型到一次完整交付。', '/guide/overview'],
-      ['02', '快速开始', '控制面、存储节点与第一个可启动系统。', '/guide/quickstart'],
-      ['03', '核心概念', '设备、Worker、系统盘、引导链与凭据。', '/concepts/entities'],
-      ['04', '架构', '控制面、数据面、固件与信任边界。', '/architecture/'],
-      ['05', '固件', '构建产物、设备预置与固件契约。', '/firmware/'],
-      ['06', '参考', '配置键表、CLI、API 与固件契约。', '/reference/configuration'],
+      ['01', '入门', '项目定位、标准部署流程与第一次端到端交付。', '/guide/overview'],
+      ['02', '概念', '架构、实体、引导链、固件、存储、身份与配置。', '/architecture/'],
+      ['03', '任务', '系统盘定制、固件构建与部署、日常运维与故障排查。', '/guide/system-disk'],
+      ['04', '参考', '配置键表、CLI、API、固件契约与发行版矩阵。', '/reference/configuration'],
+      ['05', '项目', '路线图、参与贡献与设计依据。', '/about/roadmap'],
     ],
   },
   footer: {
@@ -144,7 +143,7 @@ const en = {
     h2: 'Verified distributions.',
     sub: 'The following distributions have completed whole-machine cold-boot verification; the list does not limit what can boot.',
     items: [
-      ['/ Whole machine', 'Debian 12/13<br>Ubuntu 24.04/26.04<br>Fedora 44', 'Cold boot to system login'],
+      ['/ Whole machine', '7 distributions', 'Debian 12/13 · Ubuntu 24.04/26.04<br>Fedora 44 · AlmaLinux 10.2 · openSUSE Leap 16.0<br>Cold boot to system login'],
       ['/ Data plane', '4421', 'NVMe/TCP · TLS 1.3<br>shared by firmware and kernel'],
       ['/ Authentication', 'DHHC-1', 'Issued at disk creation<br>rotation / revocation immediate'],
       ['/ Plaintext', 'None', 'Missing key or unready port<br>boot refused'],
@@ -153,12 +152,11 @@ const en = {
   s4: {
     side: 'Docs',
     items: [
-      ['01', 'Project Overview', 'From the proposition and object model to one delivery.', '/en/guide/overview'],
-      ['02', 'Quick Start', 'Controller, storage node and the first bootable system.', '/en/guide/quickstart'],
-      ['03', 'Concepts', 'Devices, Workers, disks, boot chain and credentials.', '/en/concepts/entities'],
-      ['04', 'Architecture', 'Control plane, data plane, firmware and trust boundaries.', '/en/architecture/'],
-      ['05', 'Firmware', 'Build artifacts, device provisioning and the firmware contract.', '/en/firmware/'],
-      ['06', 'Reference', 'Configuration keys, CLI, API and the firmware contract.', '/en/reference/configuration'],
+      ['01', 'Getting Started', 'Positioning, the standard deployment procedure, and a first end-to-end delivery.', '/en/guide/overview'],
+      ['02', 'Concepts', 'Architecture, entities, boot chain, firmware, storage, identity, and configuration.', '/en/architecture/'],
+      ['03', 'Tasks', 'System disk customization, firmware build and deployment, operations, and troubleshooting.', '/en/guide/system-disk'],
+      ['04', 'Reference', 'Configuration keys, CLI, API, the firmware contract, and the distribution matrix.', '/en/reference/configuration'],
+      ['05', 'Project', 'Roadmap, contribution, and design rationale.', '/en/about/roadmap'],
     ],
   },
   footer: {

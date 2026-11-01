@@ -116,10 +116,10 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 存储节点的 Agent 与 nvmet-host 使用 nodes CA 签发的证书。首次加入时：
 
-1. 管理员签发绑定 `agent_id` 的 bootstrap token；
+1. 管理员签发绑定 `agent_id` 的 bootstrap token（`agent_id` 为 12 位小写十六进制；描述性名称写节点声明 `metadata.remark`）；
 2. 节点用 token 调 `/enroll`，取得组件证书；
 3. token 默认一次性，TTL 与次数上限由声明控制；
-4. nvmet-host 的凭据由 agent 在 enroll 响应中派生，不需要单独签发。
+4. nvmet-host 的凭据由 agent 在 enroll 响应中派生，无需单独签发。
 
 进入运行态后：
 
@@ -149,19 +149,18 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 ## 凭据归属
 
-| 凭据 | 归属 | 轮换/失效 |
-| --- | --- | --- |
-| 设备私钥 | 设备 NVRAM | `POST /devices/rotate` |
-| 人员证书 | 用户本地私钥 + users CA | CSR 重签 / 序列号吊销 |
-| 管理 token | 控制面台账（摘要） | TTL / 吊销 |
-| 会话 | 控制面会话台账 | 登出 / 逐个吊销 / 全部下线 |
-| 组件证书 | Agent / nvmet-host 本地 | renew / nodes CRL |
-| DHHC-1 | 控制面密钥库按 Worker | 轮换 / 吊销 / 对账 |
-| TLS PSK | 派生值 | 随 DHHC-1 原子变化 |
+- **设备私钥**：设备 NVRAM；`POST /devices/rotate`。
+- **人员证书**：用户本地私钥 + users CA；CSR 重签 / 序列号吊销。
+- **管理 token**：控制面台账（摘要）；TTL / 吊销。
+- **会话**：控制面会话台账；登出 / 逐个吊销 / 全部下线。
+- **组件证书**：Agent / nvmet-host 本地；renew / nodes CRL。
+- **DHHC-1**：控制面密钥库按 Worker；轮换 / 吊销 / 对账。
+- **TLS PSK**：派生值；随 DHHC-1 原子变化。
 
 ## 相关页面
 
 - 引导链如何使用设备身份：[引导链](./boot-chain.md)
+- 固件侧密钥、签名与 TOFU：[设备身份与信任](../firmware/index.md)
 - 凭据与数据面：[存储与数据面](./storage.md)
 - 威胁模型与残余风险：[安全模型](../architecture/security.md)
 - 日常操作命令：[日常运维](../guide/operations.md)

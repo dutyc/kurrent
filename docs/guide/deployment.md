@@ -1,56 +1,106 @@
-# Kurrent 部署指南
+# 部署
 
-> 覆盖角色：**控制面服务器 + 存储节点**（可同机自测，亦可分离部署与横向扩展——每台存储服务器一个 Agent）。以下按两角色分步；同机自测时在同一台机器顺序执行即可。
+> 本页从空白主机开始，依次完成部署准备、控制面、存储节点、固件与设备入池。部署单元是**控制面服务器 + 存储节点**；两者可分离，也可运行在同一台机器上，每台存储服务器运行一个 Agent。
 
-本文基于 Kurrent 当前的声明式配置形态：控制面声明 `control_plane/kurrent.yaml` 由 `kurrent config print init-defaults` 生成模板后编辑、`kurrent init` 校验并收敛启动；存储节点声明 `storager/kurrent.yaml` 由 `kurrent config print node-defaults` 生成模板后编辑、`kurrent join` 加入。yml 是唯一输入，CLI 只负责校验与收敛，容器编排是内部细节。
+部署按声明式配置执行：控制面 `control_plane/kurrent.yaml` 与节点 `storager/kurrent.yaml` 是唯一输入，`kurrent init` / `kurrent join` 负责校验与收敛，容器编排是内部细节。设备入池表示平台就绪；母盘准备、绑定、建盘与首次系统启动属于系统交付，见[系统盘定制](./system-disk.md)与[首次交付](./usage.md)。部署故障按组件定位，见[故障排查](./troubleshooting.md)；声明字段与默认值见[配置参考](../reference/configuration.md)。
 
-对象模型与信任边界见[设备、Worker 与系统盘](../concepts/entities.md)与[安全模型](../architecture/security.md)；完整配置键见[配置参考](../reference/configuration.md)。
+## 部署准备
 
-## 拓扑与端口规划
+### 主机与角色
 
-```
-┌─────────────────────┐         ┌─────────────────────┐
-│  控制面服务器          │         │  存储节点             │
-│  kurrent-dnsmasq    │   LAN   │  storager-agent      │
-│   (DHCP/TFTP 67/69) │◄───────►│   (HTTPS 4840)       │
-│  kurrent-control-   │         │  kurrent-nvmet-host  │
-│   plane（UDS）       │         │   (NVMe/TCP 4421)    │
-│  kurrent-webui      │         └──────────┬──────────┘
-│   (443 唯一入口)     │                    │ 存储盘 btrfs/xfs
-└─────────┬───────────┘         ┌──────────▼──────────┐
-          │ PXE 网段            │  裸机客户端（Devices） │
-          └────────────────────►│  网络引导 → 入池       │
-                               └─────────────────────┘
-```
-
-**网络规划示例**（按你的实际环境替换）：
-
-| 项 | 值 | 说明 |
+| 角色 | 最低要求 | 职责 |
 | --- | --- | --- |
-| PXE 子网 | `192.168.80.0/24` | 控制面绑定的服务网段（DHCP/TFTP/引导流） |
-| DHCP 池 | `192.168.80.50 ~ .100` | 分配给裸机客户端 |
-| 网关 / DNS | `192.168.80.2` / `223.5.5.5` | DHCP 下发的 option 3 / 6 |
-| 控制面 IP | `192.168.1.10` | 局域网管理地址（WebUI / API / 存储节点回连） |
-| 存储节点 IP | `192.168.1.20` | 控制面经此访问 Agent（4840） |
-| 存储节点主机名 | `storage-01` | 随意设置（节点身份由 join 自动生成随机标识，与主机名解耦） |
+| 控制面服务器（×1） | Linux x86_64；Docker 与 Compose v2；一个 PXE 侧接口（独立网卡或 VLAN 子接口） | DHCP/TFTP、443 WebUI/API、PKI、设备台账与引导变量 |
+| 存储节点（×1 起） | Linux x86_64；Docker 与 Compose v2；NVMe/TCP TLS 内核能力；`tlshd >= 1.5.0`；一块 btrfs/xfs 数据盘 | Agent（4840）与 nvmet-host（4421），承载母盘与系统盘 |
+| 裸机设备（×N） | UEFI x86_64；可网络启动 | 通过 PXE 入池并启动系统盘 |
 
-**端口清单**：
+控制面与存储节点可以是同一台主机，但角色不合并：同机时仍运行一个 Agent，仍按本页顺序执行。控制面必须有一个位于 PXE 网段的地址；WebUI、API 与 Agent 回连使用管理网地址，两者不要混用。
 
-| 端口 | 协议 | 服务 | 位置 |
-| --- | --- | --- | --- |
-| 67 / 69 | UDP | DHCP / TFTP（host 网络） | 控制面服务器 |
-| 80 | TCP | HTTP → 443 自动 301 升级（不承载内容/凭据） | 控制面服务器 |
-| 443 | TCP | 唯一入口：HTTPS（WebUI + `/api/cp` 反代控制面 + 组件 enroll/renew + 引导链） | 控制面服务器 |
-| 4840 | TCP | 存储 Agent HTTPS（控制面 → Agent） | 存储节点 |
-| 4421 | TCP | NVMe/TCP 数据面，单口 **TLS 1.3**（固件引导段与内核段共用） | 存储节点 |
+### 网络规划
 
-nvmet-host 管理面不占 TCP：Agent 与 nvmet-host 经共享卷 unix socket `/run/kurrent/nvmet/nvmet-host.sock` 通信（mTLS，目录 0700），局域网不可达。
+控制面需要两条可达路径：
 
-443 的引导链只反代 `/boot-vars`、`/devices/report`、`/devices/challenge` 三个只读端点；其余 `/devices/*` 管理接口不对外暴露。控制面管理面不发布 TCP 端口，只监听容器内 unix socket（`/run/kurrent/cp.sock`），由 nginx 经共享卷访问，容器健康检查走同一 socket。nginx 对所有反代 location 默认清空身份头，仅在 `/api/cp/` 的 mTLS 校验通过时注入 DN/issuer/serial/fingerprint。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
+- **管理面**：管理员浏览器与存储节点访问 443；控制面用这个地址签发 token、访问 Agent。
+- **引导面**：裸机设备访问 DHCP（67/UDP）与 TFTP（69/UDP）；`spec.networking.interface` 绑定这一侧，该接口必须持有 PXE 子网内的地址。
+
+推荐用两张网卡或 VLAN 子接口把两侧分开。单网卡同时承载管理面与引导面时，PXE 网段必须独立隔离，不能与办公网混跑。存储节点不参与 PXE，但引导客户端必须能路由到它的 **4421** 数据面端口；跨网段时在路由与防火墙上显式放通。
+
+按实际环境替换：
+
+- PXE 子网 `192.168.80.0/24`：`spec.networking.subnet`
+- 控制面 PXE 地址 `192.168.80.1`：dnsmasq 绑定地址，须在 PXE 子网内
+- DHCP 池 `192.168.80.50 ~ .100`：分配给裸机设备
+- 网关 / DNS `192.168.80.2` / `223.5.5.5`：DHCP option 3 / 6
+- 控制面管理地址 `192.168.1.10`：WebUI / API / `--cp-url`
+- 存储节点管理地址 `192.168.1.20`：控制面访问 Agent 4840
+- 存储数据面地址 `192.168.1.20`（或独立数据 IP）：客户端访问 4421，必须客户端可达
+- 存储节点主机名 `storage-01`：任意；节点身份由 join 生成，与主机名解耦
+
+**端口**：控制面服务器发布 67/69 UDP（DHCP/TFTP，host 网络）、80 TCP（自动 301 到 443，不承载内容或凭据）与 443 TCP（唯一 HTTPS 入口：WebUI、`/api/cp`、组件 enroll/renew 与引导链）。存储节点发布 4840 TCP（Agent HTTPS，控制面 → Agent）与 4421 TCP（NVMe/TCP 数据面，TLS 1.3，固件段与内核段共用）。
+
+443 的引导链只反代 `/boot-vars`、`/devices/report`、`/devices/challenge` 三个引导端点；其余 `/devices/*` 管理接口不对外暴露。控制面管理面不发布 TCP 端口，只监听容器内 unix socket（`/run/kurrent/cp.sock`），由 nginx 经共享卷访问。nginx 对所有反代 location 默认清空身份头，仅在 `/api/cp/` 的 mTLS 校验通过时注入 DN/issuer/serial/fingerprint。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
+
+### 仓库与 CLI
+
+控制面与存储节点都需要仓库文件和 `kurrent` CLI。分机部署时在每台主机各执行一次；同机部署只执行一次。
+
+```bash
+git clone https://github.com/dutyc/kurrent
+cd kurrent
+
+# CLI 免本地编译：下载 release 单二进制（v0.3.0 起随 Release 发布；Linux amd64/arm64、Windows）
+BASE=https://github.com/dutyc/kurrent/releases/download/v0.3.0
+curl -sL -o cli/kurrent "$BASE/kurrent-linux-amd64"
+chmod +x cli/kurrent
+# 全局安装；本文档后续命令直接用 kurrent
+sudo install -m 0755 cli/kurrent /usr/local/bin/kurrent
+kurrent version   # 校验安装
+```
+
+> 版本随 Release 更新（https://github.com/dutyc/kurrent/releases，Windows 取 `kurrent-windows-amd64.exe`）；或源码构建替代下载（`cd cli && go build -o kurrent .`，需 Go 1.27+）。
+
+### 主机依赖
+
+两台主机都需要 Docker、Compose v2、`git`、`curl`、`jq` 与 `openssl`。Docker 与 Compose 按发行版或 Docker 官方安装文档准备；其余工具在 Debian/Ubuntu 上可一次安装：
+
+```bash
+sudo apt install -y git curl jq openssl
+docker --version && docker compose version
+```
+
+**存储节点**额外完成数据面宿主准备。先确认数据盘设备名，以下 `mkfs` 示例只对空数据盘执行，不要指向系统盘：
+
+```bash
+# 1. nvmet 宿主前置（内核模块 + configfs + tlshd 版本 + 重启持久化；幂等）
+sudo bash storager/nvmeof/host-prepare.sh
+#    只读诊断（无需 root，部署前排查用）：
+#    bash storager/nvmeof/host-prepare.sh --check
+
+# 2. NVMe/TCP TLS：内核需带 CONFIG_NVME_TCP_TLS /
+#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING，
+#    且宿主常驻 tlshd >= 1.5.0
+grep -E 'CONFIG_NVME_(TCP_TLS|TARGET_TCP_TLS|KEYRING)' \
+  /boot/config-$(uname -r)
+# 发行版包低于 1.5.0 时见 storager/nvmeof/nvmet-host/README.md 源码安装
+sudo apt install -y ktls-utils
+sudo systemctl enable --now tlshd
+
+# 3. 数据盘建议 btrfs 或 xfs（两者均支持 reflink/FICLONE，
+#    母盘克隆秒级完成；ext4 不支持 reflink，会回退全量拷贝，
+#    克隆时间随镜像大小线性增长）
+sudo mkfs.btrfs /dev/sdb
+sudo mkdir -p /pool1
+sudo mount /dev/sdb /pool1
+sudo mkdir -p /pool1/storager_img
+```
+
+数据盘要写入 `/etc/fstab`（推荐用 `blkid` 取 UUID）或等价的 systemd mount，确保重启后自动挂载；否则 `diskDir` 会落到根文件系统上的空目录。
+
+> `host-prepare.sh` 与 `kurrent join` 预检 nvmet 模块、configfs 与 tlshd（**≥ 1.5.0 且服务运行中**）；内核 TLS 编译项仍需手工确认。tlshd 低于 1.5.0 会让轮换后的旧 PSK 遮蔽新 PSK（1.5.0 起进程 keyring 优先），脚本按失败处理。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
 
 ### 引导网络边界
 
-引导链的第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有可用的密码学锚：设备固件不会验证这段内容，iPXE 也尚未拿到控制面证书。当前把**引导网段本身作为信任边界**，在此之上保留设备身份 TOFU（NVRAM 密钥 + 注册窗口 + 绑定）与服务端 TOFU。部署时必须满足：
+引导链的第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有可用的密码学锚：设备固件不会验证这段内容，iPXE 也尚未拿到控制面证书。当前把**引导网段本身作为信任边界**，在此之上保留设备身份 TOFU（NVRAM 密钥 + 注册窗口 + 绑定）与服务端 TOFU。部署必须满足：
 
 - **物理/逻辑隔离**：PXE 网段为独立 VLAN 或独立物理口，不与办公网、存储数据面混跑；控制面是该网段唯一提供 DHCP 与 TFTP 的主机。
 - **二层防护**：接入交换机启用 DHCP snooping（仅控制面上联口为 trusted）、Dynamic ARP Inspection、RA guard、端口安全/MAC 数量限制；有条件时用 802.1X 或 MAB 限定可接入端口。
@@ -58,270 +108,228 @@ nvmet-host 管理面不占 TCP：Agent 与 nvmet-host 经共享卷 unix socket `
 - **吊销闭环**：`DELETE /devices/{mac}` 会在 dnsmasq 绑定文件写入 `MAC,ignore`，被吊销设备拿不到租约；重新登记（`/devices/report`）或清除条目（`DELETE /devices/revoked`）会移除该行。
 - **TFTP 面最小化**：TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe`，配置与菜单经 HTTPS 取回。
 
-**残余风险（当前信任边界不解决）**：同一二层内的攻击者（或与被控端口同 VLAN 的主机）仍可伪造 DHCP/ARP 抢在控制面之前应答，替换首跳二进制或指针，再用设备 NVRAM 中的密钥作为签名预言机取走 `/boot-vars` 中的 DHHC-1/PSK；控制面或 TFTP 服务本身被攻陷时同理。设备密钥只是持有者凭证，控制面认证的是"持有该密钥的请求"，不是"运行该密钥的代码"。关闭首跳替换需要固定信任锚的 Secure Boot 或硬件度量；即使首跳可信，启动后的系统仍可读取 NVRAM 中的私钥，还需要 TPM 度量或同等的密钥隔离。这些都不在当前主线实现范围内。
-
-## 前置条件
-
-**Linux 服务器**（控制面与存储节点宿主，x86_64；已在 Debian 12/13 与 Ubuntu 24.04/26.04 上验证，自测可同机）：
-
-```bash
-# 1. Docker 与 Compose v2
-docker --version && docker compose version
-
-# 2. 存储节点：nvmet 宿主前置（内核模块 + configfs + tlshd 版本 + 重启持久化；幂等）
-sudo bash storager/nvmeof/host-prepare.sh
-#    只读诊断（无需 root，部署前排查用）：bash storager/nvmeof/host-prepare.sh --check
-
-# 3. 存储节点：NVMe/TCP TLS 前置——内核需带 CONFIG_NVME_TCP_TLS /
-#    CONFIG_NVME_TARGET_TCP_TLS / CONFIG_NVME_KEYRING，且宿主常驻 tlshd >= 1.5.0
-grep -E 'CONFIG_NVME_(TCP_TLS|TARGET_TCP_TLS|KEYRING)' /boot/config-$(uname -r)
-sudo apt install -y ktls-utils        # 发行版包低于 1.5.0 时见 storager/nvmeof/nvmet-host/README.md 源码安装
-sudo systemctl enable --now tlshd
-
-# 4. 存储节点：数据盘建议 btrfs 或 xfs（两者均支持 reflink/FICLONE，母盘克隆秒级完成；
-#    ext4 不支持 reflink，会回退全量拷贝，克隆时间随镜像大小线性增长）
-#    挂载到 /pool1（示例）：sudo mkfs.btrfs /dev/sdb && sudo mount /dev/sdb /pool1
-```
-
-> `host-prepare.sh` 与 `kurrent join` 预检 nvmet 模块、configfs 与 tlshd（**≥ 1.5.0 且服务运行中**）；第 3 步的内核 TLS 编译项仍需手工确认。tlshd 低于 1.5.0 会让轮换后的旧 PSK 遮蔽新 PSK（1.5.0 起进程 keyring 优先），脚本按失败处理。数据面 `4421` 建口失败时节点如实上报端口未就绪，控制面**拒绝引导**，不会回落明文。
-
-**宿主基线（认证体系成立的前提）**：默认只读检查对外 TCP 监听、Docker 暴露面与凭据文件权限；脚本不修改系统状态。
-
-```bash
-bash control_plane/host-baseline.sh
-```
-
-- 控制面宿主只应暴露 22（运维）、53/67/69（dnsmasq）、80/443（nginx）；存储节点另有 4840/4421
-- nvmet-host 管理面走共享卷 UDS（目录 0700），不产生 TCP 监听
-- ufw 不过滤 Docker 发布端口：需要入站限制时在 `DOCKER-USER` 链收口（脚本在 ufw 已启用但该链为空时给出 warn）
-- 控制面容器不挂载 `docker.sock`（dnsmasq 自己监听 `dhcp-hostsfile`，nginx 由容器内 watcher 自行 reload）
-- CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600
-- 脚本报 FAIL 时先处理再做安全评估：宿主 root 与 nginx 进程被攻破等同管理面沦陷
+完整的威胁模型、残余风险与部署检查清单见[安全模型](../architecture/security.md)。
 
 ## 第 1 步：控制面服务器
 
-### 1.1 准备仓库与安装 kurrent CLI
+### 1.1 声明 PXE 网络
+
+控制面声明 `control_plane/kurrent.yaml` 是唯一输入。先生成带注释模板，再填写 `spec.networking` 五键：
 
 ```bash
-git clone https://github.com/dutyc/kurrent && cd kurrent
-
-# CLI 免本地编译：下载 release 单二进制（v0.3.0 起随 Release 发布；Linux amd64/arm64、Windows）
-curl -sL -o cli/kurrent https://github.com/dutyc/kurrent/releases/download/v0.3.0/kurrent-linux-amd64
-chmod +x cli/kurrent
-sudo install -m 0755 cli/kurrent /usr/local/bin/kurrent   # 全局安装（本文档后续命令直接用 kurrent）
-kurrent version   # 校验安装
+kurrent config print init-defaults > control_plane/kurrent.yaml
+vim control_plane/kurrent.yaml
 ```
 
-> 版本随 Release 更新（https://github.com/dutyc/kurrent/releases，Windows 取 `kurrent-windows-amd64.exe`）；或源码构建替代下载（`cd cli && go build -o kurrent .`，需 Go 1.27+）。
+最小可启动内容如下，其余块保留模板默认值：
 
-### 1.2 生成控制面声明配置
-
-声明式配置即 `control_plane/kurrent.yaml`（**yml 是唯一输入**，CLI 只负责校验与启动）。先生成带注释模板，再按环境编辑：
-
-```bash
-kurrent config print init-defaults > control_plane/kurrent.yaml   # 生成模板
-vim control_plane/kurrent.yaml        # 修改 spec.networking 五键（必填：绑定网卡/服务网段/DHCP 池/网关/DNS）
+```yaml
+apiVersion: kurrent.io/v1
+kind: ControlPlaneConfiguration
+metadata:
+  name: kurrent-cp
+spec:
+  networking:
+    interface: enp3s0
+    subnet: 192.168.80.0/24
+    dhcpRange: 192.168.80.50,192.168.80.100
+    gateway: 192.168.80.2
+    dns: 223.5.5.5
 ```
 
-`spec.networking` 五键是部署环境事实，必须显式填写（模板含示例值与注释）；其余块（组件 PKI/认证/注册窗口/凭据轮换/TOFU 证书/引导行为等）带默认值，可不动。编辑后先在控制面镜像内按运行时 schema 全量校验（未知字段、跨字段语义、策略上限都在写盘前失败）：
+- `interface` 填**面向 PXE 的接口**，不是管理网接口；同机多网卡时尤其容易填错。
+- `dhcpRange` 是 `start,end` 单个字符串，不是两个数组元素。
+- 服务器证书默认 SAN 只有 `127.0.0.1` 与 `localhost`。用管理网 IP 访问 WebUI 或让 curl 校验证书时，在首次 `kurrent init` 前把它加入 `spec.serverCert.san`：
 
-```bash
-kurrent config validate            # 全量校验 control_plane/kurrent.yaml
-kurrent config show                # 输出生效声明（默认值已注入）
+```yaml
+  serverCert:
+    san: "IP:192.168.1.10,IP:192.168.80.1,IP:127.0.0.1,DNS:localhost"
 ```
 
-### 1.3 初始化并拉起控制面
-
-一条命令完成校验与收敛启动（配置即声明、CLI 即工具；容器编排为内部细节）：
+编辑后先按运行时 schema 全量校验，再查看注入默认值后的生效声明：
 
 ```bash
-kurrent init        # 构建校验镜像 → 全量校验 → 应用声明 → 启动/重启 → /healthz → dnsmasq 起服核验
+# 未知字段、跨字段语义、策略上限都在写盘前失败
+kurrent config validate
+kurrent config show                # 输出生效声明
 ```
 
-控制面启动时自动完成：按 `spec.networking` 生成 `dnsmasq/dnsmasq.conf`（yml 是权威、conf 为派生物，勿手工编辑）、生成 TOFU 服务器证书与组件 PKI。`kurrent init` 幂等可重跑：改声明后重跑即生效。**失败语义**：校验不过时声明不会写入；启动后控制面未通过健康检查（含启动期派生件失败）或 dnsmasq 未能保持运行即返回非零，并自动回滚到上一份声明、恢复旧配置运行。
-
-### 1.3.1 更新控制面声明
-
-同一套流程，不需要手工重启容器：
+### 1.2 初始化并拉起控制面
 
 ```bash
-vim control_plane/kurrent.yaml     # 修改声明（如注册窗口上限、会话 TTL、凭据轮换周期）
-kurrent config validate            # 写盘前全量校验（失败不改动任何文件）
-kurrent init                       # 应用并收敛；失败自动回滚上一份声明
-kurrent config status              # 运行态：生效声明、configHash、dnsmasq.conf 与证书漂移
+kurrent init
 ```
 
-- **策略块**：`spec.auth`（会话 TTL、管理/人类证书有效期、自动化 token TTL 上限）、`spec.registration`（注册窗口 TTL/额度上限，WebUI 按 GET 返回的 `limits` 收敛输入）、`spec.credentials`（DHHC-1 轮换与推送对账周期，0 = 关闭）、`spec.pki`（bootstrap token 上限、CRL 重签周期、组件证书续期阈值）。
-- **服务器证书**：SAN/天数变化默认**只报告漂移**（`kurrent config status` 的 `derived.serverCert.drift`），不改变 TOFU 指纹；确认要让设备重新信任新证书后，设 `spec.serverCert.rotateOnChange: true` 再 `kurrent init`。重签会改变指纹，已入池设备需重新信任。
-- **后台参数覆盖**：`KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` / `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` / `KURRENT_CP_CRL_REFRESH_INTERVAL` 仍可临时覆盖声明值（测试/排障用），声明是缺省来源。
+`kurrent init` 依次完成：构建校验镜像 → 全量校验 → 应用声明 → 启动/重启 → 等待 `/healthz` → 核验 dnsmasq 保持运行。启动时控制面按 `spec.networking` 生成 `dnsmasq/dnsmasq.conf`（yml 是权威、conf 是派生物，勿手工编辑），并生成 TOFU 服务器证书与组件 PKI。
 
-### 1.4 验证
+命令幂等可重跑：改声明后重跑即生效。**失败语义**：校验不过时声明不会写入；启动后控制面未通过健康检查（含启动期派生件失败）或 dnsmasq 未能保持运行即返回非零，并自动回滚到上一份声明、恢复旧配置运行。
+
+### 1.3 验证服务
 
 ```bash
-curl -k https://127.0.0.1/healthz           # {"status":"ok"}（经 443；管理面无 TCP 端口）
-head -5 dnsmasq/dnsmasq.conf                # interface=ens33 ...（已按 yml 生成）
-kurrent config status                       # 生效声明 + configHash + 派生件一致性
+curl -k https://127.0.0.1/healthz           # {"status":"ok"}
+head -5 dnsmasq/dnsmasq.conf                # interface=... 与声明一致
+kurrent config status                       # configHash + 派生件一致性
+docker ps                                   # 控制面 / WebUI / dnsmasq
 ```
 
-浏览器访问 `https://<控制面IP>/`（WebUI，唯一入口 443；HTTP 自动 301 升级）。
-
-**CLI 管理凭据**：`kurrent init` 已自举 `control_plane/state/admin.conf`（kurrent
-原生扁平 YAML：入口地址 + admin 客户端证书及其信任锚路径，0600）。CLI 自动发现顺序
-`--credentials` ＞ `KURRENT_CREDENTIALS` ＞ 自动发现（当前目录逐级上溯
-`control_plane/state/admin.conf` → 可执行文件旁的仓库布局 → 用户级快照
-`~/.kurrent/admin.conf`）——仓库目录下开箱即用（admin 证书走 443 mTLS）；脱离仓库
-运行时先执行一次 `kurrent credentials install` 生成快照（凭据轮换后重跑刷新），
-`--server` 可覆盖文件中的入口地址。认证体系（认证器链 / 会话 / RBAC）详见 API 文档
-1.3。
-
-**WebUI 登录方式**（二选一）：
-
-1. **管理 token（登录页）**：`kurrent token create --usage admin` 签发后在登录页粘贴
-   → 换取 HttpOnly 会话 Cookie（12 小时 TTL、剩余不足一半才滑动续期，刷新/重开浏览器保持登录；侧边栏
-   底部可登出）。
-2. **管理证书（自动认证）**：将 admin 证书转为 PKCS#12 导入系统证书库，浏览器访问
-   时自动完成 mTLS 认证、无需登录：
-
-   ```bash
-   openssl pkcs12 -export -out kurrent-admin.p12 \
-     -inkey control_plane/state/pki/users/admin/client.key \
-     -in control_plane/state/pki/users/admin/client.crt
-   # 双击 kurrent-admin.p12 导入（Windows/macOS 系统证书库；Firefox 需单独导入）
-   ```
-
-**防火墙**（控制面服务器）：
+浏览器访问 `https://<控制面管理地址>/`（WebUI，唯一入口 443；HTTP 自动 301 升级）。管理 token 登录方式：`kurrent token create --usage admin` 签发后在登录页提交，换取 HttpOnly 会话 Cookie（默认 12 小时 TTL，剩余不足一半才滑动续期）。需要浏览器自动 mTLS 时，把 admin 证书转为 PKCS#12 导入系统证书库：
 
 ```bash
+openssl pkcs12 -export -out kurrent-admin.p12 \
+  -inkey control_plane/state/pki/users/admin/client.key \
+  -in control_plane/state/pki/users/admin/client.crt
+# 双击 kurrent-admin.p12 导入（Windows/macOS 系统证书库；Firefox 需单独导入）
+```
+
+**CLI 管理凭据**：`kurrent init` 已自举 `control_plane/state/admin.conf`（入口地址 + admin 客户端证书及其信任锚，0600）。CLI 自动发现顺序为 `--credentials` ＞ `KURRENT_CREDENTIALS` ＞ 当前目录逐级上溯 `control_plane/state/admin.conf` → 可执行文件旁的仓库布局 → 用户级快照 `~/.kurrent/admin.conf`。在仓库目录内无需额外配置；脱离仓库运行时先执行一次 `kurrent credentials install`（凭据轮换后重跑刷新）。
+
+### 1.4 防火墙与宿主基线
+
+```bash
+# 控制面服务器
 sudo ufw allow 67,69/udp && sudo ufw allow 80,443/tcp && sudo ufw reload
+
+# 认证体系成立的宿主前提：默认只读检查对外监听、Docker 暴露面与凭据文件权限
+bash control_plane/host-baseline.sh
 ```
+
+- 控制面宿主只应暴露 22（运维）、53/67/69（dnsmasq）、80/443（nginx）；存储节点另有 4840/4421。
+- ufw 不过滤 Docker 发布端口：需要入站限制时在 `DOCKER-USER` 链收口。
+- 控制面容器不挂载 `docker.sock`。
+- CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600。
+- 脚本报告 FAIL 时先处理问题；宿主 root 或 nginx 进程被攻破等同管理面沦陷。
 
 ### 1.5 签发存储节点引导凭据
 
 ```bash
-kurrent token create --agent-id node-01 --cp-url https://192.168.1.10
-# 省略 --agent-id 则生成随机 12 位 hex 节点身份，命令同样携带
+kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.1.10
+# 省略 --agent-id 则自动生成 12 位小写 hex 节点身份，命令同样携带
 ```
 
-`--cp-url` 指定**存储节点侧可达的控制面 HTTPS 入口**（443 `/api/cp` 反代，Agent 经此 enroll/renew；缺省按 `--server` 主机推导）。`--agent-id` 是节点身份（= 节点声明 `metadata.name`），token 与它绑定。输出形如（含地址与节点 id、可直接粘贴的节点侧命令）：
+`--cp-url` 指定**存储节点侧可达的控制面 HTTPS 入口**（443 `/api/cp` 反代，Agent 经此 enroll/renew；缺省按 `--server` 主机推导）。`--agent-id` 是节点身份（= 节点声明 `metadata.name`），只接受 12 位小写十六进制，token 与它绑定；描述性名称写 `metadata.remark`。输出包含可直接在存储节点执行的 join 命令：
 
 ```
-bootstrap token: a1b2c3.d4e5f6a7b8c9d0e1（expires ...，绑定节点 node-01，0/1）
+bootstrap token: <token>（expires ...，绑定节点 3f2a9c1d8b7e，0/1）
 
 # 在绑定节点上执行（--agent-id 写入节点声明 metadata.name）：
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
-# 加入后验证：kurrent agents list（或 WebUI「Agent 列表」health=ok）
+kurrent join https://192.168.1.10 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-> token **绑定节点身份且默认一次性**：enroll 只接受该 `agent_id`，使用额度在签发前原子占用（签发失败退回），TTL 默认 60 分钟、上限 24 小时（`spec.pki.bootstrapTokenTtlMinutes`）；批量引导用 `kurrent token create --agent-id ... --uses N`（上限 100），过期或被吊销后重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
+> token **绑定节点身份且默认一次性**：enroll 只接受该 `agent_id`，使用额度在签发前原子占用（签发失败退回），TTL 默认 60 分钟（`spec.pki.bootstrapTokenTtlMinutes`）、上限 24 小时（`spec.pki.bootstrapTokenMaxTtlMinutes`）；批量引导用 `kurrent token create --agent-id ... --uses N`（1..1000，且不超过 `spec.pki.bootstrapTokenMaxUses`，默认 100），过期或被吊销后重新签发。**nvmet-host 组件凭据无需签发**——agent enroll 上报 `backend=nvmet` 时控制面自动派生下发。
 
-### 1.6 组件面证书吊销
-
-组件通道（443 enroll、4840 入站、控制面出站、agent → nvmet-host UDS）在 TLS 链校验之外做应用层吊销校验：
-
-- 控制面生成两张组件 CRL：`state/pki/nginx/nodes.crl`（nodes CA，校验同伴组件）与 `control.crl`（control CA，校验控制面客户端）；nginx 另用 `clients.crl` 管管理面握手。
-- 组件用自身 client cert 从 `/api/cp/enroll/crl` 取表，默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`）；控制面出站与 agent → nvmet-host 在每次建连时加载 `nodes.crl` 并检查 `nextUpdate`。
-- **fail-closed**：CRL 缺失或过期时组件/出站连接直接拒绝，不降级放行；`nodes.crl` / `control.crl` 的 `nextUpdate` 为 30 天，容忍控制面长时间不可达。
-- 吊销入口：`DELETE /api/cp/pki/components/{agent_id}`（nodes 域）与 `DELETE /api/cp/pki/control/{cn}`（control 域），均可加 `serial` 精确到一张。
-- **升级顺序**：先升级并重启控制面（生成 CRL、开放分发端点），再重建组件容器；旧组件不认识 `/enroll/crl` 时会保留原有链校验行为，不会因此拒绝启动。
-- 生效时间 = 控制面写入 CRL 后的下一次组件刷新（≤60 秒），无需重启组件。
-- **启动自检**：被吊销的证书无法完成 `/enroll/crl` 的 mTLS，组件改为在启动时从公开只读入口 `GET /crl/nodes.crl`（无认证、仅 GET/HEAD）取表，用本地 nodes CA 校验签名后比对 client / serving 序列号，命中即用引导凭据重新 enroll（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。
-- **管理入口**：WebUI「证书」页按 users / nodes / control 三个域展示到期与状态，可吊销人员与节点证书；节点证书异常时同一行提供「恢复」。
-
-**验证**：
+### 1.6 后续修改声明
 
 ```bash
-bash tests/deploy/probe_edge.sh      # 含组件 CRL 分发、公开 nodes CRL、control CA 台账与人类证书 403 断言
-docker logs storager-agent 2>&1 | grep 'crl:'          # initial fetch ok（revoked 计数 / next_update）
-docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0
+vim control_plane/kurrent.yaml
+# 写盘前全量校验；失败不改动任何文件
+kurrent config validate
+# 应用并收敛；失败自动回滚上一份声明
+kurrent init
+# 生效声明、configHash、派生件与证书漂移
+kurrent config status
 ```
 
-### 1.7 组件证书吊销后的恢复
+服务器证书的 SAN/天数变化默认**只报告漂移**（`derived.serverCert.drift`），不改变 TOFU 指纹；确认要让设备重新信任新证书后，设 `spec.serverCert.rotateOnChange: true` 再执行 `kurrent init`。策略块与后台覆盖参数的完整说明见[配置参考](../reference/configuration.md)与[日常运维](./operations.md)。
 
-吊销会同时删除该节点的 bootstrap token，因此恢复必须重新签发引导凭据；节点上的旧证书
-**不需要手工删除**。
-
-1. 控制面：WebUI「证书」→「存储节点」→「恢复」，或
-   `kurrent token create --agent-id <id> --cp-url https://<cp-host>`。WebUI 预填控制面
-   地址，签发后显示一次性 token 与 join 命令（明文仅本次可见）。
-2. 节点：执行输出的 `kurrent join <cp-url> --token <token> --agent-id <id>`。
-3. 启动自检：agent 发现本地 client / serving 序列号命中 nodes CRL，用新 token 重新
-   enroll 并覆盖本地证书；随后 join 等待派生凭据写出并自动重启 nvmet-host。
-
-验证：
-
-```bash
-kurrent agents list                       # 节点 health=ok
-docker logs storager-agent 2>&1 | grep 'pki:'   # 重新 enroll / 自检记录
-docker logs kurrent-nvmet-host 2>&1 | grep 'pki:'
-```
+组件证书的吊销、CRL 生效与节点恢复不在部署主线内，见[日常运维](./operations.md#组件证书)。
 
 ## 第 2 步：存储节点
 
-### 2.1 准备
+### 2.1 声明节点配置（join 前）
+
+节点声明 `storager/kurrent.yaml` 决定数据面地址、盘目录与 NQN 命名域。**先声明再 join**，不要等 join 生成默认值后再改：分机部署时默认的 `advertiseUrl` 指向控制面主机，控制面会因此访问不到 Agent。
 
 ```bash
-git clone https://github.com/dutyc/kurrent
-cd kurrent
-mkdir -p storager_img        # 盘映像目录（kurrent join 默认；自定义路径见 2.3）
-curl -sL -o cli/kurrent https://github.com/dutyc/kurrent/releases/download/v0.3.0/kurrent-linux-amd64 && chmod +x cli/kurrent
-sudo install -m 0755 cli/kurrent /usr/local/bin/kurrent   # 按 1.1 安装 CLI（或从控制面机器拷贝已装二进制）
+kurrent config print node-defaults > storager/kurrent.yaml
+vim storager/kurrent.yaml
 ```
 
-### 2.2 声明节点配置并加入集群
+需要填写的键：
 
-节点声明式配置为 `storager/kurrent.yaml`（yml 即声明）。**节点无需预编辑任何文件**——签发命令已携带控制面地址与节点 id，粘贴执行即可：
-
-```bash
-cd /path/to/kurrent
-kurrent join https://192.168.1.10 --token a1b2c3.d4e5f6a7b8c9d0e1 --agent-id node-01
+```yaml
+apiVersion: kurrent.io/v1
+kind: NodeConfiguration
+metadata:
+  name: ""
+  remark: 生产存储
+spec:
+  agent:
+    backend: nvmet
+    advertiseUrl: https://192.168.1.20:4840
+    diskDir: /pool1/storager_img
+    nqnBase: nqn.2026-07.com.kurrent
+  controlPlane:
+    url: https://192.168.1.10
 ```
 
-`kurrent join` 完成三件事（幂等可重跑；**写盘前**先用 agent 镜像内同一份 schema 全量校验合并后的声明——未知字段/非法路径/NQN 当场失败，不会等容器启动才暴露）：
-1. 生成/更新 `storager/kurrent.yaml`（缺失时按模板自动生成：`metadata.name` = `--agent-id`、地址同步进 `spec.controlPlane.url`；已存在则读入合并——非 forbid 式，手工编辑保留；已声明身份与 `--agent-id` 不一致即拒绝。人工输入只需写 `metadata.remark` 备注——随首次 enroll 登记进控制面台账，WebUI 卡片展示、编辑表单可改）
-2. 写入绑定身份的引导凭据 `storager/bootstrap/agent.token`（`--token` 给则写入；不给则要求文件已就位。`nvmet-host.token` 由 agent enroll 按能力派生自动生成，无需手工提供）
-3. 同步 `.env` 插值键（组件 PKI 宿主路径 `KURRENT_AGENT_PKI_HOST` 等）并拉起/重启 agent 容器（backend 决定编排：nvmet → `storager/nvmeof`，stgt/lio → `storager/iscsi`）
+- `advertiseUrl` 是**控制面 → Agent 4840** 的地址。分机部署必须写存储节点管理地址；同机部署可保留默认，控制面以 bridge 网络运行且无法回连宿主时改为 `https://host.docker.internal:4840`。
+- `diskDir` 必须是宿主绝对路径，且指向已挂载的数据盘；join 会把它同步为 `.env` 的 `KURRENT_DISK_DIR`，作为 compose 挂载源。盘目录不存在时先创建。
+- `metadata.name` 是机器身份（12 位小写十六进制），由 join 从 `--agent-id` 写入；描述性名称写 `metadata.remark`。模板留空时不要先跑 `kurrent config validate --node`：身份尚未写入会校验失败；join 合并身份后会用同一份 schema 全量校验。join 完成后再用 `--node` 校验后续修改。
+- `nqnBase` 是 Host NQN 与盘 NQN 的唯一命名域；同一集群内保持一致。
 
-预置声明（可选）：自定义 backend/diskDir/advertiseUrl 等业务键时，先 `kurrent config print node-defaults > storager/kurrent.yaml` 生成带注释模板并按环境编辑，再执行 join（声明读入合并，手工字段保留）。模板中 `metadata.name` 留空——由 join 写入节点身份；单独 `kurrent config validate --node` 校验模板或既有声明（在仓库内运行，使用 storager-agent 镜像）。
+### 2.2 加入集群
 
-**分离部署关键一步**：agent 的广告地址默认推导为 `https://<cp-host>:4840`（同机形态），控制面与存储节点分机时控制面必须经**存储节点局域网 IP** 访问 Agent——编辑声明文件覆盖它（声明配置层覆盖）：
+在存储节点的仓库目录执行 token 输出中的命令：
 
 ```bash
-# 编辑 storager/kurrent.yaml：spec.agent.advertiseUrl → https://192.168.1.20:4840
-# 校验并重跑：kurrent config validate --node && kurrent join <cp-url>
-# （已有 bootstrap/agent.token 可省略 --token；join 重启 agent 使新声明生效）
+kurrent join https://192.168.1.10 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-### 2.3 拉起存储数据面
+`kurrent join` 完成三项操作（幂等可重跑）：
 
-`kurrent join` 已收敛启动 agent（backend 决定编排：nvmet → `storager/nvmeof`，stgt/lio → `storager/iscsi`）：
+1. 生成/更新 `storager/kurrent.yaml`：缺失时按模板创建，已存在则读入合并（手工字段保留）；写入 `metadata.name`，同步 `spec.controlPlane.url`。已声明身份与 `--agent-id` 不一致即拒绝。
+2. 写入绑定身份的引导凭据 `storager/bootstrap/agent.token`。`nvmet-host.token` 由 agent enroll 按能力派生，无需手工提供。
+3. 同步 `.env` 插值键并拉起/重启 agent 容器；backend 决定编排目录（nvmet → `storager/nvmeof`，stgt/lio → `storager/iscsi`）。
+
+写盘前，join 用 agent 镜像内同一份 schema 校验合并后的声明；未知字段、非法路径或 NQN 会立即失败，不会等到容器启动才暴露。
+
+### 2.3 验证存储节点
 
 ```bash
-docker ps    # 预期：storager-agent / kurrent-nvmet-host（或 stgt/lio 对应容器）
+docker ps    # storager-agent / kurrent-nvmet-host
+
+docker logs storager-agent 2>&1 | grep pki
+docker logs kurrent-nvmet-host 2>&1 | grep -i "数据面端口就绪"
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
 ```
 
-> 自定义盘目录：编辑 `storager/kurrent.yaml` 的 `spec.agent.diskDir`（宿主绝对路径，如 `/pool1/iscsi_img`）后重跑 `kurrent join <cp-url>`（先全量校验；幂等同步 `.env` 的 `KURRENT_DISK_DIR` 并重启 agent 生效）。
+预期：agent 打印 `pki: client cert ok`，nvmet-host 打印 `4421 tsas=tls1.3`，healthcheck 返回 0（UDS + mTLS + configfs）。stgt/lio 后端查看对应容器。
 
-**防火墙**（存储节点）：`sudo ufw allow 4840,4421/tcp && sudo ufw reload`
-
-> nvmet-host 管理面走共享卷 UDS（`/run/kurrent/nvmet/nvmet-host.sock`，目录 0700），不占 TCP、局域网不可达；`4421` 是唯一数据面端口，按需限制来源网段。
-
-### 2.4 验证
+回到控制面服务器确认登记与健康：
 
 ```bash
-docker logs storager-agent 2>&1 | grep pki     # pki: client cert ok (cn=agent-0d26b6f33a89)
-docker logs kurrent-nvmet-host 2>&1 | grep -i "数据面端口就绪"   # 4421 tsas=tls1.3
-docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?   # 0（UDS + mTLS + configfs）
-# 回到控制面服务器：
 kurrent agents list
-# ID             REMARK       HEALTH  BASE_URL                       ROLE  ENABLED  TAGS
-# 0d26b6f33a89   storage-01   ok      https://192.168.1.20:4840      disk  true     auto,nvmet,storage
+# ID             REMARK       HEALTH  BASE_URL
+# 0d26b6f33a89   storage-01   ok      https://192.168.1.20:4840
 ```
 
-## 第 3 步：设备固件与最小端到端验证
+输出还包含 ROLE、ENABLED 与 TAGS；`HEALTH=ok` 是控制面到 Agent 的实时探测结果。
 
-### 3.1 准备设备固件 {#prepare-device-firmware}
+**两个地址不要混用**：`advertiseUrl` 是控制面访问 Agent 的 4840 地址；`storager_ip` 是写入 `/boot-vars`、供引导客户端访问 4421 的数据面地址。数据面使用独立网段时，在 WebUI Agents 详情中设置 `storager_ip`，确保客户端可达。
 
-主仓库不包含固件二进制。设备固件由配套仓库 [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) 构建；使用与当前上游基线匹配的发布产物，或按[构建与产物](../firmware/build.md)自行构建。
+**防火墙**（存储节点）：
+
+```bash
+sudo ufw allow 4840,4421/tcp && sudo ufw reload
+```
+
+> nvmet-host 管理面走共享卷 UDS（`/run/kurrent/nvmet/nvmet-host.sock`，目录 0700），不占 TCP、局域网不可达；`4421` 是唯一数据面端口，按需限制来源网段。引导客户端所在网段必须能访问它。
+
+### 2.4 母盘与系统盘
+
+存储节点本身不通过网络引导，它只存放并导出 Worker 的盘。`diskDir` 同时容纳两类文件：
+
+- **母盘**一次性制作，文件名含 `_tpl_` 标记（如 `_tpl_ubuntu2404.img`），必须是 4K 原生 GPT 整盘镜像。放入 `diskDir` 后由 Agent 扫描并出现在母盘列表；母盘只作为克隆源，不导出给设备。
+- **系统盘**由控制面按 Worker 从母盘 reflink 克隆，带独立的 `os_tag`、盘 NQN 与认证凭据。创建与首次启动见[首次交付](./usage.md)。
+
+母盘的制作与校验见[系统盘定制](./system-disk.md)。新存储节点没有母盘也能 join；首次建盘前至少一台健康节点必须持有目标母盘，放置策略只会选择持有该母盘的节点。
+
+## 第 3 步：固件与设备入池
+
+### 3.1 安装固件产物
+
+主仓库不包含固件二进制。设备固件由配套仓库 [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) 构建；使用与当前上游基线匹配的发布产物，或按[固件构建与部署](../firmware/build-deploy.md)自行构建。
 
 ```bash
 mkdir -p /tmp/kurrent-fw/pxe-uefi && cd /tmp/kurrent-fw
@@ -331,54 +339,35 @@ curl -sL -o pxe-uefi/snponly.efi "$BASE/pxe-uefi-snponly.efi"
 sha256sum -c SHA256SUMS --ignore-missing
 
 # 放回主仓库的 TFTP 根；替换后重启 dnsmasq 使文件级挂载指向新 inode
-sudo install -m 0644 pxe-uefi/snponly.efi /path/to/kurrent/tftp/snponly.efi
+sudo install -m 0644 pxe-uefi/snponly.efi \
+  /path/to/kurrent/tftp/snponly.efi
 cd /path/to/kurrent
 docker compose restart kurrent-dnsmasq
 ```
 
-在 WebUI「引导链」页确认固件状态与六项能力（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定），或直接查询接口：
+主仓库当前的 PXE 首跳固定为 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物；详见[固件构建与部署](../firmware/build-deploy.md#_2-选择产物)。
+
+在 WebUI「引导链」页确认固件状态与六项能力（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定），或直接查询接口（在控制面仓库目录执行，使用 admin 证书）：
 
 ```bash
 curl -sS \
   --cert control_plane/state/pki/users/admin/client.crt \
   --key control_plane/state/pki/users/admin/client.key \
   --cacert control_plane/state/certs/server.crt \
-  https://<控制面IP>/api/cp/boot-assets | jq '.firmware'
+  https://<控制面管理地址>/api/cp/boot-assets | jq '.firmware'
 ```
 
-固件产物、能力边界与预置方式见[固件概述](../firmware/index.md)、[预置与刷写](../firmware/provision.md)。
+### 3.2 首次引导与入池
 
-### 3.2 最小端到端验证
-
-裸机客户端接入 PXE 网段并设为网络启动：
+先在 WebUI → **Devices** 开启注册窗口（TTL 按 `spec.registration.windowMaxTtlMinutes` 收敛，默认 60 分钟；可选放行额度 `max_devices`），再让裸机设备接入 PXE 网段并设为网络启动。窗口必须在设备上报前开启；关闭后上报只更新指纹，不再入池。
 
 ```bash
 # 控制面服务器：观察 DHCP/引导流
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-预期链路：客户端 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 拉取 `boot.ipxe.cfg` 及后续脚本 → 设备身份上报与挑战-应答验签 → **设备自动登记入池**（WebUI → Devices 可见）。设备绑定、系统盘创建与 Worker 交付见[使用流程](./usage)。
+预期链路：设备 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM）→ `/devices/report` 上报指纹与公钥 → **设备出现在 Devices 页并完成密钥认领**。
 
-> TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe` 两个文件；`boot.ipxe.cfg` / `menu.ipxe` 只经 HTTPS 提供。更新 `snponly.efi` 后需重建/重启 `kurrent-dnsmasq` 容器（文件级挂载固定 inode）。
+确认设备已入池后关闭注册窗口。全部设备认领完成后，再在 Devices 页开启**验签强制**：此后的 `/boot-vars` 只接受通过挑战-应答验签的已绑定设备。
 
-## 故障排查
-
-| 症状 | 排查 |
-| --- | --- |
-| `agents list` HEALTH 非 ok | 控制面能否访问 `spec.agent.advertiseUrl`（存储节点 4840 端口/防火墙）；存储节点 `docker logs storager-agent`（证书轮换失败多与 PKI 目录权限有关） |
-| join 报 token 无效/已过期 | token 已过期（默认 60 分钟）、已被使用（默认一次性）、从未签发，或节点 id 与 token 绑定不一致——控制面重新 `kurrent token create --agent-id <节点 id>` 后重跑 `kurrent join --token <新token> --agent-id <节点 id>` |
-| DHCP 无应答 | `dnsmasq.conf` 的 `interface=` 是否对应真实网卡（`ip a` 核对）；防火墙 67/69 UDP |
-| Agent 容器反复重启 | `docker logs storager-agent`；多为控制面不可达（`controlPlane.url` 443 未放通）或引导凭据文件缺失（`kurrent join --token <token>` 重写 agent.token；nvmet-host.token 可删后重启 agent 容器触发重新派生） |
-| 控制面 503 / enroll 失败 | nginx 443 与 `/api/cp` 反代是否正常；控制面 `curl -k https://<cp-ip>/api/cp/healthz` |
-| 数据面端口未就绪 / 引导被拒 | 存储节点宿主是否带 NVMe/TCP TLS 内核配置、`tlshd >= 1.5.0` 是否运行（`bash storager/nvmeof/host-prepare.sh --check`）；`docker logs kurrent-nvmet-host` 查 `4421` 建口日志；`/capabilities` 的 `port.ready` 应为 true |
-| 引导报 `Error 0x7f22208e`（`Boot from SAN device ... failed`） | 系统盘 GPT 扇区布局与 nvmet 导出块大小不一致：nvmet file backend 按底层 FS 块（典型 4096 B）导出，512 字节扇区 GPT 会被 EDK2 视为无分区。核对 `GET /masters` 的 `gpt` 字段（须为 `4k`），并按 nvmet-host README「盘文件要求」重建 4K 原生 GPT |
-| `kurrent config validate` 报字段错误 | 按 `spec.<块>.<键>` 修正声明；未知字段（拼写/旧键）按 `extra=forbid` 拒绝。`kurrent config show` 可查看注入默认值后的生效形态 |
-| `kurrent init` 返回非零并提示已回滚 | 新声明未通过启动期检查（`docker logs kurrent-control-plane`，或修好后 `kurrent init`）。回滚只恢复声明文件，派生状态（如证书）以 `kurrent config status` 为准 |
-
-## 附录：声明配置速查
-
-**`control_plane/kurrent.yaml`**（`kurrent config print init-defaults` 生成模板后编辑，`kurrent config validate` / `kurrent init` 全量校验）：`spec.networking` 五键（interface/subnet/dhcpRange/gateway/dns）必填 + `pki`/`serverCert`/`boot`/`auth`/`registration`/`credentials`/`agentTimeoutSec` 默认块——控制面权威文件，dnsmasq.conf 由其派生；`apiVersion`/`kind` 锁定，未知字段拒绝。控制面容器不挂载 `docker.sock`：dhcp 绑定文件由 dnsmasq 自己监听，nginx 的 CRL 重载由容器内 watcher 自己完成（控制面经共享卷哨兵确认）。
-
-**`storager/kurrent.yaml`**（`kurrent config print node-defaults` 生成模板后编辑，`kurrent config validate --node` / `kurrent join` 全量校验）：`spec.agent`（backend/advertiseUrl/diskDir/nqnBase）+ `spec.controlPlane.url`——节点权威文件，NQN 命名域以本文件的 `nqnBase` 为唯一来源（控制面经 capabilities 上报发现，Host NQN 与盘 NQN 自动同域）；磁盘路径必须绝对路径、节点身份字符集在声明期约束。
-
-两者均为运行时文件（不入库），模板见对应 `kurrent.yaml.example` 或 `kurrent config print`。
+设备入池只表示平台侧与注册链路可用，此时设备还没有可启动的系统。真正启动还需要三步：存储节点上有目标发行版的母盘 → 为 Worker 克隆系统盘并设为默认盘 → 冷启动到登录提示符。母盘制作见[系统盘定制](./system-disk.md)，后两步见[首次交付](./usage.md)。

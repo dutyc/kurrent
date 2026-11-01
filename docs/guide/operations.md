@@ -1,6 +1,6 @@
 # 日常运维
 
-本页面向已经完成部署、开始交付系统的环境，覆盖声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署见[部署指南](./deployment.md)，对象语义见[核心概念](../concepts/entities.md)。
+本页面向已完成部署并进入系统交付阶段的环境，覆盖声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署参见[部署](./deployment.md)。
 
 ## 配置修改
 
@@ -17,7 +17,7 @@ kurrent config status       # 生效声明、configHash、dnsmasq.conf 一致性
 
 常见修改与生效方式：
 
-| 修改 | 生效方式 | 注意 |
+| 修改 | 生效方式 | 说明 |
 | --- | --- | --- |
 | `spec.networking` | `kurrent init` | 重新生成 `dnsmasq.conf` 并重启 dnsmasq |
 | `spec.auth` / `spec.registration` / `spec.credentials` | `kurrent init` | 下次请求或后台周期任务读取新值 |
@@ -26,7 +26,7 @@ kurrent config status       # 生效声明、configHash、dnsmasq.conf 一致性
 | `spec.serverCert.rotateOnChange: true` | `kurrent init` | 重签证书；已入池设备需要重新信任 |
 | `spec.boot` | `kurrent init` | 影响菜单超时与 `/boot-vars` 默认行为 |
 
-不要手工编辑 `dnsmasq/dnsmasq.conf`：它是 `spec.networking` 的派生物，控制面启动时重新生成。
+`dnsmasq/dnsmasq.conf` 不得手工编辑：它是 `spec.networking` 的派生物，控制面启动时会重新生成。
 
 ### 存储节点
 
@@ -76,12 +76,41 @@ kurrent cert revoke alice [--serial HEX]           # 重签 CRL + reload nginx +
 
 ### 组件证书
 
+组件通道（443 enroll、4840 入站、控制面出站、agent → nvmet-host UDS）在 TLS 链校验之外做应用层吊销校验。
+
 ```bash
 kurrent cert components                            # agent / nvmet-host 证书
 kurrent cert revoke-component <agent_id>           # 写 nodes CRL + 删除该节点 bootstrap token
 ```
 
-吊销后的节点恢复：签发新的 bootstrap token（`kurrent token create --agent-id <id>`），在节点上重跑 `kurrent join <cp-url> --token <token> --agent-id <id>`。旧证书无需手工删除，agent 启动自检会用新凭据重新 enroll。
+- 控制面生成两张组件 CRL：`state/pki/nginx/nodes.crl`（nodes CA，校验同伴组件）与 `control.crl`（control CA，校验控制面客户端）；nginx 另用 `clients.crl` 管管理面握手。
+- 组件用自身 client cert 从 `/api/cp/enroll/crl` 取表，默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`）；控制面出站与 agent → nvmet-host 在每次建连时加载 `nodes.crl` 并检查 `nextUpdate`。
+- **fail-closed**：CRL 缺失或过期时组件/出站连接直接拒绝，不降级放行；`nodes.crl` / `control.crl` 的 `nextUpdate` 为 30 天，容忍控制面长时间不可达。
+- 吊销入口：`DELETE /api/cp/pki/components/{agent_id}`（nodes 域）与 `DELETE /api/cp/pki/control/{cn}`（control 域），均可加 `serial` 精确到一张。
+- **升级顺序**：先升级并重启控制面（生成 CRL、开放分发端点），再重建组件容器；旧组件不认识 `/enroll/crl` 时会保留原有链校验行为，不会因此拒绝启动。
+- 生效时间 = 控制面写入 CRL 后的下一次组件刷新（≤60 秒），无需重启组件。
+- **启动自检**：被吊销的证书无法完成 `/enroll/crl` 的 mTLS，组件改为在启动时从公开只读入口 `GET /crl/nodes.crl`（无认证、仅 GET/HEAD）取表，用本地 nodes CA 校验签名后比对 client / serving 序列号，命中即用引导凭据重新 enroll（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。
+- **管理入口**：WebUI「身份与访问」页按 users / nodes / control 三个域展示到期与状态，可吊销人员与节点证书；节点证书异常时同一行提供「恢复」。
+
+吊销后的节点恢复：
+
+1. 控制面：WebUI「身份与访问」→「存储节点」→「恢复」，或
+   `kurrent token create --agent-id <id> --cp-url https://<cp-host>`。WebUI 预填控制面
+   地址，签发后显示一次性 token 与 join 命令（明文仅本次可见）。
+2. 节点：执行输出的 `kurrent join <cp-url> --token <token> --agent-id <id>`。
+3. 启动自检：agent 发现本地 client / serving 序列号命中 nodes CRL，用新 token 重新
+   enroll 并覆盖本地证书；随后 join 等待派生凭据写出并自动重启 nvmet-host。
+
+验证：
+
+```bash
+# 含组件 CRL 分发、公开 nodes CRL、control CA 台账与人类证书 403 断言
+bash tests/deploy/probe_edge.sh
+docker logs storager-agent 2>&1 | grep 'crl:'
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
+```
+
+`docker logs` 应出现 initial fetch ok（revoked 计数与 next_update），healthcheck 返回 0。
 
 ### NVMe-oF 凭据
 
@@ -95,15 +124,13 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 
 ## 设备与 Worker 生命周期
 
-| 操作 | 入口 | 语义 |
-| --- | --- | --- |
-| 注册新设备 | WebUI → Devices → 开启注册窗口 | 仅窗口期内、带有效公钥的设备入池 |
-| 绑定 | Devices / Workers 页 | 设备与 Worker 一对一；已绑定设备需显式换绑 |
-| 换绑（冷迁移） | Devices 页 `force` 换绑 | 新绑定落盘后清旧绑定；系统盘留在原 Worker |
-| 解绑 | Devices 页 | 设备回池，Worker 保留系统盘 |
-| 排空存储节点 | Agents 页停用 | 不再接收新盘，存量盘继续服务 |
-| 删除 Worker | Workers 页 | 联动解绑设备、清理凭据条目与推送台账；盘文件按选项处理 |
-| 清理吊销设备 | Devices 页 / `DELETE /devices/revoked` | 删除 `revoked` 条目，不作用于在用设备 |
+- **注册新设备**：WebUI → Devices → 开启注册窗口；仅窗口期内、带有效公钥的设备入池。
+- **绑定**：Devices / Workers 页；设备与 Worker 一对一；已绑定设备需显式换绑。
+- **换绑（冷迁移）**：Devices 页 `force` 换绑；新绑定落盘后清旧绑定；系统盘留在原 Worker。
+- **解绑**：Devices 页；设备回池，Worker 保留系统盘。
+- **排空存储节点**：Agents 页停用；不再接收新盘，存量盘继续服务。
+- **删除 Worker**：Workers 页；联动解绑设备、清理凭据条目与推送台账；盘文件按选项处理。
+- **清理吊销设备**：Devices 页 / `DELETE /devices/revoked`；删除 `revoked` 条目，不作用于在用设备。
 
 换绑前确认目标 Worker 的系统盘已有可用凭据，并确保原设备已关机或从数据面隔离。当前控制面不会在换绑时校验目标凭据是否就绪，也不会自动围栏原设备；Kurrent 不提供活迁移与数据面 fencing，不能把同一系统盘同时挂到两台设备。
 
@@ -140,15 +167,13 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 
 ## 可观测性
 
-| 信号 | 位置 | 用途 |
-| --- | --- | --- |
-| 控制面健康 | `GET /healthz`（经 443） | 启动期派生件失败时返回 503 |
-| 声明状态 | `kurrent config status` | 生效声明、configHash、dnsmasq 一致性、证书漂移、启动错误 |
-| Agent 健康 | `kurrent agents list` / WebUI Agents | 控制面到 Agent 的连通性 |
-| 引导链状态 | WebUI「引导链」/ `GET /boot-assets` | 固件能力、脚本链与菜单完整性 |
-| 操作审计 | WebUI Operations / `kurrent ops list` | 注册、绑定、建盘、凭据等操作轨迹 |
-| 请求审计 | `control_plane/state/audit.jsonl` | 主体、issuer、serial、路由、决策与告警 |
-| 告警外投 | `KURRENT_CP_ALARM_WEBHOOK` | `event=alarm` 事件 POST 到外部地址 |
+- **控制面健康**：`GET /healthz`（经 443）；启动期派生件失败时返回 503。
+- **声明状态**：`kurrent config status`；生效声明、configHash、dnsmasq 一致性、证书漂移、启动错误。
+- **Agent 健康**：`kurrent agents list` / WebUI Agents；控制面到 Agent 的连通性。
+- **引导链状态**：WebUI「引导链」/ `GET /boot-assets`；固件能力、脚本链与菜单完整性。
+- **操作审计**：WebUI Operations / `kurrent ops list`；注册、绑定、建盘、凭据等操作轨迹。
+- **请求审计**：`control_plane/state/audit.jsonl`；主体、issuer、serial、路由、决策与告警。
+- **告警外投**：`KURRENT_CP_ALARM_WEBHOOK`；`event=alarm` 事件 POST 到外部地址。
 
 审计写入失败时请求返回 503（fail-closed）。告警外投走后台队列，不进入请求路径。
 
@@ -163,15 +188,8 @@ bash control_plane/host-baseline.sh
 - 控制面容器不挂载 `docker.sock`。
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600。
 - Docker 发布端口不受 ufw 过滤；需要入站限制时在 `DOCKER-USER` 链收口。
-- PXE 网段按[部署指南](./deployment.md)隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。
+- PXE 网段按[部署](./deployment.md)页所述的边界隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。
 
-## 故障排查索引
+## 故障排查
 
-| 现象 | 入口 |
-| --- | --- |
-| 控制面未就绪、`init` 回滚 | `docker logs kurrent-control-plane`；`kurrent config status` |
-| Agent 非 `ok` | [部署指南 § 故障排查](./deployment.md#故障排查) |
-| 设备不入池或被拒绝引导 | [引导链](../concepts/boot-chain.md) 的准入条件 |
-| 数据面连接失败 | [存储与数据面](../concepts/storage.md)；`host-prepare.sh --check` |
-| 组件证书被吊销 | 本节「组件证书」恢复流程 |
-| 凭据未送达 | `kurrent workers credential show`；对账周期与 Agent 连通性 |
+跨组件的现象定位、证据采集与恢复路径见[故障排查](./troubleshooting.md)。

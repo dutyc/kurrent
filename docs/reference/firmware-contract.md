@@ -149,7 +149,7 @@ GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&sig=<base64>
 
 ## 引导脚本变量
 
-`boot.ipxe.cfg` 由平台维护，操作者通常不需要修改。它定义：
+`boot.ipxe.cfg` 由平台维护，操作者通常无需修改。它定义：
 
 | 变量 | 含义 |
 | --- | --- |
@@ -195,20 +195,22 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 
 - 完整链路要求固件包含 NVMe/TCP、认证、NVS、TOFU、设备身份命令、Host NQN 与 NBCT 补丁；缺少身份命令的旧固件会在 `keygen`/`sign` 处失败，无法取得凭据。
 - 控制面不向未验签请求下发任何密钥；验签强制开启后，旧固件无法完成引导。
-- 升级控制面不要求同时升级固件，但新增变量（例如新的 TLS 端口）需要固件侧能够消费；升级前先核对固件能力。
+- 升级控制面不要求同时升级固件，但新增变量（例如新的 TLS 端口）需要固件侧能够消费；升级前应核对固件能力。
 
 ## 安全边界
 
 - 密钥只在验签通过后注入，`/boot-vars` 不提供注册通道。
 - 设备私钥保存在 NVRAM，引导后的系统可以读取；当前主线没有 Secure Boot/TPM 度量来隔离它。
 - TOFU 首次连接没有密码学保护，依赖 PXE 网段隔离；pin 之后具备完整性校验。
-- 不要把 NVRAM 内容复制到另一台设备；退役设备应清除 `device-key` 与 `server-fingerprint`。
+- NVRAM 内容不得复制到另一台设备；退役设备应清除 `device-key` 与 `server-fingerprint`。
 
 ## 相关页面
 
 - [固件概述](../firmware/index.md)
-- [构建与产物](../firmware/build.md)
-- [预置与刷写](../firmware/provision.md)
+- [能力清单](../firmware/index.md)
+- [构建与产物](../firmware/build-deploy.md)
+- [预置与刷写](../firmware/build-deploy.md)
+- [设备身份与信任](../firmware/index.md)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../architecture/security.md)
 - [API 参考](./api.md)

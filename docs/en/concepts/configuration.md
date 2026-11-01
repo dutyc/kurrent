@@ -60,7 +60,7 @@ The control plane renders `dnsmasq/dnsmasq.conf` from the declaration at startup
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  name: storage-01        # node identity (agent_id), written by join
+  name: 3f2a9c1d8b7e      # node identity (agent_id): 12 lowercase hex, written by join
   remark: Production storage node
 spec:
   agent:
@@ -72,8 +72,8 @@ spec:
     url: https://192.168.1.10
 ```
 
-- `metadata.name` is the machine identity, the component certificate CN and the control-plane registry key; the character set is constrained by the schema.
-- `metadata.remark` is the only human-entered field; it is recorded in the control-plane ledger on first enroll.
+- `metadata.name` is the machine identity, the component certificate CN and the control-plane registry key; only 12 lowercase hex characters are accepted.
+- `metadata.remark` is the only place for a descriptive name; it is recorded in the control-plane ledger on first enroll.
 - `diskDir` must be an absolute host path; it is also synchronized as the compose mount source.
 - `nqnBase` is the namespace for Host NQNs and disk NQNs; the control plane does not declare a separate NQN domain.
 

@@ -16,17 +16,15 @@ Kurrent consists of a control plane, storage nodes and devices. The control plan
 
 ## Components
 
-| Component | Location | Responsibility |
-| --- | --- | --- |
-| Control-plane service | Control-plane container, unix socket | Device/Worker ledgers, binding, storage scheduling, boot variables, audit, configuration status |
-| nginx | Control-plane container, `:443` | The only external entry: WebUI, `/api/cp/`, read-only boot endpoints, iPXE assets and menu |
-| dnsmasq | Control-plane host, host network | DHCP / TFTP; `dnsmasq.conf` is rendered from the declaration |
-| WebUI | nginx static assets | A REST client; session cookie or mTLS |
-| CLI | Operator shell | Declaration generation, validation, convergence, credentials and ledgers |
-| Agent | Storage node, `:4840` mTLS | Disk-file lifecycle, master scanning, backend commands |
-| nvmet-host | Storage node, shared-volume UDS | configfs operations, host matrix, DHHC-1, TLS PSK injection |
-| Host kernel nvmet | Storage-node host | NVMe/TCP target on data-plane port `4421` |
-| Device firmware | Device | iPXE network boot, device key, TOFU, NVMe/TCP and NBCT |
+- **Control-plane service** — Control-plane container, unix socket; Device/Worker ledgers, binding, storage scheduling, boot variables, audit, configuration status.
+- **nginx** — Control-plane container, `:443`; The only external entry: WebUI, `/api/cp/`, read-only boot endpoints, iPXE assets and menu.
+- **dnsmasq** — Control-plane host, host network; DHCP / TFTP; `dnsmasq.conf` is rendered from the declaration.
+- **WebUI** — nginx static assets; A REST client; session cookie or mTLS.
+- **CLI** — Operator shell; Declaration generation, validation, convergence, credentials and ledgers.
+- **Agent** — Storage node, `:4840` mTLS; Disk-file lifecycle, master scanning, backend commands.
+- **nvmet-host** — Storage node, shared-volume UDS; configfs operations, host matrix, DHHC-1, TLS PSK injection.
+- **Host kernel nvmet** — Storage-node host; NVMe/TCP target on data-plane port `4421`.
+- **Device firmware** — Device; iPXE network boot, device key, TOFU, NVMe/TCP and NBCT.
 
 Firmware is built from a separate repository; see [Firmware](../firmware/index.md).
 
@@ -98,16 +96,14 @@ The control plane participates only in the HTTPS segment; the data plane connect
 
 ## State and Derived Artifacts
 
-| Content | Location | Nature |
-| --- | --- | --- |
-| Control-plane declaration | `control_plane/kurrent.yaml` | Authoritative input |
-| Node declaration | `storager/kurrent.yaml` | Authoritative input |
-| Devices, Workers, disks, credentials, sessions, tokens | `control_plane/state/*.yml` | Runtime ledgers |
-| Audit | `control_plane/state/audit.jsonl` | Append-only log |
-| PKI | `control_plane/state/pki/` | Trust roots and component certificates |
-| TOFU server certificate | `control_plane/state/certs/` | Boot-chain certificate and fingerprint |
-| dnsmasq configuration | `dnsmasq/dnsmasq.conf` | Derived from the declaration; never edited by hand |
-| Boot scripts | `tftp/` | Menu and scripts; firmware binaries come from the firmware repository |
+- **Control-plane declaration** — `control_plane/kurrent.yaml`; Authoritative input.
+- **Node declaration** — `storager/kurrent.yaml`; Authoritative input.
+- **Devices, Workers, disks, credentials, sessions, tokens** — `control_plane/state/*.yml`; Runtime ledgers.
+- **Audit** — `control_plane/state/audit.jsonl`; Append-only log.
+- **PKI** — `control_plane/state/pki/`; Trust roots and component certificates.
+- **TOFU server certificate** — `control_plane/state/certs/`; Boot-chain certificate and fingerprint.
+- **dnsmasq configuration** — `dnsmasq/dnsmasq.conf`; Derived from the declaration; never edited by hand.
+- **Boot scripts** — `tftp/`; Menu and scripts; firmware binaries come from the firmware repository.
 
 There is no database. The control plane is a single node with plain-file state; state backup, permissions and single-node failure boundaries are the deployment's responsibility.
 

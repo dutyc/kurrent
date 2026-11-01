@@ -138,4 +138,4 @@ file = <worker_id>.<os>.<os_tag>.img
 - 启动时如何把这些实体组合成一次引导：[引导链](./boot-chain.md)
 - 盘、凭据与数据面：[存储与数据面](./storage.md)
 - 设备与人员身份：[身份与访问](./identity.md)
-- 实际操作方法：[使用流程](../guide/usage.md)
+- 交付步骤：[首次交付](../guide/usage.md)

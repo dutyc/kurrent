@@ -134,7 +134,7 @@ kurrent workers credential revoke worker-01
 - 内核缺少 NVMe/TCP TLS 配置、`tlshd < 1.5.0` 或服务未运行时，nvmet-host 上报端口未就绪；
 - 数据面失败不会回落明文，也不会偷偷改用另一个端口。
 
-宿主前置与诊断见[部署指南](../guide/deployment.md)。
+宿主前置与诊断见[部署](../guide/deployment.md)。
 
 ## 常见失败
 
@@ -151,5 +151,5 @@ kurrent workers credential revoke worker-01
 
 - 对象与放置：[设备、Worker 与系统盘](./entities.md)
 - 启动时的凭据投影：[引导链](./boot-chain.md)
-- 节点部署与宿主前置：[部署指南](../guide/deployment.md)
+- 节点部署与宿主前置：[部署](../guide/deployment.md)
 - 凭据运维：[日常运维](../guide/operations.md)

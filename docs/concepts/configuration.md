@@ -52,7 +52,7 @@ spec:
 - `dhcpRange` 写入地址池；
 - `gateway` / `dns` 写入 DHCP option 3/6。
 
-控制面启动时按声明生成 `dnsmasq/dnsmasq.conf`。**不要手工编辑生成文件**：下次启动会被覆盖。`kurrent config status` 会报告生成文件是否与声明一致。
+控制面启动时按声明生成 `dnsmasq/dnsmasq.conf`。**生成文件不得手工编辑**，否则下次启动时将被覆盖。`kurrent config status` 会报告生成文件是否与声明一致。
 
 ## 节点声明
 
@@ -60,8 +60,8 @@ spec:
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  name: storage-01        # 节点身份（agent_id），由 join 写入
-  remark: 生产存储节点      # 人工备注
+  name: 3f2a9c1d8b7e      # 节点身份（agent_id）：12 位小写 hex，由 join 写入
+  remark: 生产存储节点      # 描述性名称写这里
 spec:
   agent:
     backend: nvmet
@@ -72,8 +72,8 @@ spec:
     url: https://192.168.1.10
 ```
 
-- `metadata.name` 是机器身份，同时是组件证书 CN 与控制面登记键；字符集受 schema 约束。
-- `metadata.remark` 是唯一供人工输入的字段，随首次 enroll 登记进控制面台账。
+- `metadata.name` 是机器身份，同时是组件证书 CN 与控制面登记键；只接受 12 位小写十六进制。
+- `metadata.remark` 是描述性名称的唯一归属，随首次 enroll 登记进控制面台账。
 - `diskDir` 必须是宿主绝对路径；它同时同步为 compose 挂载源。
 - `nqnBase` 是 Host NQN 与盘 NQN 的命名域；控制面不另行声明 NQN 域。
 

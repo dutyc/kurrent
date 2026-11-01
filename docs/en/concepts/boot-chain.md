@@ -1,6 +1,6 @@
 # Boot Chain
 
-The boot chain answers three questions at power-on: under which identity, to which target, and with which disk. Kurrent does not write the answers into the machine or the disk; the control plane projects them at every boot according to the current binding.
+The boot chain determines three aspects at power-on: the identity, the target, and the disk to boot. Kurrent does not write them into the machine or the disk; the control plane projects them at every boot according to the current binding.
 
 This page describes the main path (NVMe/TCP with TLS 1.3). Firmware build and provisioning are covered under [Firmware](../firmware/index.md); trust boundaries are covered in the [Security Model](../architecture/security.md).
 
@@ -101,7 +101,7 @@ nvme://<storager>:<tls_port>/<disk_nqn>?secret=<dhhc1>&tls_psk=<psk>&tls_trsvcid
 
 The connection has two layers:
 
-- **Authentication**: DH-HMAC-CHAP completes connection control, answering "who may connect".
+- **Authentication**: DH-HMAC-CHAP controls which initiators may connect.
 - **Encryption**: TLS 1.3 protects content on the same port `4421`.
 
 Firmware performs the TLS handshake itself. Authentication failure, a missing PSK or an unready port fails the connection; there is no plaintext fallback port.
@@ -124,16 +124,14 @@ No machine identity is written into the disk: identity, credentials and connecti
 
 ## Failure Paths
 
-| Symptom | Cause |
-| --- | --- |
-| Device never enters the pool | Registration window closed; report lacks a valid public key; device revoked |
-| Device pooled but cannot boot | No Worker binding; or the Worker has no system disk |
-| Device reboots repeatedly | The Worker has no default disk; or the pooled device is not yet bound |
-| "No key / no signature" after enforcement | Device has not claimed its key; boot script did not obtain a nonce |
-| Boot variables withheld | Worker has no credential; backend is not nvmet; data-plane port is not ready |
-| Reboot after the menu timeout | No default disk set |
-| Data-plane connect fails | PSK not in the storage node keyring; `tlshd` version or kernel TLS support missing |
-| HTTPS handshake fails | The control-plane certificate was rotated while the device still pins the old fingerprint |
+- **Device never enters the pool** — Registration window closed; report lacks a valid public key; device revoked.
+- **Device pooled but cannot boot** — No Worker binding; or the Worker has no system disk.
+- **Device reboots repeatedly** — The Worker has no default disk; or the pooled device is not yet bound.
+- **"No key / no signature" after enforcement** — Device has not claimed its key; boot script did not obtain a nonce.
+- **Boot variables withheld** — Worker has no credential; backend is not nvmet; data-plane port is not ready.
+- **Reboot after the menu timeout** — No default disk set.
+- **Data-plane connect fails** — PSK not in the storage node keyring; `tlshd` version or kernel TLS support missing.
+- **HTTPS handshake fails** — The control-plane certificate was rotated while the device still pins the old fingerprint.
 
 ## Trust Boundary
 
@@ -156,4 +154,4 @@ Attackers on the same Layer 2, a compromised host or physical access are outside
 | Boot scripts, registration window, `/boot-vars` admission | Platform control plane |
 | System disks, credentials, menu generation | Platform control plane |
 
-Firmware build, artifacts and device provisioning are covered in the [Firmware Overview](../firmware/index.md) and [Provisioning](../firmware/provision.md).
+Firmware build, artifacts and device provisioning are covered in [Build and Artifacts](../firmware/build-deploy.md) and [Provisioning](../firmware/build-deploy.md); the full semantics of the device key, signature format and TOFU are in [Device Identity and Trust](../firmware/index.md); NVMe/TCP and NBCT configuration is in [NVMe-oF Boot](../firmware/index.md).

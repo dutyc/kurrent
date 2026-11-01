@@ -24,7 +24,7 @@ Deploy a control plane and join storage nodes in minutes — see the deployment 
 
 ## Delivery Flow
 
-A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04 and Fedora 44; the verification set does not limit which distributions can boot.
+A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0; the verification set does not limit which distributions can boot.
 
 ## Firmware Repo
 

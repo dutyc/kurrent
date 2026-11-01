@@ -2,7 +2,7 @@
 
 Kurrent splits the compute side into three independent entities. Each has its own identifier and authority, and a bootable system is formed by binding them together. Machines, identities and disks can therefore be replaced separately.
 
-| Entity | Identifier | Authority | Question answered |
+| Entity | Identifier | Authority | Determines |
 | --- | --- | --- | --- |
 | Device | MAC | Device ledger `state/devices.yml` | Which physical machine |
 | Worker | `worker_id` (hostname) | Worker ledger `state/workers.yml` | Under which identity |
@@ -138,4 +138,4 @@ Recreating a Worker with the same name does not inherit old credentials: the cre
 - How these entities form one boot: [Boot Chain](./boot-chain.md)
 - Disks, credentials and the data plane: [Storage and Data Plane](./storage.md)
 - Device and human identity: [Identity and Access](./identity.md)
-- Practical operations: [Usage](../guide/usage.md)
+- Delivery steps: [First Delivery](../guide/usage.md)

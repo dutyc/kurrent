@@ -65,16 +65,14 @@ Remaining:
 
 ## Current boundaries
 
-| Item | Status |
-| --- | --- |
-| Boot architecture | x86_64 UEFI |
-| Network | IPv4 |
-| Data plane | NVMe/TCP primary; the iSCSI compatibility backend is outside the main boot path |
-| Control plane | Single host, file state |
-| High availability | Not provided |
-| Post-boot orchestration | Out of scope; can be provided by a layer above |
-| Firmware signing | Mainline unsigned; Secure Boot artifacts not in mainline |
-| Verified distributions | Debian 12/13, Ubuntu 24.04/26.04, Fedora 44 |
+- **Boot architecture** — x86_64 UEFI.
+- **Network** — IPv4.
+- **Data plane** — NVMe/TCP primary; the iSCSI compatibility backend is outside the main boot path.
+- **Control plane** — Single host, file state.
+- **High availability** — Not provided.
+- **Post-boot orchestration** — Out of scope; can be provided by a layer above.
+- **Firmware signing** — Mainline unsigned; Secure Boot artifacts not in mainline.
+- **Verified distributions** — Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0.
 
 ## How progress is judged
 

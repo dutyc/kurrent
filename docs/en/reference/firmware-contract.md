@@ -207,8 +207,10 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 ## Related pages
 
 - [Firmware Overview](../firmware/index.md)
-- [Build and Artifacts](../firmware/build.md)
-- [Provisioning and Flashing](../firmware/provision.md)
+- [Capabilities](../firmware/index.md)
+- [Build and Artifacts](../firmware/build-deploy.md)
+- [Provisioning and Flashing](../firmware/build-deploy.md)
+- [Device Identity and Trust](../firmware/index.md)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)
 - [API Reference](./api.md)

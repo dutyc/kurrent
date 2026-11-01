@@ -1,6 +1,6 @@
 # Operations
 
-This page is for environments that are already deployed and delivering systems. It covers declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For the first deployment see the [Deployment Guide](./deployment.md); for object semantics see [Core Concepts](../concepts/entities.md).
+This page addresses environments that have completed deployment and entered system delivery. It covers declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For initial deployment, see [Deployment](./deployment.md).
 
 ## Changing Configuration
 
@@ -76,12 +76,45 @@ User certificates are issued by the users CA; revocation takes effect on the nex
 
 ### Component certificates
 
+Component channels (443 enroll, 4840 inbound, controller outbound, agent → nvmet-host over the UDS) perform application-level revocation checks on top of TLS chain validation.
+
 ```bash
-kurrent cert components                            # agent / nvmet-host certificates
-kurrent cert revoke-component <agent_id>           # write nodes CRL + delete the node's bootstrap token
+kurrent cert components
+# Write nodes CRL and delete the node's bootstrap token
+kurrent cert revoke-component <agent_id>
 ```
 
-Recovering a revoked node: issue a new bootstrap token (`kurrent token create --agent-id <id>`) and rerun `kurrent join <cp-url> --token <token> --agent-id <id>` on the node. The old certificate does not need manual deletion; the agent startup self-check re-enrolls with the new credential.
+- The control plane generates two component CRLs: `state/pki/nginx/nodes.crl` (nodes CA, for peer components) and `control.crl` (control CA, for the controller client); nginx separately uses `clients.crl` for management handshakes.
+- Components fetch these with their own client cert from `/api/cp/enroll/crl` and refresh every 60 seconds by default (`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`); controller outbound and agent → nvmet-host load `nodes.crl` on every connection and check `nextUpdate`.
+- **Fail-closed**: a missing or stale CRL refuses the connection outright — no degraded allow. `nodes.crl` / `control.crl` carry a 30-day `nextUpdate` to tolerate a long controller outage.
+- Revocation entry points: `DELETE /api/cp/pki/components/{agent_id}` (nodes domain) and `DELETE /api/cp/pki/control/{cn}` (control domain), both accepting `serial` to target a single certificate.
+- **Upgrade order**: upgrade and restart the controller first (it generates the CRLs and opens the distribution endpoint), then rebuild the component containers. Older components that do not know `/enroll/crl` keep their previous chain-only behavior and do not refuse to start.
+- Revocation takes effect at the component's next refresh after the controller writes the CRL (≤60 s), with no component restart.
+- **Startup self-check**: a revoked certificate cannot complete the `/enroll/crl` mTLS handshake, so components fetch the public read-only `GET /crl/nodes.crl` (unauthenticated, GET/HEAD only) at startup, verify its signature against the local nodes CA, and compare the client / serving serials; a hit re-enrolls with the bootstrap credential (`KURRENT_PKI_SELF_CHECK=0` disables the check).
+- **Management UI**: the WebUI **Identity & Access** page shows expiry and status across the users / nodes / control domains and can revoke user and node certificates; an abnormal node row also offers **Recover**.
+
+Recovering a revoked node:
+
+1. Controller: WebUI **Identity & Access** → **Storage nodes** → **Recover**, or
+   `kurrent token create --agent-id <id> --cp-url https://<cp-host>`. The WebUI pre-fills
+   the controller URL and shows a single-use token plus the join command after issuance
+   (plaintext visible once).
+2. Node: run the printed `kurrent join <cp-url> --token <token> --agent-id <id>`.
+3. Startup self-check: the agent finds the local client / serving serials in the nodes CRL,
+   re-enrolls with the new token, and overwrites the local certificates; join then waits
+   for the derived credential and restarts nvmet-host automatically.
+
+Verification:
+
+```bash
+# Includes component CRL distribution, public nodes CRL, control CA ledger,
+# and human-cert 403 assertions
+bash tests/deploy/probe_edge.sh
+docker logs storager-agent 2>&1 | grep 'crl:'
+docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
+```
+
+`docker logs` should show initial fetch ok (revoked counts and next_update), and the health check returns 0.
 
 ### NVMe-oF credentials
 
@@ -95,15 +128,13 @@ The nvmet backend issues the credential at disk creation; these commands are for
 
 ## Device and Worker Lifecycle
 
-| Operation | Entry point | Semantics |
-| --- | --- | --- |
-| Register a device | WebUI → Devices → open registration window | Only devices with a valid public key are admitted while the window is open |
-| Bind | Devices / Workers page | One-to-one; an already-bound device needs an explicit rebind |
-| Rebind (cold migration) | Devices page with `force` | New binding is written before the old one is cleared; system disks stay on the original Worker |
-| Unbind | Devices page | The device returns to the pool; the Worker keeps its system disks |
-| Drain a storage node | Agents page → disable | No new disks; existing disks keep serving |
-| Delete a Worker | Workers page | Unbinds devices, removes credential entries and push records; disk files handled by option |
-| Purge revoked devices | Devices page / `DELETE /devices/revoked` | Removes `revoked` entries only |
+- **Register a device** — WebUI → Devices → open registration window; only devices with a valid public key are admitted while the window is open.
+- **Bind** — Devices / Workers page; one-to-one; an already-bound device needs an explicit rebind.
+- **Rebind (cold migration)** — Devices page with `force`; new binding is written before the old one is cleared; system disks stay on the original Worker.
+- **Unbind** — Devices page; the device returns to the pool; the Worker keeps its system disks.
+- **Drain a storage node** — Agents page → disable; no new disks; existing disks keep serving.
+- **Delete a Worker** — Workers page; unbinds devices, removes credential entries and push records; disk files handled by option.
+- **Purge revoked devices** — Devices page / `DELETE /devices/revoked`; removes `revoked` entries only.
 
 Before rebinding, confirm that the target Worker's system disks already have usable credentials, and that the original device is powered off or isolated from the data plane. The control plane does not validate target credentials during a rebind and does not fence the original device; Kurrent provides no live migration or data-plane fencing, so the same system disk must not be attached to two devices at once.
 
@@ -140,15 +171,13 @@ Back up:
 
 ## Observability
 
-| Signal | Where | Purpose |
-| --- | --- | --- |
-| Control-plane health | `GET /healthz` (via 443) | Returns 503 when a startup artifact fails |
-| Declaration status | `kurrent config status` | Effective declaration, configHash, dnsmasq consistency, certificate drift, startup errors |
-| Agent health | `kurrent agents list` / WebUI Agents | Control-plane to Agent connectivity |
-| Boot-chain status | WebUI **Boot Chain** / `GET /boot-assets` | Firmware capabilities, script chain and menu completeness |
-| Operation audit | WebUI Operations / `kurrent ops list` | Registration, binding, disk and credential history |
-| Request audit | `control_plane/state/audit.jsonl` | Principal, issuer, serial, route, decision and alarms |
-| Alarm delivery | `KURRENT_CP_ALARM_WEBHOOK` | POSTs `event=alarm` events to an external endpoint |
+- **Control-plane health** — `GET /healthz` (via 443); returns 503 when a startup artifact fails.
+- **Declaration status** — `kurrent config status`; effective declaration, configHash, dnsmasq consistency, certificate drift, startup errors.
+- **Agent health** — `kurrent agents list` / WebUI Agents; control-plane to Agent connectivity.
+- **Boot-chain status** — WebUI **Boot Chain** / `GET /boot-assets`; firmware capabilities, script chain and menu completeness.
+- **Operation audit** — WebUI Operations / `kurrent ops list`; registration, binding, disk and credential history.
+- **Request audit** — `control_plane/state/audit.jsonl`; principal, issuer, serial, route, decision and alarms.
+- **Alarm delivery** — `KURRENT_CP_ALARM_WEBHOOK`; POSTs `event=alarm` events to an external endpoint.
 
 When the audit write fails the request returns 503 (fail-closed). Alarm delivery uses a background queue and stays outside the request path.
 
@@ -163,15 +192,8 @@ bash control_plane/host-baseline.sh
 - The control-plane container does not mount `docker.sock`.
 - CA private keys, `users.yml`, `sessions.yml`, `admin.conf` and `audit.jsonl` should be 600.
 - Docker-published ports bypass ufw; enforce inbound restrictions in the `DOCKER-USER` chain.
-- Isolate the PXE network as described in the [Deployment Guide](./deployment.md), with DHCP snooping, Dynamic ARP Inspection and port security enabled.
+- Isolate the PXE network as described in [Deployment](./deployment.md), with DHCP snooping, Dynamic ARP Inspection and port security enabled.
 
-## Troubleshooting Index
+## Troubleshooting
 
-| Symptom | Entry point |
-| --- | --- |
-| Control plane not ready, `init` rolled back | `docker logs kurrent-control-plane`; `kurrent config status` |
-| Agent not `ok` | [Deployment troubleshooting](./deployment.md#troubleshooting) |
-| Device not admitted or boot refused | Admission conditions in [Boot Chain](../concepts/boot-chain.md) |
-| Data-plane connect fails | [Storage and Data Plane](../concepts/storage.md); `host-prepare.sh --check` |
-| Component certificate revoked | Recovery flow in this page |
-| Credential not delivered | `kurrent workers credential show`; reconciliation period and Agent connectivity |
+See [Troubleshooting](./troubleshooting.md) for cross-component isolation, evidence collection, and recovery paths.

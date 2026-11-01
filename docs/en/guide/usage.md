@@ -1,94 +1,208 @@
-# Usage Guide
+# First Delivery
 
-> Prerequisites: the [Deployment Guide](./deployment) is complete, the controller and storage nodes report `health=ok`, and the bare-metal machines are connected to the PXE network.
+> This page turns a device already attached to the PXE network into a network-bootable system: verify the master image → admit the device → bind a Worker → create a system disk → set the default disk → cold-boot acceptance → manage credentials. It assumes [Deployment](./deployment.md) is complete and the controller and storage nodes report `health=ok`.
 
-## 1. First Boot and Enrollment
+## Delivery Path
 
-On network boot the machine runs: DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM, never leaves the machine) → `/devices/report` sends the fingerprint and public key.
+Complete the seven steps in order; their completion signals are:
 
-A device **enters the pool only while the registration window is open and the report carries a valid public key**:
+1. Verify the master image: a 4K-native GPT master exists under `diskDir` and appears in `GET /masters`.
+2. Admit the device: Devices shows `pooled` with the key claimed.
+3. Bind a Worker: the device and Worker are bound one-to-one.
+4. Create a system disk: the master clone is complete and `os_tag` exists; nvmet also issues the credential.
+5. Set the default disk: the Worker's default boot disk points at the target system.
+6. Cold-boot acceptance: GRUB, kernel and initramfs reach rootfs and a login prompt.
+7. Manage credentials: rotation/revocation works and push status is healthy.
 
-1. WebUI → **Devices** → open the registration window (TTL is bounded by the declared `spec.registration.windowMaxTtlMinutes`, default 60 minutes; optional admission quota `max_devices`).
-2. The device appears as `pooled`; an already-pooled device reporting with its public key during the window completes key claim.
-3. Once every device has claimed its key, enable **signature enforcement**: `/boot-vars` then serves only bound devices that pass the challenge-response verification.
+## WebUI and API
 
-> After the window closes, reports only refresh the fingerprint; there is no enrollment channel outside the window.
+Every step works through the WebUI or the control-plane REST API. **The CLI currently exposes only `workers list/get` and credential operations**; worker creation, device binding, disk creation and default-disk selection use the API or WebUI.
 
-## 2. Bind a Worker
+On the controller, in the repository root, prepare the API helper (the admin certificate is the management credential bootstrapped by `kurrent init`):
 
-Devices and Workers are strictly **one-to-one**:
+```bash
+BASE_URL=https://192.168.1.10/api/cp
+CERT=control_plane/state/pki/users/admin/client.crt
+KEY=control_plane/state/pki/users/admin/client.key
+CA=control_plane/state/certs/server.crt
+api() {
+  curl -sS --cert "$CERT" --key "$KEY" --cacert "$CA" \
+    "$BASE_URL$1" "${@:2}"
+}
+```
+
+> This assumes `spec.serverCert.san` contains the controller management address; otherwise add it as described in [Deployment](./deployment.md) and re-run `kurrent init`. For temporary troubleshooting you can drop `--cacert` and add `-k`; do not make that a permanent configuration.
+
+## 1. Verify the Master Image
+
+Master images are not uploaded through the API: place the disk file under the storage node's `diskDir` with `_tpl_` in the filename (for example `_tpl_ubuntu2404.img`); it appears in the master list after the background scan. It must use a 4K-native GPT. See [System Disk Customization](./system-disk.md) for construction.
+
+```bash
+api /masters | jq \
+  '.agents[] | {agent, storager_ip, masters: [.masters[] | {name, gpt}]}'
+```
+
+Confirm each item:
+
+- `gpt` is `4k`. A 512-byte-sector GPT exported by nvmet as 4096 B looks partitionless to the initiator and fails with `0x7f22208e`.
+- The storage node is `enabled=true` with a ready data plane; placement only considers nodes that hold the master.
+- The master must not contain machine identity, target/NQN, authentication keys or control-plane addresses.
+
+`os` / `os_version` are display and grouping metadata written at disk creation. A Worker can hold at most one disk per `(os, os_version)` pair.
+
+## 2. Admit the Device
+
+If the device was admitted during deployment acceptance, skip to the next step. For additional devices, open the registration window before the device network-boots. The window must be open before `/devices/report`.
+
+```bash
+# Open the window: 30 minutes, at most 20 new devices
+api /settings/registration-window -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"ttl_minutes": 30, "max_devices": 20}'
+
+# Inspect the window and admission count
+api /settings/registration-window | jq
+```
+
+If a window is already open, `POST` returns 409; inspect the current state, and close it before reopening if needed.
+
+On network boot the device runs: DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM) → `/devices/report` sends the fingerprint and public key.
+
+```bash
+# Confirm the device is pooled and has claimed its key
+api /devices | jq
+```
+
+After every device has claimed its key, close the window and enable signature enforcement:
+
+```bash
+api /settings/registration-window -X DELETE
+
+# Enable only after every device has claimed its key
+api /settings/enforcement -X PUT \
+  -H 'Content-Type: application/json' -d '{"enabled": true}'
+```
+
+> After the window closes, reports only refresh the fingerprint and never admit the device; there is no enrollment channel outside the window. With enforcement on, bound devices without a key, without a signature, or with an invalid signature are also refused. A revoked device does not recover merely by reporting again.
+
+## 3. Bind a Worker
+
+Devices and Workers are strictly **one-to-one**. The WebUI offers two paths:
 
 - **Devices page**: select a device → bind it to an existing Worker. An already-bound device is rejected by default; `force` performs an atomic rebind (new binding written before the old one is cleared).
 - **Workers page**: create a Worker with a MAC to bind in one step; leave the MAC empty to get an idle Worker and bind a device later.
 
-The binding authority is the device ledger's `bound_worker_id`. The dnsmasq hostname is only a derived projection of the binding operation; it may lag and **does not participate in boot identity resolution**.
+API equivalents:
 
-Unbinding returns the device to the pool; the Worker's system disks are kept. See [Devices, Workers and System Disks](../concepts/entities.md) for the full entity semantics and rebinding rules.
+```bash
+# Create a Worker and bind the device in one call (the device must already be pooled)
+api /workers -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "worker_id": "worker-01",
+    "hostname": "worker-01",
+    "mac": "00:0c:29:b9:8b:2d"
+  }'
 
-## 3. Create a System Disk
+# Or bind a pooled device to an existing Worker
+api '/devices/00:0c:29:b9:8b:2d/bind?worker_id=worker-01&force=false' \
+  -X POST
+```
 
-First make sure the storage node holds a usable **master image**: put the disk file under the node's `diskDir` with `_tpl_` in the filename (for example `_tpl_ubuntu2604.img`); it shows up in the master list after the background scan. Master images must use 4K-native GPT.
+The binding authority is the device ledger's `bound_worker_id`. The dnsmasq hostname is only a derived projection of the binding operation; it may lag and **does not participate in boot identity resolution**. Unbinding returns the device to the pool and keeps the Worker's system disks. Use `force=true` to rebind, and confirm the original device is powered off or isolated from the data plane first.
+
+## 4. Create a System Disk
 
 On the **Workers** page, select a Worker → create a system disk:
 
-- Pick the master image and `os` / `os_version` (display and grouping metadata for the disk). A Worker can hold at most one disk per `(os, os_version)` pair.
+- Pick the master image and `os` / `os_version`; a Worker can hold at most one disk per `(os, os_version)` pair.
 - Placement is decided by the control plane: candidates must hold that master image locally, be healthy and not drained; the node with the fewest existing system disks wins; the preview allows pinning rows by hand.
 - Batch mode: select several Workers → batch-create system disks → review the plan (`dry_run`, same logic as execution) → confirm.
 
-The control plane generates a 12-hex `os_tag` and the full disk NQN for each disk. On nvmet backends a **DHHC-1 authentication key is issued automatically at disk creation** and pushed to the Agent holding the disk.
+API for a single disk:
 
-## 4. Set the Default Boot Disk
-
-Worker detail → system disks → **Set as default**. The default disk determines:
-
-- which menu entry the iPXE menu selects on timeout;
-- which disk's connection data `/boot-vars` projects (the full `disk-nqn`, `storager-ip`, TLS PSK and port).
-
-Without a default disk, the control plane returns `menu-default=reboot` (a 1 ms reboot loop) so the machine never silently boots the wrong system. A Worker can carry multiple system disks; to switch, set another disk as default in the Worker detail page, effective on the next boot.
-
-When a Worker has only one system disk, it is set as the default automatically after creation. If the default disk is deleted, a remaining disk is promoted automatically.
-
-See [Storage and Data Plane](../concepts/storage.md) for master images, system disks and data-plane semantics.
-
-## 5. Boot Chain
-
-```text
-DHCP → TFTP (snponly.efi + boot.ipxe pointer) → iPXE
-  → HTTPS boot.ipxe.cfg        variables and device identity chain entry
-  → /devices/report            device info and public key
-  → /devices/challenge         one-time nonce
-  → sign(nonce‖mac)            signed with the device key
-  → /boot-vars                 after verification: disk-nqn / storager-ip / hostnqn / TLS PSK and port
-  → menu.ipxe                  default disk selected on timeout
-  → sanboot nvme://<storager>:4421/<disk-nqn>   TLS 1.3 + DH-HMAC-CHAP
-  → GRUB → operating system
+```bash
+api /workers/worker-01/luns/disk -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "master",
+    "os": "ubuntu",
+    "os_version": "24.04",
+    "name": "_tpl_ubuntu2404.img"
+  }'
 ```
 
-TFTP carries only the first-stage firmware `snponly.efi` and the `boot.ipxe` pointer; everything from `boot.ipxe.cfg` onward uses HTTPS + TOFU.
+- Omitting `disk_agent` lets placement choose a node; passing it pins the disk to a storage node.
+- The response carries the 12-hex `os_tag` and the full disk NQN. On nvmet backends the control plane **issues the DHHC-1 authentication key at disk creation** and pushes it to the Agent holding the disk.
+- The Worker's first system disk is set as the default automatically; the second and later disks do not rewrite it.
 
-The data plane has a single port, `4421`, shared by the firmware and kernel stages. A missing credential, missing PSK or unready port **refuses the boot** — there is no plaintext fallback.
+For batch creation use `POST /workers/luns/disk/batch`; `dry_run=true` returns the plan only. See the [API Reference](../reference/api.md) for fields and response shapes.
 
-## 6. Credentials and Encryption Posture
+```bash
+# Inspect the Worker's disks and os_tag
+api /workers/worker-01 | jq \
+  '.disks[] | {os, os_version, os_tag, agent}'
+```
+
+## 5. Set the Default Boot Disk
+
+A single-disk Worker already has a default disk from creation; skip this step. With multiple disks, select the one to boot:
+
+```bash
+api /workers/worker-01/default-disk -X PUT \
+  -H 'Content-Type: application/json' \
+  -d '{"disk": "<os_tag>"}'
+```
+
+WebUI path: Worker detail → system disks → **Set as default**. The default disk determines:
+
+- which entry the iPXE menu selects on timeout;
+- which disk's connection data `/boot-vars` projects (the full `disk-nqn`, `storager-ip`, TLS PSK and port).
+
+Without a default disk, the control plane returns `menu-default=reboot` (a 1 ms reboot loop) so the machine never silently boots the wrong system. If the default disk is deleted, a remaining disk is promoted automatically.
+
+## 6. First System Boot and Acceptance
+
+Reboot the device with network boot enabled. Expected chain:
+
+```text
+DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 connection to 4421
+     → GRUB → kernel → initramfs (consumes NBFT/NBCT) → rootfs → login prompt
+```
+
+**Delivery is complete only when a cold boot reaches the login prompt** — not when the device is pooled, not when GRUB appears, and not when the kernel starts. Reporting completion at an intermediate stage leaves data-plane or initramfs problems for the next power-on.
+
+First checks on failure:
+
+| Symptom | Check |
+| --- | --- |
+| Empty menu or reboot loop | Is the device bound to a Worker? Does the Worker have a system disk and a default disk? Does `/boot-vars` project complete data? |
+| Menu appears but the data plane does not connect | Client-to-storage routing and firewall for 4421; `tlshd` status; credential push status |
+| Authentication failure | `kurrent workers credential show <worker>`; was the authentication key pushed to the Agent holding the disk? |
+| Boot error `0x7f22208e` | Is the master/system disk GPT 4K-native? Is `gpt` in `GET /masters` equal to `4k`? |
+
+For other symptoms see [Troubleshooting](./troubleshooting.md).
+
+## 7. Manage Credentials
 
 Credentials follow the Worker and take effect immediately on rotation or revocation:
 
 ```bash
-kurrent workers credential show worker-01             # key hash prefix and per-Agent push status
-kurrent workers credential set worker-01 --generate   # rotate in place (never prints plaintext)
-kurrent workers credential revoke worker-01           # revoke: the next boot is refused
+kurrent workers credential show worker-01
+kurrent workers credential set worker-01 --generate
+kurrent workers credential revoke worker-01
 ```
 
-The TLS PSK is derived from the authentication key, so rotating or revoking the key rotates or revokes the PSK atomically. Failed pushes are retried by the control plane's periodic reconciliation, and the status is visible on the Worker detail page under "NVMe-oF credentials".
+`show` reports the key hash prefix and per-Agent push status; `set --generate` rotates in place without printing plaintext; `revoke` makes the next boot fail.
 
-See [Storage and Data Plane](../concepts/storage.md) and [Identity and Access](../concepts/identity.md) for credential issuance, rotation and revocation semantics.
+The TLS PSK is derived from the authentication key, so rotating or revoking the key rotates or revokes the PSK atomically. Failed pushes are retried by the control plane's periodic reconciliation, and the status is visible on the Worker detail page under "NVMe-oF credentials". The management plane also exposes equivalent REST endpoints for automation; see the [API Reference](../reference/api.md). The CLI is the preferred interactive path.
 
 Plaintext keys exist only where the chain requires them (the 0600 state files on the control plane and Agent, the storage node's configfs and the kernel `.nvme` keyring); no application-layer encryption is added — disk and host access boundaries are the deployment's responsibility.
 
-## 7. Day-to-Day Operations
+## Related Pages
 
-| Operation | Location | Semantics |
-| --- | --- | --- |
-| Delete a system disk | Worker detail → system disks | Keep or delete the backing file; if it was the default disk, a remaining disk is promoted, otherwise `default_disk` is cleared |
-| Delete a Worker | Workers page | Unbinds devices, removes the Worker's credential entries and push ledger; disk files are handled per option |
-| Drain a node | Agents page → disable | `enabled=false`: no new disks, existing disks keep serving |
-| Audit | `kurrent ops list` | Device registration/claim, binding, disk creation, credential issue/push/revoke, and more |
+- [System Disk Customization](./system-disk.md)
+- [Operations](./operations.md)
+- [Troubleshooting](./troubleshooting.md)
+- [Boot Chain](../concepts/boot-chain.md)
+- [API Reference](../reference/api.md)

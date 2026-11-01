@@ -16,17 +16,15 @@ Kurrent 由控制面、存储节点与设备三部分组成。控制面经 HTTPS
 
 ## 组件
 
-| 组件 | 运行位置 | 职责 |
-| --- | --- | --- |
-| 控制面服务 | 控制面容器，unix socket | 设备与 Worker 台账、绑定、存储调度、引导变量、审计、配置状态 |
-| nginx | 控制面容器，`:443` | 唯一对外入口：WebUI、`/api/cp/`、引导链只读端点、iPXE 资产与菜单 |
-| dnsmasq | 控制面宿主，host 网络 | DHCP / TFTP；`dnsmasq.conf` 由声明生成 |
-| WebUI | nginx 静态资源 | REST API 的客户端，使用会话 Cookie 或 mTLS |
-| CLI | 运维终端 | 声明生成、校验、收敛、凭据与台账操作 |
-| Agent | 存储节点，`:4840` mTLS | 盘文件生命周期、母盘扫描、后端指令 |
-| nvmet-host | 存储节点，共享卷 UDS | configfs 操作、host 矩阵、DHHC-1、TLS PSK 注入 |
-| 宿主内核 nvmet | 存储节点宿主 | NVMe/TCP target，数据面端口 `4421` |
-| 设备固件 | 设备 | iPXE 网络引导、设备密钥、TOFU、NVMe/TCP 与 NBCT |
+- **控制面服务**：控制面容器，unix socket；设备与 Worker 台账、绑定、存储调度、引导变量、审计、配置状态。
+- **nginx**：控制面容器，`:443`；唯一对外入口：WebUI、`/api/cp/`、引导链只读端点、iPXE 资产与菜单。
+- **dnsmasq**：控制面宿主，host 网络；DHCP / TFTP；`dnsmasq.conf` 由声明生成。
+- **WebUI**：nginx 静态资源；REST API 的客户端，使用会话 Cookie 或 mTLS。
+- **CLI**：运维终端；声明生成、校验、收敛、凭据与台账操作。
+- **Agent**：存储节点，`:4840` mTLS；盘文件生命周期、母盘扫描、后端指令。
+- **nvmet-host**：存储节点，共享卷 UDS；configfs 操作、host 矩阵、DHHC-1、TLS PSK 注入。
+- **宿主内核 nvmet**：存储节点宿主；NVMe/TCP target，数据面端口 `4421`。
+- **设备固件**：设备；iPXE 网络引导、设备密钥、TOFU、NVMe/TCP 与 NBCT。
 
 固件由独立仓库构建，见[固件概述](../firmware/index.md)。
 
@@ -98,16 +96,14 @@ Kurrent 由控制面、存储节点与设备三部分组成。控制面经 HTTPS
 
 ## 状态与派生物
 
-| 内容 | 位置 | 性质 |
-| --- | --- | --- |
-| 控制面声明 | `control_plane/kurrent.yaml` | 权威输入 |
-| 节点声明 | `storager/kurrent.yaml` | 权威输入 |
-| 设备、Worker、盘、凭据、会话、token | `control_plane/state/*.yml` | 运行时台账 |
-| 审计 | `control_plane/state/audit.jsonl` | 追加日志 |
-| PKI | `control_plane/state/pki/` | 信任根与组件证书 |
-| TOFU 服务器证书 | `control_plane/state/certs/` | 引导链证书与指纹 |
-| dnsmasq 配置 | `dnsmasq/dnsmasq.conf` | 由声明派生，不手工编辑 |
-| 引导脚本 | `tftp/` | 菜单与脚本；固件二进制来自固件仓库 |
+- **控制面声明**：`control_plane/kurrent.yaml`；权威输入。
+- **节点声明**：`storager/kurrent.yaml`；权威输入。
+- **设备、Worker、盘、凭据、会话、token**：`control_plane/state/*.yml`；运行时台账。
+- **审计**：`control_plane/state/audit.jsonl`；追加日志。
+- **PKI**：`control_plane/state/pki/`；信任根与组件证书。
+- **TOFU 服务器证书**：`control_plane/state/certs/`；引导链证书与指纹。
+- **dnsmasq 配置**：`dnsmasq/dnsmasq.conf`；由声明派生，不手工编辑。
+- **引导脚本**：`tftp/`；菜单与脚本；固件二进制来自固件仓库。
 
 当前没有数据库。控制面为单节点、纯文件存储；这意味着状态备份、权限与单机故障边界都由部署方承担。
 

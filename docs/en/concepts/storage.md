@@ -62,7 +62,7 @@ device firmware / kernel ── NVMe/TCP :4421 (TLS 1.3) ──► nvmet target
 
 - **One port**. The firmware and kernel segments share `4421`; there is no second plaintext port to fall back to.
 - **Encrypted by default**. TLS 1.3 is performed by firmware for the first segment; the kernel and initramfs reconnect on the same port with `--tls`.
-- **Authentication and encryption are separate**. DH-HMAC-CHAP answers "who may connect"; TLS 1.3 protects content.
+- **Authentication and encryption are separate**. DH-HMAC-CHAP controls which initiators may connect; TLS 1.3 protects content.
 - **Host NQN**. Each Worker has its own initiator Host NQN, registered in `allowed_hosts` on the target; strict-mode authentication does not accept unknown hosts.
 - **Credentials follow the Worker**. The DHHC-1 key is stored per Worker and shared by its disks; rotation or revocation applies to all of them.
 
@@ -134,7 +134,7 @@ A storage node creates the `4421` listener at startup and reports its capability
 - a kernel without NVMe/TCP TLS support, `tlshd < 1.5.0`, or a stopped service makes nvmet-host report the port as unready;
 - data-plane failure never falls back to plaintext or silently uses another port.
 
-Host prerequisites and diagnostics are in the [Deployment Guide](../guide/deployment.md).
+Host prerequisites and diagnostics are in [Deployment](../guide/deployment.md).
 
 ## Common Failures
 
@@ -151,5 +151,5 @@ Host prerequisites and diagnostics are in the [Deployment Guide](../guide/deploy
 
 - Objects and placement: [Devices, Workers and System Disks](./entities.md)
 - Credential projection at boot: [Boot Chain](./boot-chain.md)
-- Node deployment and host prerequisites: [Deployment Guide](../guide/deployment.md)
+- Node deployment and host prerequisites: [Deployment](../guide/deployment.md)
 - Credential operations: [Operations](../guide/operations.md)

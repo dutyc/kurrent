@@ -9,52 +9,53 @@ const base = process.env.VITEPRESS_BASE || '/'
 
 const zhSidebar = [
   {
-    text: '开始',
+    text: '入门',
+    collapsed: true,
     items: [
       { text: '项目概述', link: '/guide/overview' },
-      { text: '快速开始', link: '/guide/quickstart' },
-      { text: '部署指南', link: '/guide/deployment' },
-      { text: '使用流程', link: '/guide/usage' },
-      { text: '日常运维', link: '/guide/operations' },
+      { text: '部署', link: '/guide/deployment' },
+      { text: '首次交付', link: '/guide/usage' },
     ],
   },
   {
-    text: '核心概念',
+    text: '概念',
+    collapsed: true,
     items: [
+      { text: '架构总览', link: '/architecture/' },
       { text: '设备、Worker 与系统盘', link: '/concepts/entities' },
       { text: '引导链', link: '/concepts/boot-chain' },
+      { text: '固件概述', link: '/firmware/' },
       { text: '存储与数据面', link: '/concepts/storage' },
       { text: '身份与访问', link: '/concepts/identity' },
+      { text: '安全模型', link: '/architecture/security' },
       { text: '声明式配置', link: '/concepts/configuration' },
     ],
   },
   {
-    text: '架构',
+    text: '任务',
+    collapsed: true,
     items: [
-      { text: '架构总览', link: '/architecture/' },
-      { text: '安全模型', link: '/architecture/security' },
-    ],
-  },
-  {
-    text: '固件',
-    items: [
-      { text: '固件概述', link: '/firmware/' },
-      { text: '构建与产物', link: '/firmware/build' },
-      { text: '预置与刷写', link: '/firmware/provision' },
+      { text: '系统盘定制', link: '/guide/system-disk' },
+      { text: '固件构建与部署', link: '/firmware/build-deploy' },
+      { text: '日常运维', link: '/guide/operations' },
+      { text: '故障排查', link: '/guide/troubleshooting' },
     ],
   },
   {
     text: '参考',
+    collapsed: true,
     items: [
       { text: '配置参考', link: '/reference/configuration' },
       { text: 'CLI 参考', link: '/reference/cli' },
       { text: 'API 参考', link: '/reference/api' },
       { text: '固件契约', link: '/reference/firmware-contract' },
+      { text: '发行版矩阵', link: '/reference/distributions' },
       { text: '术语表', link: '/reference/glossary' },
     ],
   },
   {
     text: '项目',
+    collapsed: true,
     items: [
       { text: '路线图', link: '/about/roadmap' },
       { text: '参与贡献', link: '/about/contributing' },
@@ -65,51 +66,52 @@ const zhSidebar = [
 const enSidebar = [
   {
     text: 'Getting Started',
+    collapsed: true,
     items: [
       { text: 'Overview', link: '/en/guide/overview' },
-      { text: 'Quick Start', link: '/en/guide/quickstart' },
       { text: 'Deployment', link: '/en/guide/deployment' },
-      { text: 'Usage', link: '/en/guide/usage' },
-      { text: 'Operations', link: '/en/guide/operations' },
+      { text: 'First Delivery', link: '/en/guide/usage' },
     ],
   },
   {
     text: 'Concepts',
+    collapsed: true,
     items: [
+      { text: 'Architecture', link: '/en/architecture/' },
       { text: 'Devices, Workers and Disks', link: '/en/concepts/entities' },
       { text: 'Boot Chain', link: '/en/concepts/boot-chain' },
+      { text: 'Firmware', link: '/en/firmware/' },
       { text: 'Storage and Data Plane', link: '/en/concepts/storage' },
       { text: 'Identity and Access', link: '/en/concepts/identity' },
+      { text: 'Security Model', link: '/en/architecture/security' },
       { text: 'Declarative Configuration', link: '/en/concepts/configuration' },
     ],
   },
   {
-    text: 'Architecture',
+    text: 'Tasks',
+    collapsed: true,
     items: [
-      { text: 'Overview', link: '/en/architecture/' },
-      { text: 'Security Model', link: '/en/architecture/security' },
-    ],
-  },
-  {
-    text: 'Firmware',
-    items: [
-      { text: 'Overview', link: '/en/firmware/' },
-      { text: 'Build and Artifacts', link: '/en/firmware/build' },
-      { text: 'Provisioning', link: '/en/firmware/provision' },
+      { text: 'System Disk Customization', link: '/en/guide/system-disk' },
+      { text: 'Firmware Build and Deployment', link: '/en/firmware/build-deploy' },
+      { text: 'Operations', link: '/en/guide/operations' },
+      { text: 'Troubleshooting', link: '/en/guide/troubleshooting' },
     ],
   },
   {
     text: 'Reference',
+    collapsed: true,
     items: [
       { text: 'Configuration', link: '/en/reference/configuration' },
       { text: 'CLI', link: '/en/reference/cli' },
       { text: 'API', link: '/en/reference/api' },
       { text: 'Firmware Contract', link: '/en/reference/firmware-contract' },
+      { text: 'Distribution Matrix', link: '/en/reference/distributions' },
       { text: 'Glossary', link: '/en/reference/glossary' },
     ],
   },
   {
     text: 'Project',
+    collapsed: true,
     items: [
       { text: 'Roadmap', link: '/en/about/roadmap' },
       { text: 'Contributing', link: '/en/about/contributing' },

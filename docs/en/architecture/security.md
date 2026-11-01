@@ -105,15 +105,13 @@ Kurrent does not add another application-layer encryption layer. Deployments own
 
 ## Not Solved Today
 
-| Category | Note |
-| --- | --- |
-| First-hop replacement and attacks on the same Layer 2 segment | Depend on PXE network isolation and Layer-2 controls |
-| Reading the device key after boot | Unsigned firmware; no Secure Boot/TPM measurement |
-| Control-plane or storage-host root | Treated as loss of the corresponding boundary |
-| Physical access and NVRAM reset | Requires re-registration |
-| Availability attacks | DHCP pool exhaustion, endpoint rate limits and resource exhaustion have no complete DoS design |
-| Control-plane high availability | Single node with file state; host failure requires backup recovery |
-| Encryption of keys at rest | Deployment responsibility |
+- **First-hop replacement and attacks on the same Layer 2 segment** — Depend on PXE network isolation and Layer-2 controls.
+- **Reading the device key after boot** — Unsigned firmware; no Secure Boot/TPM measurement.
+- **Control-plane or storage-host root** — Treated as loss of the corresponding boundary.
+- **Physical access and NVRAM reset** — Requires re-registration.
+- **Availability attacks** — DHCP pool exhaustion, endpoint rate limits and resource exhaustion have no complete DoS design.
+- **Control-plane high availability** — Single node with file state; host failure requires backup recovery.
+- **Encryption of keys at rest** — Deployment responsibility.
 
 ## Optional Hardening Directions
 
@@ -141,7 +139,8 @@ These directions redesign trust roots and provisioning. They must not be describ
 ## Related Pages
 
 - Admission decisions at boot: [Boot Chain](../concepts/boot-chain.md)
+- Firmware trust boundary and residual risk: [Device Identity and Trust](../firmware/index.md)
 - Identity types and lifecycle: [Identity and Access](../concepts/identity.md)
 - Credentials and the data plane: [Storage and Data Plane](../concepts/storage.md)
-- Deployment prerequisites and baseline: [Deployment Guide](../guide/deployment.md)
+- Deployment prerequisites and baseline: [Deployment](../guide/deployment.md)
 - Components and ports: [Architecture](./index.md)
