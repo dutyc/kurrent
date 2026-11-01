@@ -23,53 +23,71 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const configUsageText = `用法: kurrent config print init-defaults|node-defaults
-      kurrent config validate [--node] [--config PATH] [--dir REPO]
-      kurrent config show     [--node] [--config PATH] [--dir REPO]
-      kurrent config status
-
-  print     输出声明模板（重定向为 control_plane/kurrent.yaml 或
-            storager/kurrent.yaml 后编辑）
-  validate  在组件镜像内按运行时 schema 全量校验（默认控制面声明；
-            --node 或配置 kind=NodeConfiguration 时校验节点声明）
-  show      输出生效声明（默认值已注入）
-  status    读取运行态：已加载声明、configHash、dnsmasq.conf 与服务器证书漂移`
+var (
+	configPrintSpec   = cmdSpec{usage: configPrintUsage, minPos: 1, maxPos: 1, posNames: []string{"template"}}
+	configInspectSpec = cmdSpec{
+		usage: configInspectUsage,
+		flags: []flagSpec{
+			{name: "node", kind: flagBool},
+			{name: "config", kind: flagString},
+			{name: "dir", kind: flagString},
+		},
+		maxPos: 0,
+	}
+	configStatusSpec = cmdSpec{usage: configStatusUsage, maxPos: 0}
+)
 
 func cmdConfig(args []string) {
-	if len(args) == 0 || args[0] == "help" || args[0] == "-h" {
-		fmt.Print(configUsageText + "\n")
+	if groupHelp("config", args, configGroupUsage) {
 		return
 	}
 	switch args[0] {
 	case "print":
-		if len(args) < 2 {
-			fatal("用法: kurrent config print init-defaults|node-defaults")
-		}
-		switch args[1] {
-		case "init-defaults":
-			fmt.Print(cpDefaultsTemplate)
-		case "node-defaults":
-			fmt.Print(nodeDefaultsTemplate)
-		default:
-			fatal("未知模板: %s（支持 init-defaults|node-defaults）", args[1])
-		}
+		configPrint(args[1:])
 	case "validate", "show":
-		p := parseArgs(args[1:])
-		if len(p.pos) > 0 {
-			fatal("多余位置参数: %s（%s）", strings.Join(p.pos, " "), configUsageText)
-		}
-		if err := configInspect(args[0], p); err != nil {
-			fatal("%v", err)
-		}
+		configInspectCmd(args[0], args[1:])
 	case "status":
-		p := parseArgs(args[1:])
-		if len(p.pos) > 0 {
-			fatal("多余位置参数: %s（%s）", strings.Join(p.pos, " "), configUsageText)
-		}
-		printPrettyJSON(api("GET", "/config", nil))
+		configStatus(args[1:])
 	default:
-		fatal("未知 config 子命令: %s\n%s", args[0], configUsageText)
+		usageError(configGroupUsage, fmt.Errorf("unknown config subcommand: %s", args[0]))
 	}
+}
+
+func configPrint(args []string) {
+	p, help := mustParse(args, configPrintSpec)
+	if help {
+		return
+	}
+	switch p.pos[0] {
+	case "init-defaults":
+		fmt.Print(cpDefaultsTemplate)
+	case "node-defaults":
+		fmt.Print(nodeDefaultsTemplate)
+	default:
+		usageError(configPrintUsage, fmt.Errorf("unknown template %q: supported values are init-defaults and node-defaults", p.pos[0]))
+	}
+}
+
+func configInspectCmd(cmd string, args []string) {
+	p, help := mustParse(args, configInspectSpec)
+	if help {
+		return
+	}
+	for _, flag := range []string{"config", "dir"} {
+		if p.has(flag) && strings.TrimSpace(p.opt(flag, "")) == "" {
+			usageError(configInspectUsage, fmt.Errorf("--%s must not be empty", flag))
+		}
+	}
+	if err := configInspect(cmd, p); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func configStatus(args []string) {
+	if _, help := mustParse(args, configStatusSpec); help {
+		return
+	}
+	printPrettyJSON(api("GET", "/config", nil))
 }
 
 func printPrettyJSON(data []byte) {
@@ -90,13 +108,13 @@ func configInspect(cmd string, p parsedArgs) error {
 	if err != nil {
 		return err
 	}
-	configFile, err := resolveConfigFile(root, p.opt("config", ""), p.has("node"))
+	configFile, err := resolveConfigFile(root, p.opt("config", ""), p.bool("node"))
 	if err != nil {
 		return err
 	}
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("读取 %s: %w", configFile, err)
+		return fmt.Errorf("read %s: %w", configFile, err)
 	}
 	kind, err := configKind(data)
 	if err != nil {
@@ -118,17 +136,17 @@ func configInspect(cmd string, p parsedArgs) error {
 		image = "storager-agent"
 		label = "storager/kurrent.yaml"
 	default:
-		return fmt.Errorf("%s: kind = %q（支持 ControlPlaneConfiguration|NodeConfiguration）",
+		return fmt.Errorf("%s: kind = %q (expected ControlPlaneConfiguration|NodeConfiguration)",
 			configFile, kind)
 	}
 
-	fmt.Fprintf(os.Stderr, "==> kurrent config %s: building %s validation image\n", cmd, image)
+	fmt.Fprintf(os.Stderr, "==> kurrent config %s: building the %s validation image\n", cmd, image)
 	if err := composeRunStderr(composeDir, "build", image); err != nil {
 		return err
 	}
 	out, err := runConfigTool(image, cmd, data)
 	if err != nil {
-		return fmt.Errorf("%s 校验失败（%s）:\n%s", configFile, label, err)
+		return fmt.Errorf("%s validation failed (%s):\n%s", configFile, label, err)
 	}
 	if cmd == "show" {
 		fmt.Print(out)
@@ -145,16 +163,16 @@ func resolveRepoRoot(explicit string) (string, error) {
 	if start == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("获取当前目录: %w", err)
+			return "", fmt.Errorf("get current directory: %w", err)
 		}
 		start = cwd
 	}
 	abs, err := filepath.Abs(start)
 	if err != nil {
-		return "", fmt.Errorf("解析 --dir: %w", err)
+		return "", fmt.Errorf("resolve --dir: %w", err)
 	}
 	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("--dir 不是目录: %s", abs)
+		return "", fmt.Errorf("--dir is not a directory: %s", abs)
 	}
 	base := filepath.Base(abs)
 	if base == "control_plane" || base == "storager" {
@@ -168,7 +186,7 @@ func resolveRepoRoot(explicit string) (string, error) {
 			break
 		}
 	}
-	return "", fmt.Errorf("未找到仓库根（需同时存在 control_plane/ 与 storager/；请在仓库内运行或 --dir 指定）")
+	return "", fmt.Errorf("repository root not found (control_plane/ and storager/ must both exist; run inside the repository or pass --dir)")
 }
 
 func isDir(path string) bool {
@@ -183,7 +201,7 @@ func resolveConfigFile(root, explicit string, node bool) (string, error) {
 		if !filepath.IsAbs(explicit) {
 			abs, err := filepath.Abs(explicit)
 			if err != nil {
-				return "", fmt.Errorf("解析 --config: %w", err)
+				return "", fmt.Errorf("resolve --config: %w", err)
 			}
 			return abs, nil
 		}
@@ -198,7 +216,7 @@ func resolveConfigFile(root, explicit string, node bool) (string, error) {
 		template = "kurrent config print init-defaults > control_plane/kurrent.yaml"
 	}
 	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("声明文件不存在: %s\n先生成模板并编辑：%s", path, template)
+		return "", fmt.Errorf("declaration file does not exist: %s\nGenerate a template first and edit it: %s", path, template)
 	}
 	return path, nil
 }
@@ -207,11 +225,11 @@ func resolveConfigFile(root, explicit string, node bool) (string, error) {
 func configKind(data []byte) (string, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", fmt.Errorf("解析 YAML: %w", err)
+		return "", fmt.Errorf("parse YAML: %w", err)
 	}
 	kind := nodeValue(&root, "kind")
 	if kind == "" {
-		return "", fmt.Errorf("缺少 kind（ControlPlaneConfiguration|NodeConfiguration）")
+		return "", fmt.Errorf("missing kind (ControlPlaneConfiguration|NodeConfiguration)")
 	}
 	return kind, nil
 }
@@ -251,25 +269,28 @@ func runConfigTool(image, cmd string, configData []byte) (string, error) {
 }
 
 // cpDefaultsTemplate 控制面声明模板（与 control_plane/kurrent.yaml.example 同源）。
-const cpDefaultsTemplate = `# 控制面声明式配置：业务策略全部收敛到此文件，
-# 容器内路径/容器名属部署清单 docker-compose.yml 职责；运行时状态（注册窗口等）在
-# state/settings.json，不属声明配置。运行时文件不入库：模板与
-# ` + "`" + `kurrent config print init-defaults` + "`" + ` 输出同源——生成或复制本文件为 kurrent.yaml
-# 后编辑，kurrent init 校验并启动控制面（.gitignore 已忽略 kurrent.yaml）。
+const cpDefaultsTemplate = `# Control-plane declarative configuration: all business policy lives in this file.
+# Container paths and container names belong to the deployment manifest (docker-compose.yml);
+# runtime state (registration window, etc.) lives in state/settings.json and is not declarative.
+# Runtime files are not committed: this template matches
+# ` + "`" + `kurrent config print init-defaults` + "`" + `. Generate or copy it as kurrent.yaml, edit it,
+# then run kurrent init to validate and start the control plane (.gitignore ignores kurrent.yaml).
 apiVersion: kurrent.io/v1
 kind: ControlPlaneConfiguration
 metadata:
   name: kurrent-cp
 spec:
-  # PXE 部署网络声明：
-  # dnsmasq.conf 由控制面启动时按本块生成（yml 是权威，conf 为派生物），勿手工编辑 dnsmasq.conf
+  # PXE deployment network declaration:
+  # the control plane renders dnsmasq.conf from this block at startup (the YAML is authoritative;
+  # the conf is derived). Do not edit dnsmasq.conf by hand.
   networking:
-    interface: enp3s0                  # 绑定网卡（dnsmasq interface= + bind-interfaces）
-    subnet: 192.168.80.0/24            # 服务网段（CIDR，掩码自动推导）
-    dhcpRange: 192.168.80.50,192.168.80.100   # DHCP 池起止
+    interface: enp3s0                  # Bind interface (dnsmasq interface= + bind-interfaces)
+    subnet: 192.168.80.0/24            # Service subnet (CIDR; the netmask is derived)
+    dhcpRange: 192.168.80.50,192.168.80.100   # DHCP pool start/end
     gateway: 192.168.80.2              # dhcp-option=3
     dns: 223.5.5.5                     # dhcp-option=6
-  # 组件 PKI 策略（三分根 CA users/nodes/control + 绑 agent_id 的 bootstrap token 引导 + 证书轮换）
+  # Component PKI policy (three root CAs users/nodes/control, agent_id-bound bootstrap
+  # tokens, and certificate rotation)
   pki:
     bootstrapTokenTtlMinutes: 60
     bootstrapTokenMaxTtlMinutes: 1440
@@ -277,88 +298,98 @@ spec:
     componentCertDays: 90
     renewThreshold: 0.2
     crlRefreshHours: 12
-  # TOFU 引导链服务器证书（自签，启动时幂等生成；nginx 只读挂载 state/certs）
+  # TOFU boot-chain server certificate (self-signed, generated idempotently at startup;
+  # nginx mounts state/certs read-only)
   serverCert:
     san: "IP:127.0.0.1,DNS:localhost"
     days: 3650
-    # 声明变化时是否重签（默认 false：仅报告漂移；重签会改变 TOFU 指纹）
+    # Re-issue when the declaration changes (default false: report drift only; re-issuing
+    # changes the TOFU fingerprint)
     rotateOnChange: false
-  # iPXE 引导行为
+  # iPXE boot behavior
   boot:
     defaultArch: x86_64
     menuTimeoutMs: 5000
     autoBootTimeoutMs: 1
-  # 管理面策略：会话 TTL、证书有效期、自动化 token TTL 上限
+  # Management policy: session TTL, certificate lifetimes, automation token TTL cap
   auth:
     sessionTtlHours: 12
     adminCertDays: 365
     userCertDaysMax: 3650
     tokenTtlHours: 24
     tokenMaxTtlHours: 720
-  # 设备注册窗口上限（窗口只在部署期短开，不可配置为永久）
+  # Device registration window limits (the window is opened briefly during deployment;
+  # it cannot be configured as permanent)
   registration:
     windowMaxTtlMinutes: 60
     windowMaxDevices: 1000
-  # DHHC-1 定期轮换与推送对账（0 = 关闭对应后台任务）
+  # DHHC-1 periodic rotation and push reconciliation (0 disables the corresponding background task)
   credentials:
     rotationDays: 90
     reconcileIntervalSeconds: 60
-  # 调用存储 Agent 超时（秒）
+  # Storage agent call timeout (seconds)
   agentTimeoutSec: 10
 `
 
 // nodeDefaultsTemplate 节点声明模板（与 storager/kurrent.yaml.example 同源）。
-const nodeDefaultsTemplate = `# 节点声明式配置
+const nodeDefaultsTemplate = `# Node declarative configuration
 #
-# 权威配置来源：模板与 ` + "`" + `kurrent config print node-defaults` + "`" + ` 输出同源——生成或复制
-# 本文件为 storager/kurrent.yaml 后编辑（kurrent.yaml 不入库）；kurrent join
-# <cp-url> --token <token> --agent-id <id> 校验并收敛启动 agent（地址与节点 id 随
-# 签发命令携带，kurrent.yaml 缺失时由 join 自动生成）。agent 与 nvmet-host 容器
-# 挂载同一份文件（/etc/kurrent/kurrent.yaml，只读），各自加载自己的 spec 子块。
+# Authoritative source: this template matches ` + "`" + `kurrent config print node-defaults` + "`" + `.
+# Generate or copy it as storager/kurrent.yaml, then edit it (kurrent.yaml is not committed).
+# kurrent join <cp-url> --token <token> --agent-id <id> validates it and converges the agent
+# (the address and node id are carried by the printed command; join generates kurrent.yaml
+# when missing). The agent and nvmet-host containers mount the same file
+# (/etc/kurrent/kurrent.yaml, read-only) and each loads its own spec subtree.
 #
-# 分层职责：本文件只声明节点级业务配置（身份/数据面参数）；
-# - 容器内路径（pki/cp-ca/日志/缓存/盘目录挂载点）与监听/内部通讯地址属部署清单
-#   docker-compose.yml 职责（compose 硬编码挂载目标，应用侧以模块常量固化）
-# - 引导凭据在独立文件 storager/bootstrap/：agent.token（绑节点身份的 token：
-#   join 写入、默认一次性、60 分钟）；nvmet-host.token 由 agent
-#   enroll 上报 backend=nvmet 时控制面派生随响应下发并落盘（绑 agent_id、不预知后端）
-# - diskDir = 宿主存储路径（数据目录声明；
-#   join 同步为 .env 的 KURRENT_DISK_DIR 插值键，compose 挂载源）
+# Layering: this file declares node-level business configuration (identity/data-plane parameters) only.
+# - Container paths (pki/cp-ca/logs/cache/disk mounts) and listen/internal addresses belong
+#   to the deployment manifest (docker-compose.yml); the application fixes mount targets in constants.
+# - Bootstrap credentials live in separate files under storager/bootstrap/: agent.token (bound to the
+#   node identity; written by join, single-use, 60 minutes) and nvmet-host.token (derived by the
+#   control plane when an agent enrolls with backend=nvmet and returned in the response; bound to
+#   agent_id, without knowing the backend in advance).
+# - diskDir = host storage path (data directory declaration; join syncs it to the .env
+#   KURRENT_DISK_DIR interpolation key used as the compose mount source).
 #
-# 校验语义（pydantic v2）：未知字段拒绝（extra="forbid"）、必填缺失报错、
-# 默认值注入、身份/路径/NQN 语义校验——kurrent join 与 kurrent config validate
-# 在写盘前用 agent 镜像内同一份 schema 校验，配置错误不会等到容器启动才暴露。
-# 容器内路径固定 /etc/kurrent/kurrent.yaml（KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
+# Validation semantics (pydantic v2): unknown fields are rejected (extra="forbid"), missing
+# required fields fail, defaults are injected, and identity/path/NQN semantics are validated.
+# kurrent join and kurrent config validate use the same schema inside the agent image before
+# writing, so configuration errors do not wait for container startup.
+# The container path is fixed at /etc/kurrent/kurrent.yaml (KURRENT_CONFIG_FILE can override
+# it for test injection).
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  # 节点身份 = agent_id（控制面 agents.yml 登记键、组件证书 CN）：机器身份——由
-  # bootstrap token 绑定（kurrent token create --agent-id；省略则生成 12 位 hex 随机
-  # 标识，与盘 os_tag 同构），join 写入并持久化，勿手工改写；身份须稳定，多节点
-  # 各自一个、天然不冲突。模板留空：join 必须写入（空值在 validate 时拒绝）
+  # Node identity = agent_id (control-plane agents.yml key, component certificate CN): a machine
+  # identity that accepts only 12 lowercase hex characters (same shape as disk os_tag and short
+  # Docker container IDs), bound by the bootstrap token (kurrent token create --agent-id;
+  # generated when omitted). join writes and persists it; do not edit it by hand. The identity
+  # must stay stable and is naturally unique per node. The template leaves it empty: join must write it.
   name: ""
-  # 备注（可选，人类识别用）：手工输入的唯一字段（如 storage-nvmet-01 / 生产存储）。
-  # 随首次 enroll 登记进控制面台账（WebUI Agent 卡片展示、编辑表单可改），
-  # 不参与任何身份/数据面运算
+  # Remark (optional, for human recognition): the only place for a descriptive name
+  # (e.g. production storage / rack A). It is registered on first enroll (shown on WebUI agent
+  # cards and editable in the form) and is not used in any identity or data-plane computation.
   remark: ""
 spec:
   agent:
-    # 数据面后端（必填）：nvmet（首选/默认）| stgt | lio
+    # Data-plane backend (required): nvmet (preferred/default) | stgt | lio
     backend: nvmet
-    # 控制面可达地址（enroll 自动登记写入 agents.yml base_url；kurrent join 默认推导
-    # https://<cp-host>:4840，特殊场景（NAT 等）手工编辑本键覆盖）
+    # Control-plane reachable address (enroll registers it as agents.yml base_url; kurrent join
+    # derives https://<cp-host>:4840 by default; edit this key for NAT and similar cases)
     # advertiseUrl: https://host.docker.internal:4840
-    # 宿主存储路径（必填，绝对路径；数据目录声明，compose 挂载源经 .env 插值同步）
+    # Host storage path (required, absolute; data directory declaration; compose mount source
+    # synced through the .env interpolation key)
     diskDir: /storager_img
-    # 盘标识命名空间（必填；权威：NQN，iSCSI 数据面 IQN 由此派生）
-    # 控制面不声明 NQN 域：Host NQN 与盘 NQN 的 base 均以本字段为权威
-    # （enroll 经 capabilities.base_nqn 上报，控制面由盘 NQN 前缀重拼）
+    # Disk identifier namespace (required; NQN is authoritative; the iSCSI data-plane IQN is derived from it)
+    # The control plane does not declare an NQN domain: both host NQN and disk NQN bases use
+    # this field (reported through capabilities.base_nqn during enroll; the control plane
+    # reassembles it from the disk NQN prefix)
     nqnBase: nqn.2026-07.com.kurrent
   controlPlane:
-    # 控制面 API 端点（agent/nvmet-host 容器 enroll/renew 的 mTLS 连接目标——指向
-    # 控制面服务，与 WebUI/nginx 访问入口无关；kurrent join
-    # <cp-url> 会把命令地址同步写入本键，预填亦可，命令参数为准；nvmet-host 容器为
-    # host 网络，compose 经 extra_hosts 把 host.docker.internal 映射到宿主 loopback，
-    # 因此两组件使用本字段的语义一致）
+    # Control-plane API endpoint (the mTLS target for agent/nvmet-host enroll/renew; points at
+    # the control-plane service, unrelated to the WebUI/nginx entry; kurrent join <cp-url> syncs
+    # the command address into this key, so a pre-filled value is allowed but the command wins;
+    # the nvmet-host container uses host networking and compose maps host.docker.internal to the
+    # host loopback through extra_hosts, so both components interpret this field the same way)
     url: https://host.docker.internal
 `

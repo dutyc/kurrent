@@ -76,9 +76,56 @@ type componentRevokeResp struct {
 	Reason  string   `json:"reason"`
 }
 
+var (
+	certKeygenSpec = cmdSpec{
+		usage: certKeygenUsage,
+		flags: []flagSpec{
+			{name: "out", kind: flagString},
+			{name: "force", kind: flagBool},
+		},
+		minPos: 1, maxPos: 1, posNames: []string{"cn"},
+	}
+	certIssueSpec = cmdSpec{
+		usage: certIssueUsage,
+		flags: []flagSpec{
+			{name: "csr", kind: flagString, required: true},
+			{name: "days", kind: flagString},
+			{name: "out", kind: flagString},
+			{name: "force", kind: flagBool},
+		},
+		minPos: 1, maxPos: 1, posNames: []string{"cn"},
+	}
+	certListSpec = cmdSpec{
+		usage:  certListUsage,
+		flags:  []flagSpec{{name: "output", aliases: []string{"o"}, kind: flagString}},
+		maxPos: 0,
+	}
+	certRevokeSpec = cmdSpec{
+		usage: certRevokeUsage,
+		flags: []flagSpec{
+			{name: "serial", kind: flagString},
+			{name: "reason", kind: flagString},
+		},
+		minPos: 1, maxPos: 1, posNames: []string{"cn"},
+	}
+	certComponentsSpec = cmdSpec{
+		usage:  certComponentsUsage,
+		flags:  []flagSpec{{name: "output", aliases: []string{"o"}, kind: flagString}},
+		maxPos: 0,
+	}
+	certRevokeComponentSpec = cmdSpec{
+		usage: certRevokeComponentUsage,
+		flags: []flagSpec{
+			{name: "serial", kind: flagString},
+			{name: "reason", kind: flagString},
+		},
+		minPos: 1, maxPos: 1, posNames: []string{"agent_id"},
+	}
+)
+
 func cmdCert(args []string) {
-	if len(args) < 1 {
-		certUsage()
+	if groupHelp("cert", args, certGroupUsage) {
+		return
 	}
 	switch args[0] {
 	case "keygen":
@@ -94,129 +141,132 @@ func cmdCert(args []string) {
 	case "revoke-component":
 		certRevokeComponent(args[1:])
 	default:
-		certUsage()
+		usageError(certGroupUsage, fmt.Errorf("unknown cert subcommand: %s", args[0]))
 	}
-}
-
-func certUsage() {
-	fatal("用法: kurrent cert keygen <cn> [--out DIR] [--force]\n" +
-		"      本地生成 RSA-2048 私钥与 CSR：写 <DIR>/<cn>.key（0600）与 <cn>.csr，默认 DIR=.\n" +
-		"      kurrent cert issue <cn> --csr FILE [--days N] [--out DIR] [--force]\n" +
-		"      为 users.yml 中已登记的用户签发：提交 CSR，写 <DIR>/<cn>.crt（私钥不上送）\n" +
-		"      kurrent cert list [-o table|json]   列出 users CA 签发的证书（含已吊销/已过期）\n" +
-		"      kurrent cert revoke <cn> [--serial HEX] [--reason unspecified|key_compromise|superseded|cessation_of_operation]\n" +
-		"      吊销：标记登记 + 重签 CRL + reload nginx + 踢相关会话，下一次握手即拒绝\n" +
-		"      kurrent cert components [-o table|json]\n" +
-		"      列出 agent / nvmet-host 的 nodes 域证书（含已吊销/已过期）\n" +
-		"      kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]\n" +
-		"      吊销组件证书：写 nodes CRL + reload nginx + 删除该节点的 bootstrap token")
 }
 
 func certKeygen(args []string) {
-	p := parseArgs(args)
-	cn := strings.TrimSpace(firstPos(p))
-	if cn == "" {
-		fatal("用法: kurrent cert keygen <cn> [--out DIR] [--force]")
+	p, help := mustParse(args, certKeygenSpec)
+	if help {
+		return
 	}
+	cn := strings.TrimSpace(p.pos[0])
 	if !userCNPattern.MatchString(cn) {
-		fatal("非法 cn: 只允许字母、数字、点、下划线、短横线与 @（最长 64）")
+		usageError(certKeygenUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
 	}
-	dir := p.opt("out", ".")
+	dir := strings.TrimSpace(p.opt("out", "."))
+	if dir == "" {
+		usageError(certKeygenUsage, fmt.Errorf("--out must not be empty"))
+	}
 	keyPath := filepath.Join(dir, cn+".key")
 	csrPath := filepath.Join(dir, cn+".csr")
-	if !p.flags["force"] {
+	if !p.bool("force") {
 		for _, path := range []string{keyPath, csrPath} {
 			if _, err := os.Stat(path); err == nil {
-				fatal("%s 已存在；换 --out 目录或用 --force 覆盖（覆盖后旧私钥不可恢复）", path)
+				fatal("%s already exists; choose another --out or add --force (the old private key cannot be recovered)", path)
 			}
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fatal("创建输出目录: %v", err)
+		fatal("create output directory: %v", err)
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		fatal("生成私钥: %v", err)
+		fatal("generate private key: %v", err)
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader,
 		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
 	if err != nil {
-		fatal("生成 CSR: %v", err)
+		fatal("generate CSR: %v", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		fatal("写私钥: %v", err)
+	if err := writeFileAtomic(keyPath, keyPEM, 0o600); err != nil {
+		fatal("write private key: %v", err)
 	}
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		fatal("设置私钥权限: %v", err)
+	if err := writeFileAtomic(csrPath, csrPEM, 0o644); err != nil {
+		fatal("write CSR: %v", err)
 	}
-	if err := os.WriteFile(csrPath, csrPEM, 0o644); err != nil {
-		fatal("写 CSR: %v", err)
-	}
-	fmt.Printf("key and CSR generated: cn=%s\n", cn)
+	fmt.Printf("private key and CSR generated: cn=%s\n", cn)
 	fmt.Printf("  private key: %s (0600)\n", keyPath)
-	fmt.Printf("  csr:         %s\n", csrPath)
-	fmt.Printf("  下一步（用户须先在 users.yml 登记）: kurrent cert issue %s --csr %s\n", cn, csrPath)
+	fmt.Printf("  CSR:         %s\n", csrPath)
+	fmt.Printf("  next (register the user in users.yml first): kurrent cert issue %s --csr %s\n", cn, csrPath)
 }
 
 func certIssue(args []string) {
-	p := parseArgs(args)
-	cn := strings.TrimSpace(firstPos(p))
-	if cn == "" {
-		fatal("用法: kurrent cert issue <cn> --csr FILE [--days N] [--out DIR] [--force]（用户须先在 users.yml 中登记）")
+	p, help := mustParse(args, certIssueSpec)
+	if help {
+		return
+	}
+	cn := strings.TrimSpace(p.pos[0])
+	if !userCNPattern.MatchString(cn) {
+		usageError(certIssueUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
 	}
 	csrPath := p.opt("csr", "")
-	if csrPath == "" {
-		fatal("缺少 --csr：先用 kurrent cert keygen %s 在本地生成私钥与 CSR", cn)
-	}
 	csrPEM, err := os.ReadFile(csrPath)
 	if err != nil {
-		fatal("读取 CSR: %v", err)
+		fatal("read CSR: %v", err)
 	}
-	body := map[string]any{"csr": string(csrPEM)}
-	if raw := p.opt("days", ""); raw != "" {
-		days, err := strconv.Atoi(raw)
-		if err != nil {
-			fatal("--days 必须是整数: %v", err)
+	days := 0
+	if p.has("days") {
+		raw := strings.TrimSpace(p.opt("days", ""))
+		days, err = strconv.Atoi(raw)
+		if err != nil || days <= 0 {
+			usageError(certIssueUsage, fmt.Errorf("--days must be a positive integer (got %q)", raw))
 		}
+	}
+	outDir := strings.TrimSpace(p.opt("out", "."))
+	if outDir == "" {
+		usageError(certIssueUsage, fmt.Errorf("--out must not be empty"))
+	}
+	certPath := filepath.Join(outDir, cn+".crt")
+	if !p.bool("force") {
+		if _, err := os.Stat(certPath); err == nil {
+			fatal("%s already exists; choose another --out or add --force", certPath)
+		}
+	}
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		fatal("create output directory: %v", err)
+	}
+
+	body := map[string]any{"csr": string(csrPEM)}
+	if days > 0 {
 		body["days"] = days
 	}
 	var out certIssueResp
 	if err := json.Unmarshal(api("POST", "/pki/users/"+url.PathEscape(cn), body), &out); err != nil {
-		fatal("解析签发响应: %v", err)
+		fatal("parse issuance response: %v", err)
 	}
-	// 文件名用服务端校验过的 CN，且再拒一次路径分隔符（绝不把 argv 直接拼进路径）
-	if !userCNPattern.MatchString(out.CN) {
-		fatal("服务端返回了非法的 cn: %q", out.CN)
+	if out.CN != cn || !userCNPattern.MatchString(out.CN) {
+		fatal("server returned cn %q, request was %q", out.CN, cn)
 	}
-	dir := p.opt("out", ".")
-	certPath := filepath.Join(dir, out.CN+".crt")
-	if !p.flags["force"] {
-		if _, err := os.Stat(certPath); err == nil {
-			fatal("%s 已存在；换 --out 目录或用 --force 覆盖", certPath)
-		}
+	if block, _ := pem.Decode([]byte(out.Certificate)); block == nil || block.Type != "CERTIFICATE" {
+		fatal("server returned a certificate that is not PEM CERTIFICATE")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fatal("创建输出目录: %v", err)
+	if err := writeFileAtomic(certPath, []byte(out.Certificate), 0o644); err != nil {
+		fatal("write certificate: %v", err)
 	}
-	if err := os.WriteFile(certPath, []byte(out.Certificate), 0o644); err != nil {
-		fatal("写证书: %v", err)
-	}
-	fmt.Printf("certificate issued: cn=%s serial=%s expires=%s\n", out.CN, out.Serial, shortTS(out.ExpiresAt))
+	fmt.Printf("certificate issued: cn=%s, serial=%s, expires %s\n", out.CN, out.Serial, shortTS(out.ExpiresAt))
 	fmt.Printf("  certificate: %s\n", certPath)
 	fmt.Printf("  fingerprint: %s\n", out.Fingerprint)
-	fmt.Printf("  私钥未上送、仍在本机；丢失私钥就重新 keygen + issue，旧证书用 --serial 单独吊销\n")
+	fmt.Printf("  the private key was never uploaded and remains local; if lost, run keygen + issue again and revoke the old certificate with --serial\n")
 }
 
 func certList(args []string) {
-	p := parseArgs(args)
+	p, help := mustParse(args, certListSpec)
+	if help {
+		return
+	}
+	format, err := p.outputFormat()
+	if err != nil {
+		usageError(certListUsage, err)
+	}
 	var items []certInfo
 	if err := json.Unmarshal(api("GET", "/pki/users", nil), &items); err != nil {
-		fatal("解析证书列表: %v", err)
+		fatal("parse certificate list: %v", err)
 	}
-	if p.opt("o", "table") == "json" {
+	if format == "json" {
 		printJSON(items)
 		return
 	}
@@ -249,33 +299,61 @@ func shortFingerprint(s string) string {
 	return s
 }
 
-func certRevoke(args []string) {
-	p := parseArgs(args)
-	cn := strings.TrimSpace(firstPos(p))
-	if cn == "" {
-		fatal("用法: kurrent cert revoke <cn> [--reason ...]（kurrent cert list 查看 cn）")
+// serialFlag 解析 --serial：显式空值报用法错误（省略才是“全部未吊销证书”，
+// 避免 --serial= 被误当成省略而扩大吊销范围）。
+func serialFlag(p parsedArgs, usage string) string {
+	raw := p.opt("serial", "")
+	if p.has("serial") && strings.TrimSpace(raw) == "" {
+		usageError(usage, fmt.Errorf("--serial must not be empty (omit the flag to target every unrevoked certificate)"))
 	}
-	reason := p.opt("reason", "unspecified")
+	serial, err := validateSerial(raw)
+	if err != nil {
+		usageError(usage, err)
+	}
+	return serial
+}
+
+func certRevoke(args []string) {
+	p, help := mustParse(args, certRevokeSpec)
+	if help {
+		return
+	}
+	cn := strings.TrimSpace(p.pos[0])
+	if !userCNPattern.MatchString(cn) {
+		usageError(certRevokeUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
+	}
+	reason, err := validateRevocationReason(p.opt("reason", "unspecified"))
+	if err != nil {
+		usageError(certRevokeUsage, err)
+	}
+	serial := serialFlag(p, certRevokeUsage)
 	path := "/pki/users/" + url.PathEscape(cn) + "?reason=" + url.QueryEscape(reason)
-	if serial := strings.TrimSpace(p.opt("serial", "")); serial != "" {
+	if serial != "" {
 		path += "&serial=" + url.QueryEscape(serial)
 	}
 	var out certRevokeResp
 	if err := json.Unmarshal(api("DELETE", path, nil), &out); err != nil {
-		fatal("解析吊销响应: %v", err)
+		fatal("parse revocation response: %v", err)
 	}
-	fmt.Printf("certificate for %s revoked（serial %s，reason %s）\n",
+	fmt.Printf("certificate(s) revoked: %s (serial %s, reason %s)\n",
 		out.Revoked, strings.Join(out.Serials, ","), out.Reason)
-	fmt.Printf("sessions revoked: %d；CRL 已重签并 reload nginx，下一次握手即拒绝\n", out.Sessions)
+	fmt.Printf("sessions revoked: %d; CRL re-signed and nginx reloaded\n", out.Sessions)
 }
 
 func certComponents(args []string) {
-	p := parseArgs(args)
+	p, help := mustParse(args, certComponentsSpec)
+	if help {
+		return
+	}
+	format, err := p.outputFormat()
+	if err != nil {
+		usageError(certComponentsUsage, err)
+	}
 	var items []componentCertInfo
 	if err := json.Unmarshal(api("GET", "/pki/components", nil), &items); err != nil {
-		fatal("解析组件证书列表: %v", err)
+		fatal("parse component certificate list: %v", err)
 	}
-	if p.opt("o", "table") == "json" {
+	if format == "json" {
 		printJSON(items)
 		return
 	}
@@ -295,22 +373,29 @@ func componentCertStatus(c componentCertInfo) string {
 }
 
 func certRevokeComponent(args []string) {
-	p := parseArgs(args)
-	agentID := strings.TrimSpace(firstPos(p))
-	if agentID == "" {
-		fatal("用法: kurrent cert revoke-component <agent_id> [--serial HEX] [--reason ...]（kurrent cert components 查看）")
+	p, help := mustParse(args, certRevokeComponentSpec)
+	if help {
+		return
 	}
-	reason := p.opt("reason", "unspecified")
+	agentID, err := validateAgentID(p.pos[0])
+	if err != nil {
+		usageError(certRevokeComponentUsage, err)
+	}
+	reason, err := validateRevocationReason(p.opt("reason", "unspecified"))
+	if err != nil {
+		usageError(certRevokeComponentUsage, err)
+	}
+	serial := serialFlag(p, certRevokeComponentUsage)
 	path := "/pki/components/" + url.PathEscape(agentID) + "?reason=" + url.QueryEscape(reason)
-	if serial := strings.TrimSpace(p.opt("serial", "")); serial != "" {
+	if serial != "" {
 		path += "&serial=" + url.QueryEscape(serial)
 	}
 	var out componentRevokeResp
 	if err := json.Unmarshal(api("DELETE", path, nil), &out); err != nil {
-		fatal("解析吊销响应: %v", err)
+		fatal("parse revocation response: %v", err)
 	}
-	fmt.Printf("component certificates for %s revoked（serial %s，reason %s）\n",
+	fmt.Printf("component certificate(s) revoked: %s (serial %s, reason %s)\n",
 		out.Revoked, strings.Join(out.Serials, ","), out.Reason)
-	fmt.Printf("kinds: %s；nodes CRL 已重签并 reload nginx，bootstrap token 已删除\n",
+	fmt.Printf("kinds: %s; nodes CRL re-signed and nginx reloaded, bootstrap token deleted\n",
 		strings.Join(out.Kinds, ","))
 }

@@ -198,7 +198,11 @@ func TestCredentialsMTLSRequest(t *testing.T) {
 	if cc.certFile != filepath.Join(dir, "admin.crt") {
 		t.Fatalf("相对路径未按凭据文件目录解析: %s", cc.certFile)
 	}
-	resp, err := cc.client().Get(cc.serverURL() + "/whoami")
+	serverURL, err := cc.serverURL()
+	if err != nil {
+		t.Fatalf("凭据 server 解析失败: %v", err)
+	}
+	resp, err := cc.client().Get(serverURL + "/whoami")
 	if err != nil {
 		t.Fatalf("mTLS 请求失败: %v", err)
 	}
@@ -209,18 +213,42 @@ func TestCredentialsMTLSRequest(t *testing.T) {
 	}
 }
 
+// TestWriteFileAtomic：覆盖已有文件时内容完整、权限收敛为指定值、不残留临时文件。
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "new" {
+		t.Fatalf("内容 = %q, %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("权限 = %v, %v", info.Mode().Perm(), err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("临时文件残留: %v, %v", entries, err)
+	}
+}
+
 // TestCredentialsServerOverride：--server 显式覆盖凭据文件的 server 地址。
 func TestCredentialsServerOverride(t *testing.T) {
 	c := &credentialsClient{server: "https://127.0.0.1"}
 	old := flagServer
 	t.Cleanup(func() { flagServer = old })
 	flagServer = ""
-	if got := c.serverURL(); got != "https://127.0.0.1" {
-		t.Fatalf("缺省应取凭据文件 server，实际 %s", got)
+	if got, err := c.serverURL(); err != nil || got != "https://127.0.0.1" {
+		t.Fatalf("缺省应取凭据文件 server，实际 %s（err=%v）", got, err)
 	}
 	flagServer = "https://cp.example.com/"
-	if got := c.serverURL(); got != "https://cp.example.com" {
-		t.Fatalf("--server 应覆盖并去尾斜杠，实际 %s", got)
+	if got, err := c.serverURL(); err != nil || got != "https://cp.example.com" {
+		t.Fatalf("--server 应覆盖并去尾斜杠，实际 %s（err=%v）", got, err)
 	}
 }
 
@@ -354,7 +382,7 @@ func TestAuthHint(t *testing.T) {
 	t.Chdir(empty)
 	exeDir = func() string { return filepath.Join(empty, "cli") }
 	hint := authHint()
-	if !strings.Contains(hint, "未发现管理凭据") || !strings.Contains(hint, "kurrent credentials install") {
+	if !strings.Contains(hint, "No management credentials found") || !strings.Contains(hint, "kurrent credentials install") {
 		t.Fatalf("无凭据无 token 应提示发现路径与安装命令，实际 %q", hint)
 	}
 	flagToken = "1a78c3.2dea22c2a4888435"
@@ -478,7 +506,7 @@ func TestCredentialsInstallRefuseSelf(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(snapDir, "admin.conf"), []byte(adminConfBody))
-	if _, _, err := installCredentials(); err == nil || !strings.Contains(err.Error(), "用户级快照") {
+	if _, _, err := installCredentials(); err == nil || !strings.Contains(err.Error(), "user-level snapshot") {
 		t.Fatalf("应拒绝以快照为源，实际 err=%v", err)
 	}
 }
@@ -541,7 +569,7 @@ func TestCredentialsRemove(t *testing.T) {
 	if p := discoverCredentials(); p != "" {
 		t.Fatalf("移除后仓库外不应发现凭据，实际 %q", p)
 	}
-	if err := removeCredentials(); err == nil || !strings.Contains(err.Error(), "未安装") {
+	if err := removeCredentials(); err == nil || !strings.Contains(err.Error(), "not installed") {
 		t.Fatalf("重复 remove 应报未安装，实际 err=%v", err)
 	}
 }
@@ -555,11 +583,11 @@ func TestCredentialsShow(t *testing.T) {
 	conf := makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	out, err := credentialsShow()
+	out, err := credentialsShowText()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, conf) || !strings.Contains(out, "未安装") {
+	if !strings.Contains(out, conf) || !strings.Contains(out, "not installed") {
 		t.Fatalf("show 应含生效凭据与未安装提示: %s", out)
 	}
 
@@ -569,11 +597,11 @@ func TestCredentialsShow(t *testing.T) {
 	outside := t.TempDir()
 	stubExeDir(t, filepath.Join(outside, "bin"))
 	t.Chdir(outside)
-	out, err = credentialsShow()
+	out, err = credentialsShowText()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "用户级快照") || !strings.Contains(out, "installed-from: "+conf) {
+	if !strings.Contains(out, "user-level snapshot") || !strings.Contains(out, "installed-from: "+conf) {
 		t.Fatalf("show 应含快照来源与溯源: %s", out)
 	}
 }

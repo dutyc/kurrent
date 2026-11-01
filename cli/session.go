@@ -22,9 +22,19 @@ type sessionInfo struct {
 	CertFP    string   `json:"cert_fp"`
 }
 
+var (
+	sessionsListSpec = cmdSpec{
+		usage:  sessionsListUsage,
+		flags:  []flagSpec{{name: "output", aliases: []string{"o"}, kind: flagString}},
+		maxPos: 0,
+	}
+	sessionsRevokeSpec    = cmdSpec{usage: sessionsRevokeUsage, minPos: 1, maxPos: 1, posNames: []string{"session_id"}}
+	sessionsRevokeAllSpec = cmdSpec{usage: sessionsRevokeAllUsage, maxPos: 0}
+)
+
 func cmdSessions(args []string) {
-	if len(args) < 1 {
-		sessionsUsage()
+	if groupHelp("sessions", args, sessionsGroupUsage) {
+		return
 	}
 	switch args[0] {
 	case "list":
@@ -32,25 +42,26 @@ func cmdSessions(args []string) {
 	case "revoke":
 		sessionsRevoke(args[1:])
 	case "revoke-all":
-		sessionsRevokeAll()
+		sessionsRevokeAll(args[1:])
 	default:
-		sessionsUsage()
+		usageError(sessionsGroupUsage, fmt.Errorf("unknown sessions subcommand: %s", args[0]))
 	}
-}
-
-func sessionsUsage() {
-	fatal("用法: kurrent sessions list [-o table|json]   列出未过期会话（管理员）\n" +
-		"      kurrent sessions revoke <session_id>     逐个吊销：删登记，下一请求立即失效\n" +
-		"      kurrent sessions revoke-all              全部踢下线：清空登记并递增 epoch")
 }
 
 func sessionsList(args []string) {
-	p := parseArgs(args)
+	p, help := mustParse(args, sessionsListSpec)
+	if help {
+		return
+	}
+	format, err := p.outputFormat()
+	if err != nil {
+		usageError(sessionsListUsage, err)
+	}
 	var items []sessionInfo
 	if err := json.Unmarshal(api("GET", "/sessions", nil), &items); err != nil {
-		fatal("解析会话列表: %v", err)
+		fatal("parse session list: %v", err)
 	}
-	if p.opt("o", "table") == "json" {
+	if format == "json" {
 		printJSON(items)
 		return
 	}
@@ -65,23 +76,30 @@ func sessionsList(args []string) {
 }
 
 func sessionsRevoke(args []string) {
-	id := firstPos(parseArgs(args))
+	p, help := mustParse(args, sessionsRevokeSpec)
+	if help {
+		return
+	}
+	id := strings.TrimSpace(p.pos[0])
 	if id == "" {
-		fatal("用法: kurrent sessions revoke <session_id>（kurrent sessions list 查看）")
+		usageError(sessionsRevokeUsage, fmt.Errorf("session_id must not be empty"))
 	}
 	var out map[string]any
 	if err := json.Unmarshal(api("DELETE", "/sessions/"+url.PathEscape(id), nil), &out); err != nil {
-		fatal("解析响应: %v", err)
+		fatal("parse response: %v", err)
 	}
-	fmt.Printf("session %s revoked（登记已删除，下一请求 401）\n", id)
+	fmt.Printf("session %s revoked (registration deleted; the next request fails with 401)\n", id)
 }
 
-func sessionsRevokeAll() {
+func sessionsRevokeAll(args []string) {
+	if _, help := mustParse(args, sessionsRevokeAllSpec); help {
+		return
+	}
 	var out struct {
 		Revoked int `json:"revoked"`
 	}
 	if err := json.Unmarshal(api("DELETE", "/sessions", nil), &out); err != nil {
-		fatal("解析响应: %v", err)
+		fatal("parse response: %v", err)
 	}
-	fmt.Printf("%d 个会话已全部下线（epoch 已递增，旧 Cookie 重放同样失效）\n", out.Revoked)
+	fmt.Printf("%d session(s) signed out (epoch bumped; replayed old cookies fail too)\n", out.Revoked)
 }

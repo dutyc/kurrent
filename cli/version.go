@@ -6,9 +6,10 @@ import "fmt"
 
 var version = "dev"
 
+var versionSpec = cmdSpec{usage: versionUsage, maxPos: 0}
+
 func cmdVersion(args []string) {
-	if len(args) > 0 {
-		fmt.Println("用法: kurrent version")
+	if _, help := mustParse(args, versionSpec); help {
 		return
 	}
 	fmt.Printf("kurrent %s\n", version)

@@ -4,34 +4,64 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 )
 
+var (
+	workersListSpec = cmdSpec{
+		usage:  workersListUsage,
+		flags:  []flagSpec{{name: "output", aliases: []string{"o"}, kind: flagString}},
+		maxPos: 0,
+	}
+	workersGetSpec = cmdSpec{usage: workersGetUsage, minPos: 1, maxPos: 1, posNames: []string{"id"}}
+	opsListSpec    = cmdSpec{
+		usage: opsListUsage,
+		flags: []flagSpec{
+			{name: "limit", kind: flagString},
+			{name: "output", aliases: []string{"o"}, kind: flagString},
+		},
+		maxPos: 0,
+	}
+)
+
 // ── workers ──
 
 func cmdWorkers(args []string) {
-	if len(args) == 0 || args[0] == "list" {
-		workersList()
+	if groupHelp("workers", args, workersGroupUsage) {
 		return
 	}
-	if args[0] == "get" && len(args) == 2 {
-		workersGet(args[1])
-		return
-	}
-	if args[0] == "credential" {
+	switch args[0] {
+	case "list":
+		workersList(args[1:])
+	case "get":
+		workersGet(args[1:])
+	case "credential":
 		workersCredential(args[1:])
-		return
+	default:
+		usageError(workersGroupUsage, fmt.Errorf("unknown workers subcommand: %s", args[0]))
 	}
-	fatal("用法: kurrent workers list | workers get <id> | workers credential show|set|revoke <id>")
 }
 
-func workersList() {
+func workersList(args []string) {
+	p, help := mustParse(args, workersListSpec)
+	if help {
+		return
+	}
+	format, err := p.outputFormat()
+	if err != nil {
+		usageError(workersListUsage, err)
+	}
 	var items []map[string]any
 	if err := json.Unmarshal(api("GET", "/workers", nil), &items); err != nil {
-		fatal("解析 workers 响应: %v", err)
+		fatal("parse workers response: %v", err)
+	}
+	if format == "json" {
+		printJSON(items)
+		return
 	}
 	if len(items) == 0 {
 		fmt.Println("(no workers)")
@@ -47,10 +77,18 @@ func workersList() {
 	w.Flush()
 }
 
-func workersGet(workerID string) {
+func workersGet(args []string) {
+	p, help := mustParse(args, workersGetSpec)
+	if help {
+		return
+	}
+	workerID := strings.TrimSpace(p.pos[0])
+	if workerID == "" {
+		usageError(workersGetUsage, fmt.Errorf("worker id must not be empty"))
+	}
 	var out map[string]any
-	if err := json.Unmarshal(api("GET", "/workers/"+workerID, nil), &out); err != nil {
-		fatal("解析 worker 响应: %v", err)
+	if err := json.Unmarshal(api("GET", "/workers/"+url.PathEscape(workerID), nil), &out); err != nil {
+		fatal("parse worker response: %v", err)
 	}
 	printJSON(out)
 }
@@ -58,24 +96,45 @@ func workersGet(workerID string) {
 // ── ops ──
 
 func cmdOps(args []string) {
-	p := parseArgs(args)
-	limit := p.opt("limit", "50")
-	if _, err := strconv.Atoi(limit); err != nil {
-		fatal("无效 limit: %s", limit)
+	if groupHelp("ops", args, opsGroupUsage) {
+		return
+	}
+	if args[0] != "list" {
+		usageError(opsGroupUsage, fmt.Errorf("unknown ops subcommand: %s", args[0]))
+	}
+	opsList(args[1:])
+}
+
+func opsList(args []string) {
+	p, help := mustParse(args, opsListSpec)
+	if help {
+		return
+	}
+	format, err := p.outputFormat()
+	if err != nil {
+		usageError(opsListUsage, err)
+	}
+	limit := 50
+	if p.has("limit") {
+		raw := strings.TrimSpace(p.opt("limit", ""))
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit <= 0 {
+			usageError(opsListUsage, fmt.Errorf("--limit must be a positive integer (got %q)", raw))
+		}
 	}
 
 	var out struct {
 		Entries []map[string]any `json:"entries"`
 	}
-	if err := json.Unmarshal(api("GET", "/operations?limit="+limit, nil), &out); err != nil {
-		fatal("解析 operations 响应: %v", err)
+	if err := json.Unmarshal(api("GET", "/operations?limit="+strconv.Itoa(limit), nil), &out); err != nil {
+		fatal("parse operations response: %v", err)
 	}
-	if p.opt("o", "table") == "json" {
+	if format == "json" {
 		printJSON(out.Entries)
 		return
 	}
 	if len(out.Entries) == 0 {
-		fmt.Println("(no operations)")
+		fmt.Println("(no operation records)")
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)

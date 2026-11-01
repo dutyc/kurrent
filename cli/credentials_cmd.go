@@ -8,6 +8,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,52 +19,60 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	credentialsInstallSpec = cmdSpec{usage: credentialsInstallUsage, maxPos: 0}
+	credentialsShowSpec    = cmdSpec{usage: credentialsShowUsage, maxPos: 0}
+	credentialsRemoveSpec  = cmdSpec{usage: credentialsRemoveUsage, maxPos: 0}
+)
+
 func cmdCredentials(args []string) {
-	if len(args) < 1 {
-		credentialsUsage()
+	if groupHelp("credentials", args, credentialsGroupUsage) {
+		return
 	}
 	switch args[0] {
 	case "install":
-		cmdCredentialsInstall()
+		credentialsInstall(args[1:])
 	case "show":
-		cmdCredentialsShow()
+		credentialsShow(args[1:])
 	case "remove":
-		cmdCredentialsRemove()
+		credentialsRemove(args[1:])
 	default:
-		credentialsUsage()
+		usageError(credentialsGroupUsage, fmt.Errorf("unknown credentials subcommand: %s", args[0]))
 	}
 }
 
-func credentialsUsage() {
-	fatal("用法: kurrent credentials install   把管理凭据装到 ~/.kurrent（自包含快照：admin.conf + pki/）\n" +
-		"      kurrent credentials show      查看当前生效凭据与用户级快照状态\n" +
-		"      kurrent credentials remove    删除用户级快照（仓库内凭据不受影响）\n" +
-		"      install 后任意目录可运行 kurrent；凭据轮换后重跑 install 刷新")
-}
-
-func cmdCredentialsInstall() {
+func credentialsInstall(args []string) {
+	if _, help := mustParse(args, credentialsInstallSpec); help {
+		return
+	}
 	target, source, err := installCredentials()
 	if err != nil {
 		fatal("%v", err)
 	}
-	fmt.Printf("管理凭据已安装：%s（源: %s）\n", target, source)
-	fmt.Printf("  证书副本：%s（自包含，可整目录拷贝到其他机器）\n", filepath.Join(filepath.Dir(target), "pki"))
-	fmt.Println("  此后任意目录可运行 kurrent；凭据轮换后重跑 kurrent credentials install 刷新")
+	fmt.Printf("management credentials installed: %s (source: %s)\n", target, source)
+	fmt.Printf("  certificate copies: %s (self-contained; the whole directory can be copied to another machine)\n", filepath.Join(filepath.Dir(target), "pki"))
+	fmt.Println("  kurrent now works from any directory; re-run kurrent credentials install after credential rotation")
 }
 
-func cmdCredentialsShow() {
-	out, err := credentialsShow()
+func credentialsShow(args []string) {
+	if _, help := mustParse(args, credentialsShowSpec); help {
+		return
+	}
+	out, err := credentialsShowText()
 	if err != nil {
 		fatal("%v", err)
 	}
 	fmt.Print(out)
 }
 
-func cmdCredentialsRemove() {
+func credentialsRemove(args []string) {
+	if _, help := mustParse(args, credentialsRemoveSpec); help {
+		return
+	}
 	if err := removeCredentials(); err != nil {
 		fatal("%v", err)
 	}
-	fmt.Println("用户级管理凭据已移除（仓库内凭据与已签发的 --token 不受影响）")
+	fmt.Println("user-level management credentials removed (repository credentials and issued --token values are unaffected)")
 }
 
 // installCredentials 把当前发现的管理凭据复制为自包含快照到 ~/.kurrent/，返回快照路径与源路径。
@@ -73,40 +83,65 @@ func cmdCredentialsRemove() {
 func installCredentials() (target, source string, err error) {
 	source = discoverCredentials()
 	if source == "" {
-		return "", "", fmt.Errorf("未发现管理凭据源（control_plane/state/admin.conf）——请先在仓库运行 kurrent init，或用 --credentials 指定源")
+		return "", "", fmt.Errorf("no management credential source found (control_plane/state/admin.conf); run kurrent init inside the repository first, or pass --credentials")
 	}
 	if abs, err := filepath.Abs(source); err == nil {
 		source = abs
 	}
 	target = userCredentialsPath()
 	if target == "" {
-		return "", "", fmt.Errorf("无法确定用户主目录（安装目标 ~/.kurrent）")
+		return "", "", fmt.Errorf("cannot determine the user home directory (install target ~/.kurrent)")
 	}
 	if source == target {
-		return "", "", fmt.Errorf("发现的管理凭据即用户级快照本身（%s）——刷新需以仓库 admin.conf 为源（进仓库重跑，或 --credentials 指定）", target)
+		return "", "", fmt.Errorf("the discovered credential is the user-level snapshot itself (%s); refresh from the repository admin.conf (run inside the repository or pass --credentials)", target)
 	}
 	data, err := os.ReadFile(source)
 	if err != nil {
-		return "", "", fmt.Errorf("读取管理凭据 %s: %w", source, err)
+		return "", "", fmt.Errorf("read management credentials %s: %w", source, err)
 	}
 	var cf credentialsFile
 	if err := yaml.Unmarshal(data, &cf); err != nil {
-		return "", "", fmt.Errorf("解析管理凭据 %s: %w", source, err)
+		return "", "", fmt.Errorf("parse management credentials %s: %w", source, err)
 	}
 	if cf.Server == "" || cf.ClientCert == "" || cf.ClientKey == "" {
-		return "", "", fmt.Errorf("管理凭据 %s 缺少 server/client-certificate/client-key", source)
+		return "", "", fmt.Errorf("management credentials %s are missing server/client-certificate/client-key", source)
+	}
+	if _, err := validateHTTPURL("management credential server", cf.Server); err != nil {
+		return "", "", fmt.Errorf("%s: %w", source, err)
+	}
+
+	srcDir := filepath.Dir(source)
+	absSrc := func(p string) string {
+		if p == "" || filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(srcDir, p)
+	}
+	// 安装前先确认快照可用：证书/私钥配对、CA 可解析。否则“安装成功”的
+	// 快照仍会在第一次请求时失败。
+	if _, err := tls.LoadX509KeyPair(absSrc(cf.ClientCert), absSrc(cf.ClientKey)); err != nil {
+		return "", "", fmt.Errorf("management certificate/private key unusable (%s): %w", source, err)
+	}
+	if cf.CA != "" {
+		caPEM, err := os.ReadFile(absSrc(cf.CA))
+		if err != nil {
+			return "", "", fmt.Errorf("read management CA %s: %w", absSrc(cf.CA), err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return "", "", fmt.Errorf("management CA %s contains no valid certificate", absSrc(cf.CA))
+		}
 	}
 
 	dir := filepath.Dir(target)
 	pkiDir := filepath.Join(dir, "pki")
 	if err := os.MkdirAll(pkiDir, 0o700); err != nil {
-		return "", "", fmt.Errorf("创建 %s: %w", pkiDir, err)
+		return "", "", fmt.Errorf("create %s: %w", pkiDir, err)
 	}
 	// 已存在目录收敛权限：快照含私钥，不留 group/other 位
 	_ = os.Chmod(dir, 0o700)
 	_ = os.Chmod(pkiDir, 0o700)
 
-	srcDir := filepath.Dir(source)
 	seen := map[string]string{} // basename → 源路径（同名不同源拒绝）
 	installed := map[string]string{}
 	for _, k := range []struct{ key, path string }{
@@ -123,16 +158,16 @@ func installCredentials() (target, source string, err error) {
 		}
 		pem, err := os.ReadFile(sp)
 		if err != nil {
-			return "", "", fmt.Errorf("读取证书 %s（admin.conf 的 %s 键）: %w", sp, k.key, err)
+			return "", "", fmt.Errorf("read certificate %s (admin.conf key %s): %w", sp, k.key, err)
 		}
 		base := filepath.Base(sp)
 		if prev, ok := seen[base]; ok && prev != sp {
-			return "", "", fmt.Errorf("证书文件名冲突：%s 与 %s 同名（%s）——请调整源目录布局", prev, sp, base)
+			return "", "", fmt.Errorf("certificate filename conflict: %s and %s share the name %s; adjust the source directory layout", prev, sp, base)
 		}
 		seen[base] = sp
 		rel := filepath.Join("pki", base)
 		if err := writeFileAtomic(filepath.Join(dir, rel), pem, 0o600); err != nil {
-			return "", "", fmt.Errorf("写入证书快照: %w", err)
+			return "", "", fmt.Errorf("write certificate snapshot: %w", err)
 		}
 		installed[k.key] = rel
 	}
@@ -147,32 +182,32 @@ func installCredentials() (target, source string, err error) {
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {
-		return "", "", fmt.Errorf("序列化快照 admin.conf: %w", err)
+		return "", "", fmt.Errorf("serialize snapshot admin.conf: %w", err)
 	}
-	header := "# kurrent 用户级管理凭据快照（kurrent credentials install 生成；凭据轮换后重跑刷新）\n"
+	header := "# kurrent user-level management credential snapshot (created by kurrent credentials install; re-run after rotation)\n"
 	if err := writeFileAtomic(target, append([]byte(header), body...), 0o600); err != nil {
-		return "", "", fmt.Errorf("写入快照 %s: %w", target, err)
+		return "", "", fmt.Errorf("write snapshot %s: %w", target, err)
 	}
 	return target, source, nil
 }
 
 // credentialsShow 汇总当前生效凭据（发现层级 + 四键可解析性）与用户级快照状态（诊断用；
 // 未发现凭据不视为错误——show 的职责是如实汇报发现链结果）。
-func credentialsShow() (string, error) {
+func credentialsShowText() (string, error) {
 	var b strings.Builder
 	path := discoverCredentials()
 	if path == "" {
-		b.WriteString("生效管理凭据: 未发现（将以无凭据通道访问 --server/--token）\n")
-		b.WriteString("  安装：kurrent credentials install（仓库内执行，装到 ~/.kurrent 后任意目录可用）\n")
+		b.WriteString("active management credentials: not found (requests use the credential-less --server/--token channel)\n")
+		b.WriteString("  install: kurrent credentials install (run in the repository; afterwards works from any directory)\n")
 	} else {
-		fmt.Fprintf(&b, "生效管理凭据: %s（%s）\n", path, describeCredentialsSource(path))
+		fmt.Fprintf(&b, "active management credentials: %s (%s)\n", path, describeCredentialsSource(path))
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("读取管理凭据 %s: %w", path, err)
+			return "", fmt.Errorf("read management credentials %s: %w", path, err)
 		}
 		var cf credentialsFile
 		if err := yaml.Unmarshal(data, &cf); err != nil {
-			return "", fmt.Errorf("解析管理凭据 %s: %w", path, err)
+			return "", fmt.Errorf("parse management credentials %s: %w", path, err)
 		}
 		fmt.Fprintf(&b, "  server: %s\n", cf.Server)
 		dir := filepath.Dir(path)
@@ -188,11 +223,11 @@ func credentialsShow() (string, error) {
 			if !filepath.IsAbs(abs) {
 				abs = filepath.Join(dir, abs)
 			}
-			mark := "存在"
+			mark := "present"
 			if !fileExists(abs) {
-				mark = "缺失"
+				mark = "missing"
 			}
-			fmt.Fprintf(&b, "  %s: %s（%s）\n", k.label, abs, mark)
+			fmt.Fprintf(&b, "  %s: %s (%s)\n", k.label, abs, mark)
 		}
 		if cf.InstalledFrom != "" {
 			fmt.Fprintf(&b, "  installed-from: %s\n  installed-at: %s\n", cf.InstalledFrom, cf.InstalledAt)
@@ -200,9 +235,9 @@ func credentialsShow() (string, error) {
 	}
 	if up := userCredentialsPath(); up != "" && up != path {
 		if fileExists(up) {
-			fmt.Fprintf(&b, "用户级快照: %s（已安装；仓库源在场时仓库源优先）\n", up)
+			fmt.Fprintf(&b, "user-level snapshot: %s (installed; the repository source takes precedence when present)\n", up)
 		} else {
-			b.WriteString("用户级快照: 未安装（kurrent credentials install 后任意目录可用）\n")
+			b.WriteString("user-level snapshot: not installed (run kurrent credentials install to work from any directory)\n")
 		}
 	}
 	return b.String(), nil
@@ -211,44 +246,61 @@ func credentialsShow() (string, error) {
 // describeCredentialsSource 说明生效凭据来自发现链的哪一层（show 输出用）。
 func describeCredentialsSource(path string) string {
 	if flagCredentials != "" {
-		return "--credentials / KURRENT_CREDENTIALS 指定"
+		return "specified by --credentials / KURRENT_CREDENTIALS"
 	}
 	if userCredentialsPath() == path {
-		return "用户级快照（kurrent credentials install 安装）"
+		return "user-level snapshot installed by kurrent credentials install"
 	}
-	return "自动发现（仓库上溯或可执行文件旁）"
+	return "auto-discovered via repository walk-up or next to the executable"
 }
 
 // removeCredentials 删除用户级快照（admin.conf 与 pki/）；仓库内凭据与 --token 不受影响。
 func removeCredentials() error {
 	target := userCredentialsPath()
 	if target == "" {
-		return fmt.Errorf("无法确定用户主目录（~/.kurrent）")
+		return fmt.Errorf("cannot determine the user home directory (~/.kurrent)")
 	}
 	if !fileExists(target) {
-		return fmt.Errorf("未安装用户级管理凭据（%s 不存在）", target)
+		return fmt.Errorf("user-level management credentials are not installed (%s does not exist)", target)
 	}
 	dir := filepath.Dir(target)
 	if err := os.Remove(target); err != nil {
-		return fmt.Errorf("删除 %s: %w", target, err)
+		return fmt.Errorf("delete %s: %w", target, err)
 	}
 	if err := os.RemoveAll(filepath.Join(dir, "pki")); err != nil {
-		return fmt.Errorf("删除 %s: %w", filepath.Join(dir, "pki"), err)
+		return fmt.Errorf("delete %s: %w", filepath.Join(dir, "pki"), err)
 	}
 	os.Remove(dir) // 余物为空才删除；用户另放文件则保留目录
 	return nil
 }
 
-// writeFileAtomic 同目录临时文件 + rename（防半写；快照含私钥，权限恒收敛为 perm）。
+// writeFileAtomic 同目录临时文件 + rename（防半写；文件含私钥/密钥时权限恒为 perm）。
+// CreateTemp 生成唯一临时名：并发 install/join 不会互相覆盖，也不会跟随预置的 .tmp 路径。
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	_ = os.Chmod(tmp, perm)
+	tmp := f.Name()
+	defer func() {
+		if tmp != "" {
+			os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
 		return err
 	}
+	tmp = ""
 	return nil
 }

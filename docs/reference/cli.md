@@ -73,11 +73,13 @@ kurrent config status
 
 ```bash
 # 控制面：签发绑定节点身份的 bootstrap token，输出完整 join 命令
-kurrent token create --agent-id storage-nvmet-01 --cp-url https://192.168.80.1
+kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.80.1
 
 # 节点：粘贴上一步输出的命令
-kurrent join https://192.168.80.1 --token <token> --agent-id storage-nvmet-01
+kurrent join https://192.168.80.1 --token <token> --agent-id 3f2a9c1d8b7e
 ```
+
+`--agent-id` 是节点身份，只接受 12 位小写十六进制；省略时由命令生成。描述性名称写入节点声明 `metadata.remark`，不要占用身份字段。控制面入口是 origin 地址（可带反向代理路径）；误贴的 `/api/cp` 后缀会在写声明前自动去除。
 
 `join` 的行为：
 
@@ -95,13 +97,13 @@ kurrent join https://192.168.80.1 --token <token> --agent-id storage-nvmet-01
 ### bootstrap token
 
 ```bash
-kurrent token create --agent-id storage-nvmet-01
-kurrent token create --agent-id storage-nvmet-01 --uses 20 --ttl 2h
+kurrent token create --agent-id 3f2a9c1d8b7e
+kurrent token create --agent-id 3f2a9c1d8b7e --uses 20
 ```
 
-- 默认一次性、60 分钟；
-- 绑定 `agent_id`，enroll 只接受同一身份；
-- `--uses` 放开使用次数（上限 100）；
+- 默认一次性、60 分钟（TTL 由控制面声明 `spec.pki.bootstrapTokenTtlMinutes` 决定）；
+- 绑定 `agent_id`（12 位小写 hex），enroll 只接受同一身份；
+- `--uses` 放开使用次数（1..1000，且不超过控制面 `spec.pki.bootstrapTokenMaxUses`，默认 100）；
 - 输出带控制面地址与节点 id 的 join 命令。
 
 ### 管理 token
@@ -113,10 +115,10 @@ kurrent token create --usage admin --scope readonly --ttl 24h
 
 - 供脚本与 WebUI 登录；
 - `--scope` 取 `admin` / `readonly` / `enroll`；
-- 默认 24 小时，上限 720 小时；
+- 默认 24 小时；上限由控制面 `spec.auth.tokenMaxTtlHours` 决定（默认 720 小时）；
 - 只存 SHA-256 摘要，明文只在签发响应中出现一次。
 
-`token list` 列出未过期条目，`token revoke <token_id>` 删除条目并立即失效。
+`token list` 列出未过期条目，`token revoke <token_id>` 删除条目并立即失效。`token_id` 是明文点号前的 6 位前缀（`token list` 或签发输出可查）；粘贴完整 token 会被拒绝，避免 secret 进入服务端访问日志。
 
 ## 证书
 
@@ -126,7 +128,7 @@ kurrent cert issue alice --csr ./certs/alice.csr --days 365
 kurrent cert list
 kurrent cert revoke alice --serial <hex>
 kurrent cert components
-kurrent cert revoke-component storage-nvmet-01
+kurrent cert revoke-component 3f2a9c1d8b7e
 ```
 
 私钥只在本地生成，CSR 上送，私钥永不上传。`issue` 要求 CN 已在 `control_plane/state/users.yml` 登记。吊销会重签 CRL、reload nginx，并使该证书上的会话失效。组件吊销同时删除该节点的 bootstrap token；恢复时重新签发 token 并重跑 `join`。
@@ -138,10 +140,11 @@ nvmet 建盘时控制面自动签发 DHHC-1 密钥。以下命令用于显式轮
 ```bash
 kurrent workers credential show storage-worker-01
 kurrent workers credential set storage-worker-01 --generate
+kurrent workers credential set storage-worker-01 --secret-file /secure/dhhc1.key
 kurrent workers credential revoke storage-worker-01
 ```
 
-`--generate` 就地生成 32 字节密钥，不打印明文。`set` 输出逐 Agent 推送状态；未送达项由对账线程自动重试。吊销后设备下次引导被拒绝。
+`--generate` 就地生成 32 字节密钥，不打印明文；已有密钥用 `--secret-file`（须 0600）或 `--secret-stdin` 传入，不接受命令行明文 `--secret`。`set` 输出逐 Agent 推送状态；未送达项由对账线程自动重试。吊销后设备下次引导被拒绝。
 
 ## 输出与退出码
 
@@ -149,17 +152,18 @@ kurrent workers credential revoke storage-worker-01
 | --- | --- |
 | 默认输出 | 表格 |
 | `-o json` | 原始 JSON，便于 jq 处理 |
-| 空字段 | 以 `-` 占位 |
-| 成功 | 退出码 0 |
-| 失败 | 非零退出码，错误写入 stderr |
+| 空字段 | 以 `—` 占位 |
+| 成功/帮助 | 退出码 0 |
+| 运行失败 | 退出码 1，错误写入 stderr |
+| 用法错误 | 退出码 2，打印该命令用法 |
 
-位置参数与 `--key value`、`--key=value`、`--flag` 可任意混排。
+位置参数与 `--key value`、`--key=value`、`--flag` 可任意混排。所有命令支持 `-h`/`--help`；未知标志、缺值、重复标志与多余位置参数均报用法错误。
 
 ## 常见错误
 
 | 现象 | 排查 |
 | --- | --- |
-| `no management credentials` | 在仓库内执行、运行 `credentials install`，或显式给 `--server` + `--token` |
+| `No management credentials found` | 在仓库内执行、运行 `credentials install`，或显式给 `--server` + `--token` |
 | mTLS 证书错误 | 凭据文件与服务端不匹配；重新执行 `credentials install` |
 | `config validate` 失败 | 按报错修正声明；未知字段会被拒绝 |
 | `join` 停在宿主预检 | 按提示执行 `host-prepare.sh`，确认内核模块、configfs 与 `tlshd` |
@@ -167,8 +171,7 @@ kurrent workers credential revoke storage-worker-01
 
 ## 相关页面
 
-- [快速开始](../guide/quickstart.md)
-- [部署指南](../guide/deployment.md)
+- [部署](../guide/deployment.md)
 - [日常运维](../guide/operations.md)
 - [配置参考](./configuration.md)
 - [API 参考](./api.md)

@@ -20,8 +20,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var initSpec = cmdSpec{
+	usage: initUsage,
+	flags: []flagSpec{
+		{name: "config", kind: flagString},
+		{name: "dir", kind: flagString},
+	},
+	maxPos: 0,
+}
+
 func cmdInit(args []string) {
-	p := parseArgs(args)
+	p, help := mustParse(args, initSpec)
+	if help {
+		return
+	}
+	if p.has("dir") && strings.TrimSpace(p.opt("dir", "")) == "" {
+		usageError(initUsage, fmt.Errorf("--dir must not be empty"))
+	}
+	if p.has("config") && strings.TrimSpace(p.opt("config", "")) == "" {
+		usageError(initUsage, fmt.Errorf("--config must not be empty"))
+	}
 	dir, err := resolveControlPlaneDir(p.opt("dir", ""))
 	if err != nil {
 		fatal("%v", err)
@@ -29,7 +47,7 @@ func cmdInit(args []string) {
 	configFile := p.opt("config", filepath.Join(dir, "kurrent.yaml"))
 	if !filepath.IsAbs(configFile) {
 		if configFile, err = filepath.Abs(configFile); err != nil {
-			fatal("解析 --config: %v", err)
+			fatal("resolve --config: %v", err)
 		}
 	}
 	if err := initRun(initOpts{dir: dir, configFile: configFile}); err != nil {
@@ -49,13 +67,13 @@ func resolveControlPlaneDir(explicit string) (string, error) {
 	if explicit != "" {
 		abs, err := filepath.Abs(explicit)
 		if err != nil {
-			return "", fmt.Errorf("解析 --dir: %w", err)
+			return "", fmt.Errorf("resolve --dir: %w", err)
 		}
 		return abs, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("获取当前目录: %w", err)
+		return "", fmt.Errorf("get current directory: %w", err)
 	}
 	if fi, err := os.Stat(filepath.Join(cwd, "control_plane")); err == nil && fi.IsDir() {
 		return filepath.Join(cwd, "control_plane"), nil
@@ -63,7 +81,7 @@ func resolveControlPlaneDir(explicit string) (string, error) {
 	if fi, err := os.Stat(filepath.Join(cwd, "config")); err == nil && fi.IsDir() {
 		return cwd, nil // 已位于 control_plane 内
 	}
-	return "", fmt.Errorf("未找到 control_plane 目录（请在仓库根运行，或用 --dir 指定）")
+	return "", fmt.Errorf("control_plane directory not found (run from the repository root or pass --dir)")
 }
 
 // initRun 校验声明并收敛启动控制面：结构预检 → 控制面镜像内按运行时 schema
@@ -74,23 +92,23 @@ func initRun(o initOpts) error {
 	data, err := os.ReadFile(o.configFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("control plane configuration not found: %s\n"+
-				"先生成模板并编辑：kurrent config print init-defaults > %s", o.configFile, target)
+			return fmt.Errorf("control-plane declaration does not exist: %s\n"+
+				"Generate a template first and edit it: kurrent config print init-defaults > %s", o.configFile, target)
 		}
-		return fmt.Errorf("读取 %s: %w", o.configFile, err)
+		return fmt.Errorf("read %s: %w", o.configFile, err)
 	}
 	if err := validateControlPlaneConfig(data, o.configFile); err != nil {
 		return err
 	}
 	repoRoot := filepath.Dir(o.dir)
 
-	fmt.Println("==> kurrent init: building validation image (kurrent-control-plane)")
+	fmt.Println("==> kurrent init: building the validation image (kurrent-control-plane)")
 	if err := composeRun(repoRoot, "build", "kurrent-control-plane"); err != nil {
-		return fmt.Errorf("构建控制面镜像失败: %w", err)
+		return fmt.Errorf("build control-plane image failed: %w", err)
 	}
 	out, err := runConfigTool("kurrent-control-plane", "validate", data)
 	if err != nil {
-		return fmt.Errorf("%s 声明校验失败（未应用）:\n%s", o.configFile, err)
+		return fmt.Errorf("%s declaration validation failed (not applied):\n%s", o.configFile, err)
 	}
 	fmt.Printf("==> kurrent init: %s\n", strings.TrimSpace(out))
 
@@ -99,8 +117,8 @@ func initRun(o initOpts) error {
 	changed := !hadPrevious || !bytes.Equal(previous, data)
 
 	if o.configFile != target {
-		if err := os.WriteFile(target, data, 0o644); err != nil {
-			return fmt.Errorf("应用声明到 %s: %w", target, err)
+		if err := writeFileAtomic(target, data, 0o644); err != nil {
+			return fmt.Errorf("apply declaration to %s: %w", target, err)
 		}
 		fmt.Printf("==> kurrent init: applied %s -> %s\n", o.configFile, target)
 	}
@@ -110,32 +128,32 @@ func initRun(o initOpts) error {
 		notes := []string{}
 		switch {
 		case hadPrevious && changed:
-			if err := os.WriteFile(target, previous, 0o644); err != nil {
-				notes = append(notes, fmt.Sprintf("回滚旧声明失败: %v", err))
+			if err := writeFileAtomic(target, previous, 0o644); err != nil {
+				notes = append(notes, fmt.Sprintf("failed to roll back the previous declaration: %v", err))
 				break
 			}
-			notes = append(notes, fmt.Sprintf("已回滚到上一份声明（%s）", target))
+			notes = append(notes, fmt.Sprintf("rolled back to the previous declaration (%s)", target))
 			if err := composeRun(repoRoot, "restart", "kurrent-control-plane"); err != nil {
-				notes = append(notes, fmt.Sprintf("回滚重启控制面失败: %v", err))
+				notes = append(notes, fmt.Sprintf("failed to restart the control plane after rollback: %v", err))
 			} else if !waitControlPlaneHealthy(rollbackHealthWait) {
-				notes = append(notes, "回滚后的控制面仍未通过健康检查")
+				notes = append(notes, "the control plane still fails the health check after rollback")
 			}
 			if err := composeRun(repoRoot, "restart", "kurrent-dnsmasq"); err != nil {
-				notes = append(notes, fmt.Sprintf("回滚重启 dnsmasq 失败: %v", err))
+				notes = append(notes, fmt.Sprintf("failed to restart dnsmasq after rollback: %v", err))
 			}
 		case hadPrevious:
-			notes = append(notes, "声明内容未变化，未回滚文件")
+			notes = append(notes, "the declaration did not change; no file rollback was needed")
 		default:
-			notes = append(notes, fmt.Sprintf("无上一份声明可回滚，已保留 %s 供修正", target))
+			notes = append(notes, fmt.Sprintf("no previous declaration to roll back; %s was kept for correction", target))
 		}
 		return fmt.Errorf("%v\n%s", reason, strings.Join(notes, "\n"))
 	}
 
-	fmt.Println("==> kurrent init: starting control plane (docker compose up -d)")
+	fmt.Println("==> kurrent init: starting the control plane (docker compose up -d)")
 	if err := composeRun(repoRoot, "up", "-d"); err != nil {
 		return rollback(err)
 	}
-	fmt.Println("==> kurrent init: restarting kurrent-control-plane (apply declaration)")
+	fmt.Println("==> kurrent init: restarting kurrent-control-plane (applying the declaration)")
 	if err := composeRun(repoRoot, "restart", "kurrent-control-plane"); err != nil {
 		return rollback(err)
 	}
@@ -143,26 +161,26 @@ func initRun(o initOpts) error {
 	if wait == 0 {
 		wait = 30 * time.Second
 	}
-	fmt.Printf("==> kurrent init: waiting for control plane health (%s)\n", wait)
+	fmt.Printf("==> kurrent init: waiting for the control-plane health check (%s)\n", wait)
 	if !waitControlPlaneHealthy(wait) {
 		logs := containerLogs("kurrent-control-plane", 40)
 		return rollback(fmt.Errorf(
-			"控制面未在 %s 内通过健康检查（声明未生效）\n最近日志:\n%s", wait, logs))
+			"the control plane did not pass the health check within %s (declaration not applied)\nrecent logs:\n%s", wait, logs))
 	}
-	fmt.Println("==> kurrent init: restarting kurrent-dnsmasq (apply rendered conf)")
+	fmt.Println("==> kurrent init: restarting kurrent-dnsmasq (applying the rendered config)")
 	if err := composeRun(repoRoot, "restart", "kurrent-dnsmasq"); err != nil {
 		return rollback(err)
 	}
 	if !waitContainerRunning("kurrent-dnsmasq", dnsmasqStartupWatch) {
 		logs := containerLogs("kurrent-dnsmasq", 30)
 		return rollback(fmt.Errorf(
-			"dnsmasq 未能保持运行（dnsmasq.conf 可能不合法）\n最近日志:\n%s", logs))
+			"dnsmasq did not stay running (dnsmasq.conf may be invalid)\nrecent logs:\n%s", logs))
 	}
-	fmt.Println("==> kurrent init: done. 控制面已按声明运行：")
-	fmt.Println("    WebUI: https://<host>/（唯一入口 443）；控制面管理面只监听 unix socket（无 TCP 端口）")
-	fmt.Println("    管理凭据：control_plane/state/admin.conf（kurrent 自动发现，admin 证书走 443 mTLS）")
-	fmt.Println("    任意目录使用：kurrent credentials install（凭据快照到 ~/.kurrent，供 PATH 安装的二进制）")
-	fmt.Println("    运行态核对：kurrent config status；下一步：kurrent token create --agent-id <节点 id>")
+	fmt.Println("==> kurrent init: done. The control plane is running with the declaration:")
+	fmt.Println("    WebUI: https://<host>/ (the only entry on 443); the management API listens only on a unix socket (no TCP port)")
+	fmt.Println("    management credentials: control_plane/state/admin.conf (auto-discovered by kurrent; the admin certificate uses 443 mTLS)")
+	fmt.Println("    use from any directory: kurrent credentials install (snapshots credentials to ~/.kurrent for a PATH-installed binary)")
+	fmt.Println("    inspect runtime state: kurrent config status; next: kurrent token create (node id generated) or the WebUI Join Node action")
 	return nil
 }
 
@@ -170,7 +188,7 @@ func initRun(o initOpts) error {
 func containerLogs(name string, tail int) string {
 	out, err := exec.Command("docker", "logs", "--tail", strconv.Itoa(tail), name).CombinedOutput()
 	if len(out) == 0 {
-		return fmt.Sprintf("（无法读取 %s 日志: %v）", name, err)
+		return fmt.Sprintf("(cannot read %s logs: %v)", name, err)
 	}
 	return strings.TrimSpace(string(out))
 }
@@ -203,7 +221,7 @@ func composeRun(dir string, args ...string) error {
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker compose %s 失败（目录 %s）: %w", strings.Join(args, " "), dir, err)
+		return fmt.Errorf("docker compose %s failed (directory %s): %w", strings.Join(args, " "), dir, err)
 	}
 	return nil
 }
@@ -215,7 +233,7 @@ func composeRunStderr(dir string, args ...string) error {
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker compose %s 失败（目录 %s）: %w", strings.Join(args, " "), dir, err)
+		return fmt.Errorf("docker compose %s failed (directory %s): %w", strings.Join(args, " "), dir, err)
 	}
 	return nil
 }
@@ -245,13 +263,13 @@ func waitControlPlaneHealthy(timeout time.Duration) bool {
 func validateControlPlaneConfig(data []byte, path string) error {
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("解析 %s: %w", path, err)
+		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	if v := nodeValue(&root, "apiVersion"); v != "kurrent.io/v1" {
-		return fmt.Errorf("%s: apiVersion = %q, want kurrent.io/v1", path, v)
+		return fmt.Errorf("%s: apiVersion = %q, must be kurrent.io/v1", path, v)
 	}
 	if kind := nodeValue(&root, "kind"); kind != "ControlPlaneConfiguration" {
-		return fmt.Errorf("%s: kind = %q, want ControlPlaneConfiguration", path, kind)
+		return fmt.Errorf("%s: kind = %q, must be ControlPlaneConfiguration", path, kind)
 	}
 	netKeys := []string{"interface", "subnet", "dhcpRange", "gateway", "dns"}
 	var missing []string
@@ -261,16 +279,16 @@ func validateControlPlaneConfig(data []byte, path string) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("%s: networking 必填缺失（模板占位需替换）: %s", path, strings.Join(missing, ", "))
+		return fmt.Errorf("%s: required networking fields are missing (replace the template placeholders): %s", path, strings.Join(missing, ", "))
 	}
 	subnet := nodeValue(&root, "spec", "networking", "subnet")
 	if _, _, err := net.ParseCIDR(subnet); err != nil {
-		return fmt.Errorf("%s: spec.networking.subnet 须为 CIDR（如 192.168.80.0/24）: %s", path, subnet)
+		return fmt.Errorf("%s: spec.networking.subnet must be CIDR (e.g. 192.168.80.0/24): %s", path, subnet)
 	}
 	for _, k := range []string{"gateway", "dns"} {
 		v := nodeValue(&root, "spec", "networking", k)
 		if net.ParseIP(v) == nil {
-			return fmt.Errorf("%s: spec.networking.%s 须为 IP 地址: %s", path, k, v)
+			return fmt.Errorf("%s: spec.networking.%s must be an IP address: %s", path, k, v)
 		}
 	}
 	dhcpRange := nodeValue(&root, "spec", "networking", "dhcpRange")
@@ -278,7 +296,7 @@ func validateControlPlaneConfig(data []byte, path string) error {
 	if len(rangeIPs) != 2 ||
 		net.ParseIP(strings.TrimSpace(rangeIPs[0])) == nil ||
 		net.ParseIP(strings.TrimSpace(rangeIPs[1])) == nil {
-		return fmt.Errorf("%s: spec.networking.dhcpRange 须为 起止 IP 对（如 192.168.80.50,192.168.80.100）: %s",
+		return fmt.Errorf("%s: spec.networking.dhcpRange must be a start/end IP pair (e.g. 192.168.80.50,192.168.80.100): %s",
 			path, dhcpRange)
 	}
 	return nil

@@ -1,22 +1,25 @@
-# 控制面声明式配置：业务策略全部收敛到此文件，
-# 容器内路径/容器名属部署清单 docker-compose.yml 职责；运行时状态（注册窗口等）在
-# state/settings.json，不属声明配置。运行时文件不入库：模板与
-# `kurrent config print init-defaults` 输出同源——生成或复制本文件为 kurrent.yaml
-# 后编辑，kurrent init 校验并启动控制面（.gitignore 已忽略 kurrent.yaml）。
+# Control-plane declarative configuration: all business policy lives in this file.
+# Container paths and container names belong to the deployment manifest (docker-compose.yml);
+# runtime state (registration window, etc.) lives in state/settings.json and is not declarative.
+# Runtime files are not committed: this template matches
+# `kurrent config print init-defaults`. Generate or copy it as kurrent.yaml, edit it,
+# then run kurrent init to validate and start the control plane (.gitignore ignores kurrent.yaml).
 apiVersion: kurrent.io/v1
 kind: ControlPlaneConfiguration
 metadata:
   name: kurrent-cp
 spec:
-  # PXE 部署网络声明：
-  # dnsmasq.conf 由控制面启动时按本块生成（yml 是权威，conf 为派生物），勿手工编辑 dnsmasq.conf
+  # PXE deployment network declaration:
+  # the control plane renders dnsmasq.conf from this block at startup (the YAML is authoritative;
+  # the conf is derived). Do not edit dnsmasq.conf by hand.
   networking:
-    interface: enp3s0                  # 绑定网卡（dnsmasq interface= + bind-interfaces）
-    subnet: 192.168.80.0/24            # 服务网段（CIDR，掩码自动推导）
-    dhcpRange: 192.168.80.50,192.168.80.100   # DHCP 池起止
+    interface: enp3s0                  # Bind interface (dnsmasq interface= + bind-interfaces)
+    subnet: 192.168.80.0/24            # Service subnet (CIDR; the netmask is derived)
+    dhcpRange: 192.168.80.50,192.168.80.100   # DHCP pool start/end
     gateway: 192.168.80.2              # dhcp-option=3
     dns: 223.5.5.5                     # dhcp-option=6
-  # 组件 PKI 策略（三分根 CA users/nodes/control + 绑 agent_id 的 bootstrap token 引导 + 证书轮换）
+  # Component PKI policy (three root CAs users/nodes/control, agent_id-bound bootstrap
+  # tokens, and certificate rotation)
   pki:
     bootstrapTokenTtlMinutes: 60
     bootstrapTokenMaxTtlMinutes: 1440
@@ -24,31 +27,34 @@ spec:
     componentCertDays: 90
     renewThreshold: 0.2
     crlRefreshHours: 12
-  # TOFU 引导链服务器证书（自签，启动时幂等生成；nginx 只读挂载 state/certs）
+  # TOFU boot-chain server certificate (self-signed, generated idempotently at startup;
+  # nginx mounts state/certs read-only)
   serverCert:
     san: "IP:127.0.0.1,DNS:localhost"
     days: 3650
-    # 声明变化时是否重签（默认 false：仅报告漂移；重签会改变 TOFU 指纹）
+    # Re-issue when the declaration changes (default false: report drift only; re-issuing
+    # changes the TOFU fingerprint)
     rotateOnChange: false
-  # iPXE 引导行为
+  # iPXE boot behavior
   boot:
     defaultArch: x86_64
     menuTimeoutMs: 5000
     autoBootTimeoutMs: 1
-  # 管理面策略：会话 TTL、证书有效期、自动化 token TTL 上限
+  # Management policy: session TTL, certificate lifetimes, automation token TTL cap
   auth:
     sessionTtlHours: 12
     adminCertDays: 365
     userCertDaysMax: 3650
     tokenTtlHours: 24
     tokenMaxTtlHours: 720
-  # 设备注册窗口上限（窗口只在部署期短开，不可配置为永久）
+  # Device registration window limits (the window is opened briefly during deployment;
+  # it cannot be configured as permanent)
   registration:
     windowMaxTtlMinutes: 60
     windowMaxDevices: 1000
-  # DHHC-1 定期轮换与推送对账（0 = 关闭对应后台任务）
+  # DHHC-1 periodic rotation and push reconciliation (0 disables the corresponding background task)
   credentials:
     rotationDays: 90
     reconcileIntervalSeconds: 60
-  # 调用存储 Agent 超时（秒）
+  # Storage agent call timeout (seconds)
   agentTimeoutSec: 10

@@ -73,11 +73,13 @@ kurrent config status
 
 ```bash
 # Control plane: issue a bootstrap token bound to the node identity and print the full join command
-kurrent token create --agent-id storage-nvmet-01 --cp-url https://192.168.80.1
+kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.80.1
 
-# Node: paste the command from the previous step
-kurrent join https://192.168.80.1 --token <token> --agent-id storage-nvmet-01
+# Node: run the command output in the previous step
+kurrent join https://192.168.80.1 --token <token> --agent-id 3f2a9c1d8b7e
 ```
+
+`--agent-id` is the node identity and accepts only 12 lowercase hex characters; omit it to have the command generate one. Descriptive names go in the node declaration `metadata.remark`, never in the identity field. The control-plane address is an origin (a reverse-proxy path prefix is allowed); a mistakenly pasted `/api/cp` suffix is removed before the declaration is written.
 
 `join` does the following:
 
@@ -95,13 +97,13 @@ Outside the repository root, pass `--dir` to point at the `storager` directory.
 ### Bootstrap token
 
 ```bash
-kurrent token create --agent-id storage-nvmet-01
-kurrent token create --agent-id storage-nvmet-01 --uses 20 --ttl 2h
+kurrent token create --agent-id 3f2a9c1d8b7e
+kurrent token create --agent-id 3f2a9c1d8b7e --uses 20
 ```
 
-- Single-use by default, 60 minutes;
-- bound to `agent_id`; enroll accepts only the same identity;
-- `--uses` opens up the use count (maximum 100);
+- Single-use by default, 60 minutes (TTL comes from the control-plane declaration `spec.pki.bootstrapTokenTtlMinutes`);
+- bound to `agent_id` (12 lowercase hex); enroll accepts only the same identity;
+- `--uses` opens up the use count (1..1000, and no higher than the control-plane `spec.pki.bootstrapTokenMaxUses`, default 100);
 - prints a join command carrying the control-plane address and node id.
 
 ### Management token
@@ -113,10 +115,10 @@ kurrent token create --usage admin --scope readonly --ttl 24h
 
 - For scripts and WebUI sign-in;
 - `--scope` is `admin` / `readonly` / `enroll`;
-- 24 hours by default, up to 720 hours;
+- 24 hours by default; the upper bound comes from the control-plane `spec.auth.tokenMaxTtlHours` (default 720 hours);
 - only a SHA-256 digest is stored; plaintext appears once in the issuance response.
 
-`token list` lists unexpired entries; `token revoke <token_id>` deletes the entry and invalidates it immediately.
+`token list` lists unexpired entries; `token revoke <token_id>` deletes the entry and invalidates it immediately. `token_id` is the 6-character prefix before the dot (shown by `token list` or at issuance); pasting the full token is rejected so the secret never reaches server access logs.
 
 ## Certificates
 
@@ -126,7 +128,7 @@ kurrent cert issue alice --csr ./certs/alice.csr --days 365
 kurrent cert list
 kurrent cert revoke alice --serial <hex>
 kurrent cert components
-kurrent cert revoke-component storage-nvmet-01
+kurrent cert revoke-component 3f2a9c1d8b7e
 ```
 
 The private key is generated locally and never uploaded; only the CSR is submitted. `issue` requires the CN to be registered in `control_plane/state/users.yml`. Revocation re-signs the CRL, reloads nginx, and invalidates sessions bound to that certificate. Revoking a component also deletes that node's bootstrap tokens; recovery means issuing a new token and rerunning `join`.
@@ -138,10 +140,11 @@ The control plane issues a DHHC-1 key automatically when an nvmet system disk is
 ```bash
 kurrent workers credential show storage-worker-01
 kurrent workers credential set storage-worker-01 --generate
+kurrent workers credential set storage-worker-01 --secret-file /secure/dhhc1.key
 kurrent workers credential revoke storage-worker-01
 ```
 
-`--generate` creates a 32-byte key in place without printing plaintext. `set` reports per-Agent delivery status; the reconciliation thread retries failed deliveries. After revocation, the device's next boot is refused.
+`--generate` creates a 32-byte key in place without printing plaintext; an existing key is passed via `--secret-file` (mode 0600) or `--secret-stdin`, never as plaintext `--secret` on the command line. `set` reports per-Agent delivery status; the reconciliation thread retries failed deliveries. After revocation, the device's next boot is refused.
 
 ## Output and exit codes
 
@@ -149,17 +152,18 @@ kurrent workers credential revoke storage-worker-01
 | --- | --- |
 | Default output | Table |
 | `-o json` | Raw JSON for jq pipelines |
-| Empty fields | Shown as `-` |
-| Success | Exit code 0 |
-| Failure | Non-zero exit code, error on stderr |
+| Empty fields | Shown as `—` |
+| Success/help | Exit code 0 |
+| Runtime failure | Exit code 1, error on stderr |
+| Usage error | Exit code 2, command usage printed |
 
-Positional arguments can be mixed freely with `--key value`, `--key=value`, and `--flag`.
+Positional arguments can be mixed freely with `--key value`, `--key=value`, and `--flag`. Every command supports `-h`/`--help`; unknown flags, missing values, duplicate flags, and extra positional arguments are usage errors.
 
 ## Common errors
 
 | Symptom | Triage |
 | --- | --- |
-| `no management credentials` | Run inside the repository, run `credentials install`, or pass `--server` + `--token` |
+| `No management credentials found` | Run inside the repository, run `credentials install`, or pass `--server` + `--token` |
 | mTLS certificate error | Credential file does not match the server; rerun `credentials install` |
 | `config validate` fails | Fix the declaration per the error; unknown fields are rejected |
 | `join` stops at host preflight | Run `host-prepare.sh` as instructed and confirm kernel modules, configfs, and `tlshd` |
@@ -167,8 +171,7 @@ Positional arguments can be mixed freely with `--key value`, `--key=value`, and 
 
 ## Related pages
 
-- [Quickstart](../guide/quickstart.md)
-- [Deployment Guide](../guide/deployment.md)
+- [Deployment](../guide/deployment.md)
 - [Daily Operations](../guide/operations.md)
 - [Configuration Reference](./configuration.md)
 - [API Reference](./api.md)

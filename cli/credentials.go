@@ -139,10 +139,10 @@ func authHint() string {
 	}
 	server := strings.TrimRight(flagServer, "/")
 	if server == "" {
-		server = "（未指定 --server）"
+		server = "(--server not specified)"
 	}
-	return fmt.Sprintf("\n  未发现管理凭据（已查 control_plane/state/admin.conf（当前目录逐级上溯、可执行文件旁）与 ~/.kurrent/admin.conf），也未提供 --token，\n"+
-		"  本次以无凭据通道访问 %s。修法：kurrent credentials install（仓库内一次性安装，任意目录可用） ｜ --credentials <admin.conf 路径> ｜ --server + --token（管理面不监听本机回环端口）",
+	return fmt.Sprintf("\n  No management credentials found (checked control_plane/state/admin.conf by walking up from the cwd, next to the executable, and ~/.kurrent/admin.conf), and no --token was given;\n"+
+		"  this request uses the credential-less channel against %s. Fix: kurrent credentials install (one-time inside the repository, then works anywhere) | --credentials <admin.conf path> | --server + --token (the management API no longer listens on a local loopback port)",
 		server)
 }
 
@@ -154,14 +154,14 @@ func loadCredentials() *credentialsClient {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		fatal("读取管理凭据 %s: %v（--credentials 指定其他路径，或省略以回退 --server/--token）", path, err)
+		fatal("read management credentials %s: %v (pass --credentials with another path, or omit it to fall back to --server/--token)", path, err)
 	}
 	var cf credentialsFile
 	if err := yaml.Unmarshal(data, &cf); err != nil {
-		fatal("解析管理凭据 %s: %v", path, err)
+		fatal("parse management credentials %s: %v", path, err)
 	}
 	if cf.Server == "" || cf.ClientCert == "" || cf.ClientKey == "" {
-		fatal("管理凭据 %s 缺少 server/client-certificate/client-key", path)
+		fatal("management credentials %s are missing server/client-certificate/client-key", path)
 	}
 	c := &credentialsClient{
 		path:     path,
@@ -187,17 +187,17 @@ func loadCredentials() *credentialsClient {
 func (c *credentialsClient) client() *http.Client {
 	cert, err := tls.LoadX509KeyPair(c.certFile, c.keyFile)
 	if err != nil {
-		fatal("加载管理证书 %s: %v", c.certFile, err)
+		fatal("load management certificate %s: %v", c.certFile, err)
 	}
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 	if c.caFile != "" {
 		caPEM, err := os.ReadFile(c.caFile)
 		if err != nil {
-			fatal("读取管理凭据 CA %s: %v", c.caFile, err)
+			fatal("read management CA %s: %v", c.caFile, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			fatal("管理凭据 CA %s 无有效证书", c.caFile)
+			fatal("management CA %s contains no valid certificate", c.caFile)
 		}
 		tlsCfg.RootCAs = pool
 	}
@@ -209,18 +209,19 @@ func (c *credentialsClient) client() *http.Client {
 
 // serverURL：凭据文件的 server（nginx 唯一入口 API 根，含 /api/cp 前缀）；
 // --server 显式指定时覆盖（远程管理员指向 https://<host>/api/cp）。
-func (c *credentialsClient) serverURL() string {
+// 凭据文件是外部输入，地址在这里统一校验（缺 host/坏 scheme 直接报错，不发出请求）。
+func (c *credentialsClient) serverURL() (string, error) {
 	server := c.server
 	if flagServer != "" {
 		server = flagServer
 	}
-	return strings.TrimRight(server, "/")
+	return validateHTTPURL("management credential server (or --server)", server)
 }
 
 // credentialsHint 返回当前发现的管理凭据路径（连接失败提示用）；未启用返回 ""。
 func credentialsHint() string {
 	if path := discoverCredentials(); path != "" {
-		return fmt.Sprintf("（管理凭据: %s，可用 --server 覆盖其中的 server 地址）", path)
+		return fmt.Sprintf(" (management credentials: %s; --server overrides the server address)", path)
 	}
 	return ""
 }

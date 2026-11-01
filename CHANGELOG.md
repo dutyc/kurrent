@@ -13,6 +13,23 @@
 
 ---
 
+## 2026-11-01
+
+### 变更
+
+- **CLI 参数解析与帮助严格化**：每个命令声明自己的字符串/布尔标志、必填项与位置参数上下界；未知、重复、缺值与多余参数报用法错误（退出码 2）；`-h`/`--help` 与 `kurrent help [group [verb]]` 在任何副作用之前返回；退出码统一为 0 成功/帮助、1 运行失败、2 用法错误。全局标志只在命令组之前解析，子命令中误写会得到明确提示。
+- **CLI 输入校验与密钥输入**：所有对象 ID 做路径转义；URL、agent id、IP、role/tags、scope、TTL、uses、serial 与吊销原因在请求前校验。`workers credential set` 只接受 `--secret-file` / `--secret-stdin` / `--generate`，拒绝命令行明文 `--secret`；文件须为普通文件且权限不宽于 0600，密钥按 DHHC-1 载荷与 CRC32 校验。`cert issue` 在调用签发端点前检查输出路径并创建目录。
+- **CLI 上限与地址处理对齐控制面策略**：bootstrap token `--uses` 不再硬编码 100、管理 token `--ttl` 不再硬编码 720h，CLI 只挡 schema 绝对上限（1000 / 8760h），具体上限由控制面声明裁决；`join`/`--cp-url` 自动去除误贴的 `/api/cp` 后缀，IPv6 控制面地址按 `url.Hostname` + `JoinHostPort` 推导 advertise 地址。
+- **CLI 写盘原子化**：`init`/`join` 的声明、`.env` 与 bootstrap token 改为同目录临时文件 + rename；token 恒为 0600；生成的节点声明改用 `yaml.Marshal`，路径中的 `#` / `:` / 引号不再破坏 YAML。
+- **CLI 用户可见文本统一为英文**：`--help`、用法错误、运行期错误、进度输出、表格与摘要全部改为英文；`config print init-defaults|node-defaults` 的模板注释及 `control_plane/kurrent.yaml.example`、`storager/kurrent.yaml.example` 同步改为英文并保持同源。
+
+### 修复
+
+- **`kurrent token create --help` 曾真实签发 token**：旧解析器把 `--help` 当作被忽略的标志，命令继续按默认 bootstrap 身份签发。现在帮助在参数解析前短路；未知标志（如 `--agnet-id` 拼写错误）同样不会退化成“自动生成身份并签发”。
+- **CLI 若干静默错误**：`--disabled=false` 曾被误判、agent role 展示恒为 `disk`、空 tags 被编码为 `null`、`join` 对 IPv6 控制面地址解析失败、显式空 `--serial` 被当作“全部证书”——均已修复并补回归。
+
+---
+
 ## 2026-10-31
 
 ### 新增

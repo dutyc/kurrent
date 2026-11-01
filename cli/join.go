@@ -1,11 +1,11 @@
 // join 子命令：存储节点加入控制面并收敛到运行态（配置即声明）。
 // 命令携带控制面地址——签发命令输出即带地址，节点粘贴执行即获得地址，
 // 无需预编辑任何文件：kurrent join <cp-url> [--token T] [--agent-id ID]。
-// 节点声明 storager/kurrent.yaml 缺失时按模板自动生成（url=命令地址、name=随机短标识、
+// 节点声明 storager/kurrent.yaml 缺失时按模板自动生成（url=命令地址、name=12 位小写 hex、
 // backend nvmet、advertiseUrl 推导、diskDir/nqnBase 默认），已存在则读入并把地址同步
 // 进声明（非 forbid 式合并，未知字段与手工编辑保留；yml 即 kurrent.yaml，后续可编辑）。
-// 身份分层：name = 机器身份（bootstrap token 绑定它；--agent-id 写入，未给则 join
-// 自动生成随机短标识）；人工输入归 metadata.remark（备注，人类识别用，随首次 enroll
+// 身份分层：name = 机器身份（12 位小写 hex；bootstrap token 绑定它；--agent-id 写入，
+// 未给则 join 自动生成）；人工输入归 metadata.remark（备注，人类识别用，随首次 enroll
 // 带入控制面台账）。
 // 引导凭据落盘（--token 或既有 bootstrap/agent.token）→ .env 插值键同步 → 收敛启动
 // agent（docker compose 为内部编排细节，重跑幂等）。nvmet 后端先预检宿主前置
@@ -18,6 +18,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,20 +31,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var joinSpec = cmdSpec{
+	usage: joinUsage,
+	flags: []flagSpec{
+		{name: "agent-id", kind: flagString},
+		{name: "config", kind: flagString},
+		{name: "token", kind: flagString},
+		{name: "dir", kind: flagString},
+	},
+	minPos: 1, maxPos: 1, posNames: []string{"cp-url"},
+}
+
 func cmdJoin(args []string) {
-	p := parseArgs(args)
-	if len(p.pos) < 1 {
-		fatal("用法: kurrent join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]\n" +
-			"      <cp-url>: 控制面 HTTPS 入口（kurrent token\n" +
-			"      create 签发的命令直接带地址，粘贴即可执行）；\n" +
-			"      storager/kurrent.yaml 即节点声明：缺失时 join 按模板自动生成（地址/身份\n" +
-			"      标识自决），kurrent config print node-defaults 可预置模板再编辑；\n" +
-			"      bootstrap token 绑定节点身份，--agent-id 写入声明 metadata.name\n" +
-			"      （token create 输出的命令已携带）；引导凭据 --token 可选（不给则要求\n" +
-			"      storager/bootstrap/agent.token 已就位）")
+	p, help := mustParse(args, joinSpec)
+	if help {
+		return
 	}
-	if len(p.pos) > 1 {
-		fatal("多余位置参数: %s（用法: kurrent join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]）", strings.Join(p.pos[1:], " "))
+	cpURL, err := normalizeCpURL("<cp-url>", p.pos[0])
+	if err != nil {
+		usageError(joinUsage, err)
+	}
+	for _, flag := range []string{"agent-id", "config", "token", "dir"} {
+		if p.has(flag) && strings.TrimSpace(p.opt(flag, "")) == "" {
+			usageError(joinUsage, fmt.Errorf("--%s must not be empty", flag))
+		}
+	}
+	agentID := strings.TrimSpace(p.opt("agent-id", ""))
+	if agentID != "" && !validAgentID(agentID) {
+		usageError(joinUsage, fmt.Errorf("--agent-id must be 12 lowercase hex characters (machine identity; put descriptive names in metadata.remark): %q", agentID))
 	}
 	dir, err := resolveStoragerDir(p.opt("dir", ""))
 	if err != nil {
@@ -51,12 +67,12 @@ func cmdJoin(args []string) {
 	configFile := p.opt("config", filepath.Join(dir, "kurrent.yaml"))
 	if !filepath.IsAbs(configFile) {
 		if configFile, err = filepath.Abs(configFile); err != nil {
-			fatal("解析 --config: %v", err)
+			fatal("resolve --config: %v", err)
 		}
 	}
 	if err := joinRun(joinOpts{
-		dir: dir, configFile: configFile, cpURL: p.pos[0],
-		token: p.opt("token", ""), agentID: strings.TrimSpace(p.opt("agent-id", "")),
+		dir: dir, configFile: configFile, cpURL: cpURL,
+		token: p.opt("token", ""), agentID: agentID,
 	}); err != nil {
 		fatal("%v", err)
 	}
@@ -86,7 +102,7 @@ func waitForTokenFile(path string, timeout, interval time.Duration) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("等待 %s 超时（%s）", path, timeout)
+			return fmt.Errorf("timed out waiting for %s (%s)", path, timeout)
 		}
 		time.Sleep(interval)
 	}
@@ -97,13 +113,13 @@ func resolveStoragerDir(explicit string) (string, error) {
 	if explicit != "" {
 		abs, err := filepath.Abs(explicit)
 		if err != nil {
-			return "", fmt.Errorf("解析 --dir: %w", err)
+			return "", fmt.Errorf("resolve --dir: %w", err)
 		}
 		return abs, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("获取当前目录: %w", err)
+		return "", fmt.Errorf("get current directory: %w", err)
 	}
 	if fi, err := os.Stat(filepath.Join(cwd, "storager")); err == nil && fi.IsDir() {
 		return filepath.Join(cwd, "storager"), nil
@@ -111,28 +127,18 @@ func resolveStoragerDir(explicit string) (string, error) {
 	if _, err := os.Stat(filepath.Join(cwd, "nvmeof")); err == nil {
 		return cwd, nil // 已位于 storager 内
 	}
-	return "", fmt.Errorf("未找到 storager 目录（请在仓库根运行，或用 --dir 指定）")
+	return "", fmt.Errorf("storager directory not found (run from the repository root or pass --dir)")
 }
 
-var cpHostRe = regexp.MustCompile(`https?://([^/:]+)`)
+var errAgentIDRequired = fmt.Errorf("the bootstrap token is bound to a node identity: pass --agent-id <id>" +
+	" (the command printed by kurrent token create --agent-id already includes it; the id must match the binding)")
 
-var errAgentIDRequired = fmt.Errorf("bootstrap token 绑定节点身份：请用 --agent-id <id> 指定" +
-	"（kurrent token create --agent-id 输出的命令已携带；id 须与签发时的绑定一致）")
+var agentIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
-// normalizeAgentID agent_id 字符集规范化（校验用）：小写，非字母数字/点/横线字符替换为
-// '-'，保留 '.'——证书 CN 与控制面登记键仅用该字符集。身份由 join 自动生成，显式声明值
-// 经本函数归一后必须与原值一致，否则拒绝。
-func normalizeAgentID(hostname string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(hostname)) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return b.String()
+// validAgentID 节点身份（agent_id）只接受 12 位小写 hex：证书 CN、控制面登记键与
+// 数据面随机标识同构；描述性名称不进入身份，写 metadata.remark。
+func validAgentID(id string) bool {
+	return agentIDRe.MatchString(id)
 }
 
 // joinRun 校验/补默认节点声明并收敛启动 agent（测试直接调用，不经 cmdJoin）。
@@ -140,25 +146,28 @@ func joinRun(o joinOpts) error {
 	target := filepath.Join(o.dir, "kurrent.yaml")
 	// 控制面入口来自命令位置参数（必填）：
 	// 签发命令输出直接携带，节点执行即获得；同步为声明 spec.controlPlane.url
-	cpURL := strings.TrimRight(strings.TrimSpace(o.cpURL), "/")
-	if cpURL == "" {
-		return fmt.Errorf("cp-url 必填（kurrent join <cp-url> [--token T]）")
+	if strings.TrimSpace(o.cpURL) == "" {
+		return fmt.Errorf("cp-url is required (kurrent join <cp-url> [--token T])")
 	}
-	m := cpHostRe.FindStringSubmatch(cpURL)
-	if len(m) < 2 {
-		return fmt.Errorf("无法从 cp-url 解析主机名: %s", o.cpURL)
+	cpURL, err := normalizeCpURL("cp-url", o.cpURL)
+	if err != nil {
+		return err
+	}
+	cpParsed, err := url.Parse(cpURL)
+	if err != nil || cpParsed.Hostname() == "" {
+		return fmt.Errorf("cannot parse the control-plane address from cp-url: %s", o.cpURL)
 	}
 
 	// 节点声明：kurrent.yaml 缺失时按模板自动生成（无预置文件时用缺省模板：
 	// 生成后即权威声明，可后续手工编辑；--config 指向其他路径 = 应用为节点配置）
-	if o.agentID != "" && normalizeAgentID(o.agentID) != o.agentID {
-		return fmt.Errorf("--agent-id 含非法字符（字符集仅允许小写字母/数字/./-）: %s", o.agentID)
+	if o.agentID != "" && !validAgentID(o.agentID) {
+		return fmt.Errorf("--agent-id must be 12 lowercase hex characters (machine identity; put descriptive names in metadata.remark): %s", o.agentID)
 	}
 	data, err := os.ReadFile(o.configFile)
 	var root yaml.Node
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("读取 %s: %w", o.configFile, err)
+			return fmt.Errorf("read %s: %w", o.configFile, err)
 		}
 		nodeID := o.agentID
 		if nodeID == "" {
@@ -169,26 +178,31 @@ func joinRun(o joinOpts) error {
 				return err
 			}
 		}
-		if err := yaml.Unmarshal([]byte(newNodeDeclaration(nodeID, cpURL,
-			filepath.Join(filepath.Dir(o.dir), "storager_img"))), &root); err != nil {
-			return fmt.Errorf("解析配置模板: %w", err)
+		declaration, err := newNodeDeclaration(nodeID, cpURL,
+			filepath.Join(filepath.Dir(o.dir), "storager_img"))
+		if err != nil {
+			return fmt.Errorf("generate config template: %w", err)
 		}
-		fmt.Printf("==> kurrent join: no %s — generated from defaults\n", o.configFile)
+		if err := yaml.Unmarshal(declaration, &root); err != nil {
+			return fmt.Errorf("parse config template: %w", err)
+		}
+		fmt.Printf("==> kurrent join: %s not found; generated from the default template\n", o.configFile)
 	} else if err := yaml.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("解析 %s: %w", o.configFile, err)
+		return fmt.Errorf("parse %s: %w", o.configFile, err)
 	}
 	if kind := nodeValue(&root, "kind"); kind != "NodeConfiguration" {
-		return fmt.Errorf("%s: kind = %q, want NodeConfiguration", o.configFile, kind)
+		return fmt.Errorf("%s: kind = %q, must be NodeConfiguration", o.configFile, kind)
 	}
 
 	// agent_id：机器身份——bootstrap token 绑定的就是这个 id。--agent-id 写入声明
 	// （与已声明值不一致即拒绝，身份须稳定）；声明留空且未给 --agent-id 时自动生成
-	// 随机短标识（12 位 hex，与盘 os_tag 同构、docker 容器 ID 短形式）；给了 --token
-	// 却无身份则拒绝（随机 id 必然与 token 绑定不符，提前报错胜过 enroll 401）。
+	// 12 位小写 hex（与盘 os_tag 同构、docker 容器 ID 短形式）；给了 --token 却无身份
+	// 则拒绝（随机 id 必然与 token 绑定不符，提前报错胜过 enroll 401）。
+	// 身份只接受 12 位小写 hex；描述性名称写 metadata.remark。
 	agentID := strings.TrimSpace(nodeValue(&root, "metadata", "name"))
 	if o.agentID != "" {
 		if agentID != "" && agentID != o.agentID {
-			return fmt.Errorf("%s: metadata.name=%s 与 --agent-id=%s 不一致（节点身份须稳定，勿中途改名）",
+			return fmt.Errorf("%s: metadata.name=%s does not match --agent-id=%s (the node identity must stay stable; do not rename it midway)",
 				o.configFile, agentID, o.agentID)
 		}
 		if agentID == "" {
@@ -206,8 +220,8 @@ func joinRun(o joinOpts) error {
 		}
 		agentID = nodeID
 		setPath(&root, agentID, "metadata", "name")
-	} else if normalizeAgentID(agentID) != agentID {
-		return fmt.Errorf("%s: metadata.name 含非法字符（机器身份，由 join 自动生成、勿手工输入——人工输入请写入 metadata.remark；字符集仅允许小写字母/数字/./-）",
+	} else if !validAgentID(agentID) {
+		return fmt.Errorf("%s: metadata.name must be 12 lowercase hex characters (machine identity generated by join; do not enter it manually -- put descriptive names in metadata.remark)",
 			o.configFile)
 	}
 	// 命令地址同步进声明（引导输入权威；agent/nvmet-host enroll/renew 的 mTLS 连接目标）
@@ -221,7 +235,7 @@ func joinRun(o joinOpts) error {
 	switch backend {
 	case "nvmet", "stgt", "lio":
 	default:
-		return fmt.Errorf("%s: spec.agent.backend 非法: %s（nvmet|stgt|lio）", o.configFile, backend)
+		return fmt.Errorf("%s: invalid spec.agent.backend: %s (nvmet|stgt|lio)", o.configFile, backend)
 	}
 	var composeDir string
 	switch backend {
@@ -245,36 +259,38 @@ func joinRun(o joinOpts) error {
 	// 但可能归 root 所有；无权限时告警，提示先手工建好）
 	if diskDir := nodeValue(&root, "spec", "agent", "diskDir"); diskDir != "" {
 		if err := os.MkdirAll(diskDir, 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "kurrent: 警告: 盘目录不可建（%s）: %v——请先创建并确保可写\n", diskDir, err)
+			fmt.Fprintf(os.Stderr, "kurrent: warning: cannot create disk directory (%s): %v -- create it first and make sure it is writable\n", diskDir, err)
 		}
 	}
 	if strings.TrimSpace(nodeValue(&root, "spec", "agent", "nqnBase")) == "" {
 		setPath(&root, "nqn.2026-07.com.kurrent", "spec", "agent", "nqnBase")
 	}
 	// advertise：声明留空 → 推导 https://<cp-host>:4840；特殊场景（NAT 等）编辑
-	// kurrent.yaml 的 spec.agent.advertiseUrl 覆盖
+	// kurrent.yaml 的 spec.agent.advertiseUrl 覆盖。Hostname() 去端口/方括号，
+	// JoinHostPort 负责 IPv6 方括号。
 	if strings.TrimSpace(nodeValue(&root, "spec", "agent", "advertiseUrl")) == "" {
-		setPath(&root, "https://"+m[1]+":4840", "spec", "agent", "advertiseUrl")
+		setPath(&root, "https://"+net.JoinHostPort(cpParsed.Hostname(), "4840"),
+			"spec", "agent", "advertiseUrl")
 	}
 
 	// 写回节点配置（非 forbid 式合并：未知/手工编辑字段原样保留；kurrent.yaml 即声明）
 	out, err := yaml.Marshal(&root)
 	if err != nil {
-		return fmt.Errorf("序列化 %s: %w", target, err)
+		return fmt.Errorf("serialize %s: %w", target, err)
 	}
 	// 写盘前用 agent 镜像内同一份 schema 全量校验：未知字段/非法值当场失败，
 	// 不会等容器启动才崩溃（合并保留的未知字段按 extra="forbid" 拒绝）。
-	fmt.Println("==> kurrent join: building validation image (storager-agent)")
+	fmt.Println("==> kurrent join: building the validation image (storager-agent)")
 	if err := composeRun(composeDir, "build", "storager-agent"); err != nil {
-		return fmt.Errorf("构建 storager-agent 镜像失败: %w", err)
+		return fmt.Errorf("build storager-agent image failed: %w", err)
 	}
 	summary, err := runConfigTool("storager-agent", "validate", out)
 	if err != nil {
-		return fmt.Errorf("%s 声明校验失败（未写入）:\n%s", target, err)
+		return fmt.Errorf("%s declaration validation failed (not written):\n%s", target, err)
 	}
 	fmt.Printf("==> kurrent join: %s\n", strings.TrimSpace(summary))
-	if err := os.WriteFile(target, out, 0o644); err != nil {
-		return fmt.Errorf("写入 %s: %w", target, err)
+	if err := writeFileAtomic(target, out, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", target, err)
 	}
 	if o.configFile != target {
 		fmt.Printf("==> kurrent join: applied %s -> %s\n", o.configFile, target)
@@ -287,20 +303,21 @@ func joinRun(o joinOpts) error {
 	// （迁移清理，将由 agent 引导时重新派生；stgt/lio 后端不产生该文件）
 	bootstrapDir := filepath.Join(o.dir, "bootstrap")
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
-		return fmt.Errorf("创建 %s: %w", bootstrapDir, err)
+		return fmt.Errorf("create %s: %w", bootstrapDir, err)
 	}
 	tokenFile := filepath.Join(bootstrapDir, "agent.token")
 	if strings.TrimSpace(o.token) != "" {
-		if err := os.WriteFile(tokenFile, []byte(strings.TrimSpace(o.token)+"\n"), 0o600); err != nil {
-			return fmt.Errorf("写入 %s: %w", tokenFile, err)
+		// 原子写 + 恒 0600：已有 token 文件权限过宽时也会被收敛
+		if err := writeFileAtomic(tokenFile, []byte(strings.TrimSpace(o.token)+"\n"), 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", tokenFile, err)
 		}
 	} else if data, err := os.ReadFile(tokenFile); err != nil || strings.TrimSpace(string(data)) == "" {
-		return fmt.Errorf("bootstrap token missing: %s 不存在或为空——kurrent join --token <token> 传入（kurrent token create --agent-id %s 签发）",
+		return fmt.Errorf("missing bootstrap token: %s does not exist or is empty -- pass it with kurrent join --token <token> (issued by kurrent token create --agent-id %s)",
 			tokenFile, agentID)
 	}
 	if backend == "nvmet" {
 		if err := os.Remove(filepath.Join(bootstrapDir, "nvmet-host.token")); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("清除旧 %s: %w", filepath.Join(bootstrapDir, "nvmet-host.token"), err)
+			return fmt.Errorf("remove old %s: %w", filepath.Join(bootstrapDir, "nvmet-host.token"), err)
 		}
 	}
 	// .env 仅保留 compose 插值键（业务键已收敛到 kurrent.yaml，旧键自动清空）
@@ -321,33 +338,33 @@ func joinRun(o joinOpts) error {
 
 	fmt.Printf("==> kurrent join: agent=%s backend=%s cp=%s\n", agentID, backend, cpURL)
 	fmt.Printf("==> kurrent join: node configuration -> %s\n", target)
-	fmt.Printf("==> kurrent join: bootstrap token -> %s（nvmet-host.token 由 agent enroll 派生自动生成）\n", tokenFile)
+	fmt.Printf("==> kurrent join: bootstrap token -> %s (nvmet-host.token is derived automatically from agent enroll)\n", tokenFile)
 	fmt.Printf("==> kurrent join: starting %s (compose)\n", composeDir)
 	if err := composeRun(composeDir, "--env-file", "../.env", "up", "-d"); err != nil {
 		return err
 	}
-	fmt.Println("==> kurrent join: restarting storager-agent (apply declaration & token)")
+	fmt.Println("==> kurrent join: restarting storager-agent (applying the declaration and token)")
 	if err := composeRun(composeDir, "--env-file", "../.env", "restart", "storager-agent"); err != nil {
 		return err
 	}
 	if !waitContainerRunning("storager-agent", agentStartupWatch) {
-		return fmt.Errorf("storager-agent 启动后未保持运行；docker logs storager-agent 查看原因")
+		return fmt.Errorf("storager-agent did not stay running after start; check docker logs storager-agent")
 	}
 	if backend == "nvmet" {
 		nvmetTokenPath := filepath.Join(bootstrapDir, "nvmet-host.token")
 		fmt.Println("==> kurrent join: waiting for agent enroll -> nvmet-host bootstrap token")
 		if err := nvmetTokenWaiter(nvmetTokenPath, nvmetTokenWaitTimeout, nvmetTokenPollInterval); err != nil {
 			return fmt.Errorf(
-				"agent did not complete enroll: %v；检查 docker logs storager-agent，待其写出 %s 后执行 "+
+				"agent did not complete enroll: %v; check docker logs storager-agent, then after it writes %s run "+
 					"docker compose --env-file ../.env restart nvmet-host", err, nvmetTokenPath)
 		}
-		fmt.Println("==> kurrent join: restarting nvmet-host (consumes derived token)")
+		fmt.Println("==> kurrent join: restarting nvmet-host (consuming the derived token)")
 		if err := composeRun(composeDir, "--env-file", "../.env", "restart", "nvmet-host"); err != nil {
 			return err
 		}
 	}
-	fmt.Println("==> kurrent join: done. 容器首次启动会自动引导证书；")
-	fmt.Println("    控制面侧验证: kurrent agents list（或 WebUI「Agent 列表」看 health=ok）")
+	fmt.Println("==> kurrent join: done. On first start the containers bootstrap their certificates automatically;")
+	fmt.Println("    verify from the control plane: kurrent agents list (or the WebUI Agents page, health=ok)")
 	return nil
 }
 
@@ -372,32 +389,32 @@ func hostPreflightNvmet(storagerDir string) error {
 	var missing []string
 	for _, m := range []string{"nvmet", "nvmet_tcp"} { // /sys/module 用下划线名（modprobe 名 nvmet-tcp）
 		if _, err := os.Stat(filepath.Join(hostEnvPaths.sysModuleRoot, m)); err != nil {
-			missing = append(missing, "内核模块未加载: "+strings.ReplaceAll(m, "_", "-"))
+			missing = append(missing, "kernel module not loaded: "+strings.ReplaceAll(m, "_", "-"))
 		}
 	}
 	if !configfsMounted() {
-		missing = append(missing, "configfs 未挂载: /sys/kernel/config")
+		missing = append(missing, "configfs not mounted: /sys/kernel/config")
 	}
 	tlshdBad := false
 	ver, err := hostEnvPaths.tlshd()
 	switch {
 	case err != nil:
 		tlshdBad = true
-		missing = append(missing, "tlshd 不可用: "+err.Error())
+		missing = append(missing, "tlshd unavailable: "+err.Error())
 	case !versionAtLeast(ver, tlshdMinVersion):
 		tlshdBad = true
-		missing = append(missing, fmt.Sprintf("tlshd 版本过低: %s（需 >= %s；1.5.0 起进程 keyring 优先，旧版会在 PSK 轮换后遮蔽新密钥）",
+		missing = append(missing, fmt.Sprintf("tlshd version too old: %s (requires >= %s; 1.5.0+ prefers the process keyring, older versions mask new keys after a PSK rotation)",
 			ver, tlshdMinVersion))
 	}
 	if len(missing) == 0 {
 		return nil
 	}
-	hint := fmt.Sprintf("修复（需 root，幂等）: sudo bash %s", filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
+	hint := fmt.Sprintf("fix (root required, idempotent): sudo bash %s", filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
 	if tlshdBad {
-		hint += fmt.Sprintf("\n  tlshd: 安装/升级 ktls-utils >= %s 并 sudo systemctl enable --now tlshd（构建步骤见 %s）",
+		hint += fmt.Sprintf("\n  tlshd: install/upgrade ktls-utils >= %s and run sudo systemctl enable --now tlshd (build steps: %s)",
 			tlshdMinVersion, filepath.Join(storagerDir, "nvmeof", "nvmet-host", "README.md"))
 	}
-	return fmt.Errorf("宿主机 nvmet 前置未就绪（存储数据面无法起服）:\n  %s\n  %s",
+	return fmt.Errorf("host nvmet prerequisites are not ready (the storage data plane cannot start):\n  %s\n  %s",
 		strings.Join(missing, "\n  "), hint)
 }
 
@@ -413,11 +430,11 @@ func (e hostEnv) tlshd() (string, error) {
 func detectTlshdVersion() (string, error) {
 	bin := tlshdBinaryPath()
 	if bin == "" {
-		return "", fmt.Errorf("未安装（需 ktls-utils >= %s）", tlshdMinVersion)
+		return "", fmt.Errorf("not installed (ktls-utils >= %s required)", tlshdMinVersion)
 	}
 	out, err := exec.Command(bin, "-v").CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s -v 失败: %v", bin, err)
+		return "", fmt.Errorf("%s -v failed: %v", bin, err)
 	}
 	ver, err := parseTlshdVersion(string(out))
 	if err != nil {
@@ -429,10 +446,10 @@ func detectTlshdVersion() (string, error) {
 		switch strings.TrimSpace(string(state)) {
 		case "loaded":
 			if err := exec.Command("systemctl", "is-active", "--quiet", "tlshd").Run(); err != nil {
-				return "", fmt.Errorf("服务未运行（sudo systemctl enable --now tlshd）")
+				return "", fmt.Errorf("service not running (run sudo systemctl enable --now tlshd)")
 			}
 		case "masked":
-			return "", fmt.Errorf("tlshd.service 被 mask")
+			return "", fmt.Errorf("tlshd.service is masked")
 		}
 	}
 	return ver, nil
@@ -467,7 +484,7 @@ func parseTlshdVersion(out string) (string, error) {
 	if m := tlshdVersionRe.FindStringSubmatch(out); m != nil {
 		return m[1], nil
 	}
-	return "", fmt.Errorf("无法解析 tlshd 版本输出: %q", strings.TrimSpace(out))
+	return "", fmt.Errorf("cannot parse tlshd version output: %q", strings.TrimSpace(out))
 }
 
 func versionAtLeast(v, min string) bool {
@@ -505,30 +522,39 @@ func configfsMounted() bool {
 func newNodeID() (string, error) {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("生成节点身份: %w", err)
+		return "", fmt.Errorf("generate node identity: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }
 
-// newNodeDeclaration 缺省节点声明（kurrent.yaml 缺失时 join 自动生成；仅 remark 一行
-// 提示注释，权威声明——后续可手工编辑或 kurrent config print node-defaults 预置模板）。
+// newNodeDeclaration 缺省节点声明（kurrent.yaml 缺失时 join 自动生成，权威声明——
+// 后续可手工编辑或 kurrent config print node-defaults 预置模板）。
 // 分层职责：容器内路径/监听属 compose 职责；token 在独立凭据文件；
 // diskDir = 宿主存储路径（默认仓库 storager_img，与 compose 一致）。
-func newNodeDeclaration(agentID, cpURL, diskDir string) string {
-	return fmt.Sprintf(`apiVersion: kurrent.io/v1
-kind: NodeConfiguration
-metadata:
-  name: %s
-  # 备注（可选，人类识别用）：手工输入的唯一字段；随首次 enroll 登记进控制面台账（WebUI 可改）
-  remark: ""
-spec:
-  agent:
-    backend: nvmet
-    diskDir: %s
-    nqnBase: nqn.2026-07.com.kurrent
-  controlPlane:
-    url: %s
-`, agentID, diskDir, cpURL)
+// 用 yaml.Marshal 而非字符串拼接：路径里的 #、:、引号不会破坏文档结构。
+func newNodeDeclaration(agentID, cpURL, diskDir string) ([]byte, error) {
+	decl := map[string]any{
+		"apiVersion": "kurrent.io/v1",
+		"kind":       "NodeConfiguration",
+		"metadata": map[string]any{
+			"name":   agentID,
+			"remark": "",
+		},
+		"spec": map[string]any{
+			"agent": map[string]any{
+				"backend": "nvmet",
+				"diskDir": diskDir,
+				"nqnBase": "nqn.2026-07.com.kurrent",
+			},
+			"controlPlane": map[string]any{"url": cpURL},
+		},
+	}
+	out, err := yaml.Marshal(decl)
+	if err != nil {
+		return nil, err
+	}
+	header := "# Node declaration (generated by kurrent join from the default template; remark is a human-readable note)\n"
+	return append([]byte(header), out...), nil
 }
 
 // ── kurrent.yaml 读/改/写（yaml.v3 Node 树，保留未知字段）──
@@ -664,8 +690,8 @@ func upsertEnv(path string, entries []envEntry) error {
 	for _, e := range entries {
 		lines = append(lines, e.key+"="+e.value)
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		return fmt.Errorf("写入 %s: %w", path, err)
+	if err := writeFileAtomic(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

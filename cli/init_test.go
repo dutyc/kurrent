@@ -230,7 +230,7 @@ func TestInitFullSchemaValidationFailureDoesNotApply(t *testing.T) {
 	}
 	t.Setenv("FAKE_DOCKER_RUN_EXIT", "3")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "声明校验失败") ||
+	if err == nil || !strings.Contains(err.Error(), "declaration validation failed") ||
 		!strings.Contains(err.Error(), "unknownField") {
 		t.Fatalf("err = %v, want 全量校验失败（含字段错误）", err)
 	}
@@ -254,7 +254,7 @@ func TestInitRollsBackOnHealthFailure(t *testing.T) {
 	}
 	t.Setenv("FAKE_DOCKER_HEALTH", "unhealthy")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "回滚到上一份声明") {
+	if err == nil || !strings.Contains(err.Error(), "rolled back to the previous declaration") {
 		t.Fatalf("err = %v, want 回滚提示", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
@@ -280,7 +280,7 @@ func TestInitFailsWhenDnsmasqDoesNotStayRunning(t *testing.T) {
 	}
 	t.Setenv("FAKE_DOCKER_RUNNING", "false")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "dnsmasq 未能保持运行") {
+	if err == nil || !strings.Contains(err.Error(), "dnsmasq did not stay running") {
 		t.Fatalf("err = %v, want dnsmasq 起服失败", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
@@ -298,7 +298,7 @@ func TestInitBuildFailureBeforeApply(t *testing.T) {
 	}
 	t.Setenv("FAKE_DOCKER_FAIL", "build")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "构建控制面镜像失败") {
+	if err == nil || !strings.Contains(err.Error(), "build control-plane image failed") {
 		t.Fatalf("err = %v, want 构建失败", err)
 	}
 }

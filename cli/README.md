@@ -61,32 +61,39 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
   agents list [--no-live] [-o table|json]    列出 Agent（含存活探测）
   agents get <id>                             查看单个 Agent
   agents add <id> --base-url URL [--role disk,cd] [--storager-ip IP] [--tags a,b] [--remark TEXT] [--disabled]
+                                              <id> 为机器身份（12 位小写 hex）；描述性名称用 --remark
   agents edit <id> --base-url URL [...]       更新 Agent（全量覆盖，参数同 add；不带
                                               --remark/--tags 即清空对应字段）
   agents remove <id>                          删除 Agent 台账（含母盘标签）
-  agents probe --base-url URL                 探测 Agent 能力（不落盘）
+  agents probe --base-url URL [--agent-id ID] 探测 Agent 能力（不落盘）
   token create [--usage bootstrap|admin] [--agent-id ID] [--cp-url URL]
                [--uses N] [--scope admin,readonly,enroll] [--ttl 24h]
                                               签发凭据：
                                               bootstrap（默认）引导 token——绑定节点
-                                              身份（--agent-id；省略则生成随机 12 位 hex
-                                              标识），enroll 只接受该节点、默认一次性、
-                                              60 分钟；--uses N 放开次数（≤100）；输出带
-                                              地址与节点 id 的 join 命令；admin 管理 token
-                                              （认证器链 Bearer，供脚本与 WebUI 登录；
-                                              --scope 收窄权限，--ttl 默认 24h、上限 720h）
+                                              身份（--agent-id 为 12 位小写 hex；省略则生成），
+                                              描述性名称写节点声明 metadata.remark；
+                                              enroll 只接受该节点、默认一次性、
+                                              60 分钟；--uses N 放开次数（1..1000，
+                                              且不超过控制面 bootstrapTokenMaxUses，
+                                              默认 100）；输出带地址与节点 id 的 join
+                                              命令；admin 管理 token（认证器链 Bearer，
+                                              供脚本与 WebUI 登录；--scope 收窄权限，
+                                              --ttl 默认 24h，上限由控制面
+                                              tokenMaxTtlHours 决定，默认 720h）
   token list [-o table|json]                  列出未过期 token 台账（不返回明文摘要；
                                               与 WebUI「凭据」页同源）
   token revoke <token_id>                     吊销 token：删除台账条目，
-                                              立即失效、无法恢复
+                                              立即失效、无法恢复（只传点号前的
+                                              6 位 token_id，别粘贴完整 token）
   sessions list [-o table|json]               管理面会话台账（session_id = sha256(jti)）
   sessions revoke <session_id>                逐个吊销：删登记，下一请求立即失效
   sessions revoke-all                         全部下线：清空登记并递增 epoch
   cert keygen <cn> [--out DIR] [--force]      本地生成 RSA-2048 私钥与 CSR：写
                                               <DIR>/<cn>.key（0600）与 <cn>.csr，
                                               私钥永不上送（默认 DIR=.）
-  cert issue <cn> --csr FILE [--days N]       把本地 CSR 交给 users CA 签发（用户须先在
-                                              users.yml 登记），只写 <DIR>/<cn>.crt
+  cert issue <cn> --csr FILE [--days N] [--out DIR] [--force]
+                                              把本地 CSR 交给 users CA 签发（用户须先在
+                                              users.yml 登记），写 <DIR>/<cn>.crt
   cert list [-o table|json]                   列出 users CA 签发的证书（含吊销/过期）
   cert revoke <cn> [--serial HEX] [--reason REASON]
                                               吊销证书（--serial 只废一张，只踢绑定该
@@ -124,20 +131,23 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
                                               的节点身份，token create 输出的命令已携带）；
                                               nvmet 后端预检宿主前置（内核模块 + configfs +
                                               tlshd >= 1.5.0），未就绪指路 nvmeof/host-prepare.sh
-  workers list | workers get <id>             Worker 台账（只读）
-  workers credential show <id> [-o json]      查看 NVMe-oF 认证密钥与推送状态
-  workers credential set <id> --secret DHHC-1:... | --generate
-                                              轮换认证密钥（--generate 就地生成 32 字节
-                                              随机密钥，不打印明文；固件经 /boot-vars
-                                              注入）。nvmet 建盘已自动签发，此处只用于
-                                              显式轮换
+  workers list [-o table|json]                Worker 台账（只读）
+  workers get <id>                            Worker 详情（JSON）
+  workers credential show <id> [-o table|json] 查看 NVMe-oF 认证密钥与推送状态
+  workers credential set <id> (--secret-file PATH | --secret-stdin | --generate)
+                                              轮换认证密钥（不接受命令行明文；
+                                              --generate 就地生成 32 字节随机密钥，
+                                              不打印明文；固件经 /boot-vars 注入）。
+                                              nvmet 建盘已自动签发，此处只用于显式轮换
   workers credential revoke <id>              吊销认证密钥（下次引导被拒绝；未送达由
                                               控制面对账自动重试）
   ops list [--limit N] [-o table|json]        操作审计日志（只读）
   version                                     输出版本号（发版构建 -ldflags 注入，如 v0.3.0）
 ```
 
-位置参数与 `--key value` / `--key=value` / `--flag` 可任意混排（如 `agents add cli-test-01 --base-url https://x`）。
+位置参数与 `--key value` / `--key=value` / `--flag` 可任意混排（如 `agents add 0123456789ab --base-url https://x`）。
+所有命令支持 `-h`/`--help`；未知标志、缺值、重复标志与多余位置参数均报用法错误。
+退出码：`0` 成功/帮助，`1` 运行失败，`2` 用法错误。值以 `-` 开头时用 `--key=value` 或以 `--` 分隔位置参数。
 
 ## 控制面初始化
 
@@ -168,12 +178,13 @@ $EDITOR control_plane/kurrent.yaml
 
 ```bash
 # 1) 控制面：签发绑定节点身份的 bootstrap token；输出带地址与节点 id 的 join 命令
-./kurrent token create --agent-id node-01 --cp-url https://192.168.1.10
-#    → kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id node-01
-#    （省略 --agent-id 则生成随机 12 位 hex 身份，join 命令同样携带）
+./kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.1.10
+#    → kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id 3f2a9c1d8b7e
+#    （省略 --agent-id 则生成随机 12 位小写 hex 身份，join 命令同样携带；
+#      描述性名称写入 metadata.remark）
 
 # 2) 节点（存储服务器上，仓库根目录执行——命令已携带地址与节点 id，粘贴即用）：
-./kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id node-01
+./kurrent join https://192.168.1.10 --token a1b2c3.0123456789abcdef --agent-id 3f2a9c1d8b7e
 #    → storager/kurrent.yaml 缺失时按模板自动生成（url=命令地址、name=自动生成的
 #      随机标识、backend nvmet、advertiseUrl 推导、diskDir/nqnBase 默认），已存在则
 #      读入合并并同步地址（非 forbid：手工编辑保留；yml 即 kurrent.yaml 后续可编辑）
@@ -190,9 +201,9 @@ $EDITOR control_plane/kurrent.yaml
 
 要点：
 
-- bootstrap token 为**绑定节点身份**的引导凭据（`<6位>.<16位>`，控制面只存 sha256 摘要）：签发时指定 `--agent-id`（= 节点声明 `metadata.name`；省略则生成随机 12 位 hex 短标识，与盘 os_tag 同构），enroll 只接受同一身份；人工输入归属 `metadata.remark` 备注；控制面地址由 join 命令携带（同步进声明 `spec.controlPlane.url`）
-- token **默认一次性**（TTL 60 分钟、上限 24 小时）：使用额度在签发前原子占用、签发失败退回；批量引导用 `--uses N`（1-100）显式放开。每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
-- 管理 token 用 `--scope`（`admin` 默认 / `readonly` 只读 / `enroll` 仅签发引导 token）与 `--ttl`（默认 24h、上限 720h）收窄权限与寿命；台账记录 `last_used_at`，列表与 WebUI 可对照使用情况
+- bootstrap token 为**绑定节点身份**的引导凭据（`<6位>.<16位>`，控制面只存 sha256 摘要）：签发时指定 `--agent-id`（= 节点声明 `metadata.name`；只接受 12 位小写 hex，与盘 os_tag 同构；省略则生成），enroll 只接受同一身份；描述性名称归属 `metadata.remark` 备注；控制面地址由 join 命令携带（同步进声明 `spec.controlPlane.url`）
+- token **默认一次性**（TTL 60 分钟、上限 24 小时）：使用额度在签发前原子占用、签发失败退回；批量引导用 `--uses N`（1..1000，且不超过控制面 `bootstrapTokenMaxUses`，默认 100）显式放开。每次 `token create` 都是新签，旧 token 到期自然失效、也可随时 `token revoke <token_id>` 吊销（删条目即失效，Bearer 校验无缓存）；token 不进 yml（引导凭据在独立文件 `storager/bootstrap/agent.token`）
+- 管理 token 用 `--scope`（`admin` 默认 / `readonly` 只读 / `enroll` 仅签发引导 token）与 `--ttl`（默认 24h；上限由控制面 `tokenMaxTtlHours` 决定，默认 720h）收窄权限与寿命；台账记录 `last_used_at`，列表与 WebUI 可对照使用情况
 - `nvmet-host` 组件凭据**不手工签发**：agent enroll 上报 `backend=nvmet` 时控制面派生随响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）
 - nvmet 后端 join 在 agent 收敛启动后等待上述派生凭据重新写出（默认 60 秒），再自动重启 `nvmet-host`。组件证书被吊销后，签发新 bootstrap token（`kurrent token create` 或 WebUI「证书」→「恢复」）并重跑 join 即完成恢复——旧证书无需手工删除
 - nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）与 configfs 挂载——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`；`--check` 只读诊断）；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
@@ -208,8 +219,12 @@ $EDITOR control_plane/kurrent.yaml
 kurrent workers credential set worker-01 --generate
 #    → 输出逐 Agent 推送状态：已送达 / 部分生效（节点 TLS 未就绪） / 未送达（对账线程自动重试）
 
-kurrent workers credential show worker-01    # 密钥哈希前缀 + 推送状态（-o json 原始返回）
-kurrent workers credential revoke worker-01  # 吊销（轮换 = 再 set 一次即可）
+# 已有密钥轮换：从文件或 stdin 读取（不接受 --secret 命令行明文——会进进程列表与 shell 历史）
+kurrent workers credential set worker-01 --secret-file /secure/dhhc1.key   # 文件须 0600
+printf '%s\n' "$KEY" | kurrent workers credential set worker-01 --secret-stdin
+
+kurrent workers credential show worker-01       # 密钥哈希前缀 + 推送状态（-o json 原始返回）
+kurrent workers credential revoke worker-01     # 吊销（轮换 = 再 set 一次即可）
 ```
 
 - 密钥明文只存在于控制面密钥库与推送链路（Agent 缓存 → configfs），CLI/WebUI 不保存、不打印
@@ -228,7 +243,9 @@ kurrent workers credential revoke worker-01  # 吊销（轮换 = 再 set 一次�
 ## 输出
 
 - 默认表格（`-o table`）；`-o json` 输出原始 JSON（便于 jq 管道）
-- 空字段以 `-` 占位；退出码非 0 表示失败（错误信息输出到 stderr）
+- 空字段以 `—` 占位
+- 帮助：每个命令支持 `-h`/`--help`；`kurrent help [group [verb]]` 查看同一份文本
+- 退出码：`0` 成功/帮助；`1` 运行失败；`2` 用法错误（未知/重复/缺值标志、非法参数）
 
 ## 测试与回归
 

@@ -1,53 +1,60 @@
-# 节点声明式配置
+# Node declarative configuration
 #
-# 权威配置来源：模板与 `kurrent config print node-defaults` 输出同源——生成或复制
-# 本文件为 storager/kurrent.yaml 后编辑（kurrent.yaml 不入库）；kurrent join
-# <cp-url> --token <token> --agent-id <id> 校验并收敛启动 agent（地址与节点 id 随
-# 签发命令携带，kurrent.yaml 缺失时由 join 自动生成）。agent 与 nvmet-host 容器
-# 挂载同一份文件（/etc/kurrent/kurrent.yaml，只读），各自加载自己的 spec 子块。
+# Authoritative source: this template matches `kurrent config print node-defaults`.
+# Generate or copy it as storager/kurrent.yaml, then edit it (kurrent.yaml is not committed).
+# kurrent join <cp-url> --token <token> --agent-id <id> validates it and converges the agent
+# (the address and node id are carried by the printed command; join generates kurrent.yaml
+# when missing). The agent and nvmet-host containers mount the same file
+# (/etc/kurrent/kurrent.yaml, read-only) and each loads its own spec subtree.
 #
-# 分层职责：本文件只声明节点级业务配置（身份/数据面参数）；
-# - 容器内路径（pki/cp-ca/日志/缓存/盘目录挂载点）与监听/内部通讯地址属部署清单
-#   docker-compose.yml 职责（compose 硬编码挂载目标，应用侧以模块常量固化）
-# - 引导凭据在独立文件 storager/bootstrap/：agent.token（绑节点身份的 token：
-#   join 写入、默认一次性、60 分钟）；nvmet-host.token 由 agent
-#   enroll 上报 backend=nvmet 时控制面派生随响应下发并落盘（绑 agent_id、不预知后端）
-# - diskDir = 宿主存储路径（数据目录声明；
-#   join 同步为 .env 的 KURRENT_DISK_DIR 插值键，compose 挂载源）
+# Layering: this file declares node-level business configuration (identity/data-plane parameters) only.
+# - Container paths (pki/cp-ca/logs/cache/disk mounts) and listen/internal addresses belong
+#   to the deployment manifest (docker-compose.yml); the application fixes mount targets in constants.
+# - Bootstrap credentials live in separate files under storager/bootstrap/: agent.token (bound to the
+#   node identity; written by join, single-use, 60 minutes) and nvmet-host.token (derived by the
+#   control plane when an agent enrolls with backend=nvmet and returned in the response; bound to
+#   agent_id, without knowing the backend in advance).
+# - diskDir = host storage path (data directory declaration; join syncs it to the .env
+#   KURRENT_DISK_DIR interpolation key used as the compose mount source).
 #
-# 校验语义（pydantic v2）：未知字段拒绝（extra="forbid"）、必填缺失报错、
-# 默认值注入、身份/路径/NQN 语义校验——kurrent join 与 kurrent config validate
-# 在写盘前用 agent 镜像内同一份 schema 校验，配置错误不会等到容器启动才暴露。
-# 容器内路径固定 /etc/kurrent/kurrent.yaml（KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
+# Validation semantics (pydantic v2): unknown fields are rejected (extra="forbid"), missing
+# required fields fail, defaults are injected, and identity/path/NQN semantics are validated.
+# kurrent join and kurrent config validate use the same schema inside the agent image before
+# writing, so configuration errors do not wait for container startup.
+# The container path is fixed at /etc/kurrent/kurrent.yaml (KURRENT_CONFIG_FILE can override
+# it for test injection).
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  # 节点身份 = agent_id（控制面 agents.yml 登记键、组件证书 CN）：机器身份——由
-  # bootstrap token 绑定（kurrent token create --agent-id；省略则生成 12 位 hex 随机
-  # 标识，与盘 os_tag 同构），join 写入并持久化，勿手工改写；身份须稳定，多节点
-  # 各自一个、天然不冲突。模板留空：join 必须写入（空值在 validate 时拒绝）
+  # Node identity = agent_id (control-plane agents.yml key, component certificate CN): a machine
+  # identity that accepts only 12 lowercase hex characters (same shape as disk os_tag and short
+  # Docker container IDs), bound by the bootstrap token (kurrent token create --agent-id;
+  # generated when omitted). join writes and persists it; do not edit it by hand. The identity
+  # must stay stable and is naturally unique per node. The template leaves it empty: join must write it.
   name: ""
-  # 备注（可选，人类识别用）：手工输入的唯一字段（如 storage-nvmet-01 / 生产存储）。
-  # 随首次 enroll 登记进控制面台账（WebUI Agent 卡片展示、编辑表单可改），
-  # 不参与任何身份/数据面运算
+  # Remark (optional, for human recognition): the only place for a descriptive name
+  # (e.g. production storage / rack A). It is registered on first enroll (shown on WebUI agent
+  # cards and editable in the form) and is not used in any identity or data-plane computation.
   remark: ""
 spec:
   agent:
-    # 数据面后端（必填）：nvmet（首选/默认）| stgt | lio
+    # Data-plane backend (required): nvmet (preferred/default) | stgt | lio
     backend: nvmet
-    # 控制面可达地址（enroll 自动登记写入 agents.yml base_url；kurrent join 默认推导
-    # https://<cp-host>:4840，特殊场景（NAT 等）手工编辑本键覆盖）
+    # Control-plane reachable address (enroll registers it as agents.yml base_url; kurrent join
+    # derives https://<cp-host>:4840 by default; edit this key for NAT and similar cases)
     # advertiseUrl: https://host.docker.internal:4840
-    # 宿主存储路径（必填，绝对路径；数据目录声明，compose 挂载源经 .env 插值同步）
+    # Host storage path (required, absolute; data directory declaration; compose mount source
+    # synced through the .env interpolation key)
     diskDir: /storager_img
-    # 盘标识命名空间（必填；权威：NQN，iSCSI 数据面 IQN 由此派生）
-    # 控制面不声明 NQN 域：Host NQN 与盘 NQN 的 base 均以本字段为权威
-    # （enroll 经 capabilities.base_nqn 上报，控制面由盘 NQN 前缀重拼）
+    # Disk identifier namespace (required; NQN is authoritative; the iSCSI data-plane IQN is derived from it)
+    # The control plane does not declare an NQN domain: both host NQN and disk NQN bases use
+    # this field (reported through capabilities.base_nqn during enroll; the control plane
+    # reassembles it from the disk NQN prefix)
     nqnBase: nqn.2026-07.com.kurrent
   controlPlane:
-    # 控制面 API 端点（agent/nvmet-host 容器 enroll/renew 的 mTLS 连接目标——指向
-    # 控制面服务，与 WebUI/nginx 访问入口无关；kurrent join
-    # <cp-url> 会把命令地址同步写入本键，预填亦可，命令参数为准；nvmet-host 容器为
-    # host 网络，compose 经 extra_hosts 把 host.docker.internal 映射到宿主 loopback，
-    # 因此两组件使用本字段的语义一致）
+    # Control-plane API endpoint (the mTLS target for agent/nvmet-host enroll/renew; points at
+    # the control-plane service, unrelated to the WebUI/nginx entry; kurrent join <cp-url> syncs
+    # the command address into this key, so a pre-filled value is allowed but the command wins;
+    # the nvmet-host container uses host networking and compose maps host.docker.internal to the
+    # host loopback through extra_hosts, so both components interpret this field the same way)
     url: https://host.docker.internal

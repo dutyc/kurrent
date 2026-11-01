@@ -11,7 +11,7 @@ import (
 func TestConfigValidateControlPlane(t *testing.T) {
 	repo, cp, _, logFile := newFakeRepo(t)
 	writeControlPlaneConfig(t, cp, cpYAML)
-	if err := configInspect("validate", parseArgs([]string{"--dir", repo})); err != nil {
+	if err := configInspect("validate", parseConfigArgs(t, "--dir", repo)); err != nil {
 		t.Fatal(err)
 	}
 	log := readLog(t, logFile)
@@ -32,7 +32,7 @@ func TestConfigShowNode(t *testing.T) {
 	}
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = configInspect("show", parseArgs([]string{"--dir", repo, "--node"}))
+		runErr = configInspect("show", parseConfigArgs(t, "--dir", repo, "--node"))
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -55,7 +55,7 @@ func TestConfigDispatchNodeBackendComposeDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(stgt), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := configInspect("validate", parseArgs([]string{"--dir", repo, "--node"})); err != nil {
+	if err := configInspect("validate", parseConfigArgs(t, "--dir", repo, "--node")); err != nil {
 		t.Fatal(err)
 	}
 	log := readLog(t, logFile)
@@ -68,7 +68,7 @@ func TestConfigValidationFailurePropagates(t *testing.T) {
 	repo, cp, _, _ := newFakeRepo(t)
 	writeControlPlaneConfig(t, cp, cpYAML)
 	t.Setenv("FAKE_DOCKER_RUN_EXIT", "3")
-	err := configInspect("validate", parseArgs([]string{"--dir", repo}))
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
 	if err == nil || !strings.Contains(err.Error(), "unknownField") {
 		t.Fatalf("err = %v, want 字段级错误", err)
 	}
@@ -86,7 +86,7 @@ func TestResolveRepoRootFromComponentDirs(t *testing.T) {
 
 func TestConfigMissingFile(t *testing.T) {
 	repo, _, _, _ := newFakeRepo(t)
-	err := configInspect("validate", parseArgs([]string{"--dir", repo}))
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
 	if err == nil || !strings.Contains(err.Error(), "print init-defaults") {
 		t.Fatalf("err = %v, want 模板指引", err)
 	}
@@ -95,8 +95,17 @@ func TestConfigMissingFile(t *testing.T) {
 func TestConfigUnknownKind(t *testing.T) {
 	repo, cp, _, _ := newFakeRepo(t)
 	writeControlPlaneConfig(t, cp, strings.Replace(cpYAML, "kind: ControlPlaneConfiguration", "kind: SomethingElse", 1))
-	err := configInspect("validate", parseArgs([]string{"--dir", repo}))
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
 	if err == nil || !strings.Contains(err.Error(), "SomethingElse") {
 		t.Fatalf("err = %v, want kind 错误", err)
 	}
+}
+
+func parseConfigArgs(t *testing.T, args ...string) parsedArgs {
+	t.Helper()
+	p, help := mustParse(args, configInspectSpec)
+	if help {
+		t.Fatal("unexpected help")
+	}
+	return p
 }
