@@ -102,6 +102,8 @@ control_plane/state/users.yml
 control_plane/state/sessions.yml
 # 认证审计与告警（运行时生成，含主体/证书证据，不入库）
 control_plane/state/audit.jsonl
+# 整个状态目录整体忽略：运行时台账、备份与后续新增文件都不入库
+control_plane/state/
 # 根级误落盘防再犯：未设 env 重定向的本地运行以仓库根为 cwd 时，control_plane 默认相对路径会在此落盘（测试产物）
 /state/
 /config/
