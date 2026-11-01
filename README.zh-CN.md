@@ -17,17 +17,19 @@ Kurrent 是一套云原生无状态裸金属交付范式。它将“无状态”
 
 ## 快速开始
 
-数分钟内拉起控制面并接入存储节点，见[文档站](https://dutyc.github.io/kurrent/)的部署章节。`kurrent` CLI 随 [Releases](https://github.com/dutyc/kurrent/releases) 提供 Linux amd64/arm64 与 Windows amd64 预编译二进制。
+数分钟内拉起控制面并接入存储节点，见文档站的[部署](https://dutyc.github.io/kurrent/guide/deployment.html)章节。`kurrent` CLI 随 [Releases](https://github.com/dutyc/kurrent/releases) 提供 Linux amd64/arm64 与 Windows amd64 预编译二进制。
 
-[CLI](./cli/README.md)、[控制面 API](./api/control-plane-api.zh-CN.md) 与[架构](./about/zh/ARCHITECTURE.md)文档在仓库内维护。
+## 文档
+
+[文档站](https://dutyc.github.io/kurrent/)覆盖部署、系统盘定制、日常运维、故障排查与参考手册。[CLI](./cli/README.md)、[控制面 API](./api/control-plane-api.zh-CN.md) 与[架构](./about/zh/ARCHITECTURE.md)文档在仓库内维护。
 
 ## 交付流程
 
-设备首启入池；在 WebUI 完成绑定 Worker、创建系统盘、设置默认盘后即可开机。一台 Worker 可挂多块系统盘并在菜单中切换。整机冷启动已在 **Debian 12/13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2 与 openSUSE Leap 16.0** 验证，验证范围不构成发行版限制。
+设备首启入池；在 WebUI 完成绑定 Worker、创建系统盘、设置默认盘后即可开机。一台 Worker 可挂多块系统盘并在菜单中切换。母盘与系统盘制备、首次启动见[系统盘定制](https://dutyc.github.io/kurrent/guide/system-disk.html)与[首次交付](https://dutyc.github.io/kurrent/guide/usage.html)。整机冷启动已在 **Debian 12/13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2 与 openSUSE Leap 16.0** 验证，详见[发行版矩阵](https://dutyc.github.io/kurrent/reference/distributions.html)，验证范围不构成发行版限制。
 
 ## 固件仓库
 
-引导固件由配套仓库 **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)** 构建：Kurrent 让算力无状态，固件仓库让引导固件无状态。
+引导固件由配套仓库 **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)** 构建：Kurrent 让算力无状态，固件仓库让引导固件无状态。构建与部署步骤见[固件构建与部署](https://dutyc.github.io/kurrent/firmware/build-deploy.html)。
 
 ## 路线图
 

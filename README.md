@@ -18,17 +18,19 @@ Storage is NVMe-oF-first: an in-kernel NVMe/TCP target exports system disks, wit
 
 ## Getting Started
 
-Deploy a control plane and join storage nodes in minutes — see the deployment guide on the [docs site](https://dutyc.github.io/kurrent/en/). The `kurrent` CLI ships prebuilt binaries on [Releases](https://github.com/dutyc/kurrent/releases) for Linux amd64/arm64 and Windows amd64.
+Deploy a control plane and join storage nodes in minutes — see [Deployment](https://dutyc.github.io/kurrent/en/guide/deployment.html) on the documentation site. The `kurrent` CLI ships prebuilt binaries on [Releases](https://github.com/dutyc/kurrent/releases) for Linux amd64/arm64 and Windows amd64.
 
-[CLI](./cli/README.md), [control-plane API](./api/control-plane-api.en.md) and [architecture](./about/en/ARCHITECTURE.md) documentation live in the repository.
+## Documentation
+
+The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment, system disk customization, operations, troubleshooting, and reference material. [CLI](./cli/README.md), [control-plane API](./api/control-plane-api.en.md) and [architecture](./about/en/ARCHITECTURE.md) documents live in the repository.
 
 ## Delivery Flow
 
-A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0; the verification set does not limit which distributions can boot.
+A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. [System Disk Customization](https://dutyc.github.io/kurrent/en/guide/system-disk.html) and [First Delivery](https://dutyc.github.io/kurrent/en/guide/usage.html) cover image preparation and the first boot. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0; see the [distribution matrix](https://dutyc.github.io/kurrent/en/reference/distributions.html) for details, and the verification set does not limit which distributions can boot.
 
 ## Firmware Repo
 
-The boot-chain firmware is built by the companion repository **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)**: Kurrent makes compute stateless, the firmware repository makes boot firmware stateless.
+The boot-chain firmware is built by the companion repository **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)**: Kurrent makes compute stateless, the firmware repository makes boot firmware stateless. Build and deployment steps are documented in [Firmware Build and Deployment](https://dutyc.github.io/kurrent/en/firmware/build-deploy.html).
 
 ## Roadmap
 
