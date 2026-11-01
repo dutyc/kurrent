@@ -21,7 +21,7 @@ Kurrent 是一套云原生无状态裸金属交付范式。它将“无状态”
 
 ## 文档
 
-[文档站](https://dutyc.github.io/kurrent/)覆盖部署、系统盘定制、日常运维、故障排查与参考手册。[CLI](./cli/README.md)、[控制面 API](./api/control-plane-api.zh-CN.md) 与[架构](./about/zh/ARCHITECTURE.md)文档在仓库内维护。
+[文档站](https://dutyc.github.io/kurrent/)覆盖部署、系统盘定制、日常运维、故障排查与参考手册：[CLI 参考](https://dutyc.github.io/kurrent/reference/cli.html)、[API 参考](https://dutyc.github.io/kurrent/reference/api.html)、[架构总览](https://dutyc.github.io/kurrent/architecture/)。
 
 ## 交付流程
 

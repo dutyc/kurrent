@@ -22,7 +22,7 @@ Deploy a control plane and join storage nodes in minutes — see [Deployment](ht
 
 ## Documentation
 
-The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment, system disk customization, operations, troubleshooting, and reference material. [CLI](./cli/README.md), [control-plane API](./api/control-plane-api.en.md) and [architecture](./about/en/ARCHITECTURE.md) documents live in the repository.
+The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment, system disk customization, operations, troubleshooting, and reference material: [CLI reference](https://dutyc.github.io/kurrent/en/reference/cli.html), [API reference](https://dutyc.github.io/kurrent/en/reference/api.html), [architecture overview](https://dutyc.github.io/kurrent/en/architecture/).
 
 ## Delivery Flow
 
