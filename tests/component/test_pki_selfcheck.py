@@ -110,9 +110,9 @@ def _make_pki(tmp_path: Path, *, revoked=(), expired_client=False,
     pki = tmp_path / "pki"
     pki.mkdir(parents=True)
     ca_key, ca_cert = _ca()
-    client_key, client_cert = _leaf(ca_key, ca_cert, "agent-node-a", CLIENT_SERIAL,
+    client_key, client_cert = _leaf(ca_key, ca_cert, "agent-23456789abcd", CLIENT_SERIAL,
                                     expired=expired_client)
-    serving_key, serving_cert = _leaf(ca_key, ca_cert, "agent-node-a", SERVING_SERIAL)
+    serving_key, serving_cert = _leaf(ca_key, ca_cert, "agent-23456789abcd", SERVING_SERIAL)
     (pki / "ca-nodes.crt").write_bytes(_pem(ca_cert))
     (pki / "ca-control.crt").write_bytes(_pem(ca_cert))
     (pki / "client.crt").write_bytes(_pem(client_cert))
@@ -149,7 +149,7 @@ def _serve_crl(monkeypatch, mod, pem: bytes) -> None:
 
 def _client(mod, pki: Path, *, token=None, cp_base="https://cp", cp_ca=None):
     component = "agent" if mod is AGENT else "nvmet-host"
-    return mod.PkiClient("node-a", component, pki, cp_base, cp_ca, token)
+    return mod.PkiClient("23456789abcd", component, pki, cp_base, cp_ca, token)
 
 
 @pytest.fixture(autouse=True)

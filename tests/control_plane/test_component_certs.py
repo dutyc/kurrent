@@ -37,7 +37,7 @@ def _csr(cn: str, sans: list[str] | None = None) -> bytes:
     return builder.sign(_key(), hashes.SHA256()).public_bytes(serialization.Encoding.PEM)
 
 
-def _issue(pki_dir, agent_id: str = "node-a") -> dict[str, bytes]:
+def _issue(pki_dir, agent_id: str = "23456789abcd") -> dict[str, bytes]:
     ca_cert, ca_key = pki.ensure_ca_set(pki_dir)["nodes"]
     return pki.sign_component_certs(
         ca_cert, ca_key, agent_id, "agent",
@@ -63,8 +63,8 @@ def test_issue_registers_client_and_serving(tmp_pki):
     certs = _issue(tmp_pki)
     items = pki.list_component_certs(tmp_pki)
     assert {(i["agent_id"], i["kind"], i["cn"]) for i in items} == {
-        ("node-a", "client", "agent-node-a"),
-        ("node-a", "serving", "agent-node-a"),
+        ("23456789abcd", "client", "agent-23456789abcd"),
+        ("23456789abcd", "serving", "agent-23456789abcd"),
     }
     assert {i["serial"] for i in items} == {_serial(certs["client.crt"]),
                                            _serial(certs["serving.crt"])}
@@ -74,7 +74,7 @@ def test_issue_registers_client_and_serving(tmp_pki):
 def test_revoke_writes_nodes_crl(tmp_pki):
     """吊销 → nodes CRL 含两个序列号，且 clients.crl（users+nodes 拼接）里同样可见。"""
     certs = _issue(tmp_pki)
-    revoked = pki.revoke_component_cert(tmp_pki, "node-a", "key_compromise")
+    revoked = pki.revoke_component_cert(tmp_pki, "23456789abcd", "key_compromise")
     assert {e["kind"] for e in revoked} == {"client", "serving"}
     serials = {int(e["serial"], 16) for e in revoked}
     assert serials == {int(_serial(certs["client.crt"]), 16),
@@ -94,7 +94,7 @@ def test_revoke_writes_nodes_crl(tmp_pki):
 def test_revoke_single_serial_keeps_other(tmp_pki):
     certs = _issue(tmp_pki)
     target = _serial(certs["client.crt"])
-    revoked = pki.revoke_component_cert(tmp_pki, "node-a", "superseded", serial=target)
+    revoked = pki.revoke_component_cert(tmp_pki, "23456789abcd", "superseded", serial=target)
     assert [e["serial"] for e in revoked] == [target]
     listed = {i["serial"]: i for i in pki.list_component_certs(tmp_pki)}
     assert listed[target]["revoked_at"]
@@ -103,9 +103,9 @@ def test_revoke_single_serial_keeps_other(tmp_pki):
 
 def test_revoke_rejects_bad_input(tmp_pki):
     with pytest.raises(ValueError, match="unknown revocation reason"):
-        pki.revoke_component_cert(tmp_pki, "node-a", "nope")
+        pki.revoke_component_cert(tmp_pki, "23456789abcd", "nope")
     with pytest.raises(ValueError, match="invalid serial"):
-        pki.revoke_component_cert(tmp_pki, "node-a", serial="not-hex")
+        pki.revoke_component_cert(tmp_pki, "23456789abcd", serial="not-hex")
 
 
 def test_unregistered_legacy_serial_is_not_revoked(tmp_pki):
@@ -121,7 +121,7 @@ def test_component_cert_revoked_lookup(tmp_pki):
     certs = _issue(tmp_pki)
     serial = _serial(certs["client.crt"])
     assert pki.component_cert_revoked(tmp_pki, serial) is False
-    pki.revoke_component_cert(tmp_pki, "node-a", serial=serial)
+    pki.revoke_component_cert(tmp_pki, "23456789abcd", serial=serial)
     assert pki.component_cert_revoked(tmp_pki, serial) is True
     assert pki.component_cert_revoked(tmp_pki, "not-hex") is False
 
@@ -129,16 +129,16 @@ def test_component_cert_revoked_lookup(tmp_pki):
 def test_list_and_revoke_endpoints(client, tmp_pki, auth_headers):
     """API：列表 → 吊销（串行号）→ 列表状态；bootstrap token 一并删除。"""
     certs = _issue(tmp_pki)
-    token = pki.issue_bootstrap_token(tmp_pki, agent_id="node-a")
+    token = pki.issue_bootstrap_token(tmp_pki, agent_id="23456789abcd")
     token_id = token.split(".", 1)[0]
 
     listed = client.get("/pki/components", headers=auth_headers).json()
     assert len(listed) == 2
 
-    res = client.delete("/pki/components/node-a", headers=auth_headers)
+    res = client.delete("/pki/components/23456789abcd", headers=auth_headers)
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["revoked"] == "node-a"
+    assert body["revoked"] == "23456789abcd"
     assert sorted(body["kinds"]) == ["client", "serving"]
     assert len(body["serials"]) == 2
     assert pki.get_bootstrap_token(tmp_pki, token_id) is None
@@ -152,12 +152,12 @@ def test_list_and_revoke_endpoints(client, tmp_pki, auth_headers):
 def test_revoke_endpoint_serial_and_errors(client, tmp_pki, auth_headers):
     certs = _issue(tmp_pki)
     serial = _serial(certs["client.crt"])
-    res = client.delete(f"/pki/components/node-a?serial={serial}", headers=auth_headers)
+    res = client.delete(f"/pki/components/23456789abcd?serial={serial}", headers=auth_headers)
     assert res.status_code == 200
     assert res.json()["serials"] == [serial]
 
     assert client.delete("/pki/components/ghost", headers=auth_headers).status_code == 404
-    assert client.delete("/pki/components/node-a?serial=not-hex",
+    assert client.delete("/pki/components/23456789abcd?serial=not-hex",
                          headers=auth_headers).status_code == 400
 
 
@@ -165,13 +165,13 @@ def test_renew_rejects_revoked_serial(client, tmp_pki):
     """renew 兜底：CRL 尚未 reload 时，已吊销序列号也不换新证。"""
     certs = _issue(tmp_pki)
     serial = _serial(certs["client.crt"])
-    pki.revoke_component_cert(tmp_pki, "node-a", serial=serial)
+    pki.revoke_component_cert(tmp_pki, "23456789abcd", serial=serial)
 
     res = client.post("/enroll/renew", json={
-        "agent_id": "node-a", "component": "agent",
+        "agent_id": "23456789abcd", "component": "agent",
         "csr_client": "FAKE", "csr_serving": "FAKE",
     }, headers={
-        "X-Client-Cert-Dn": "/CN=agent-node-a",
+        "X-Client-Cert-Dn": "/CN=agent-23456789abcd",
         "X-Client-Cert-Serial": serial,
         "X-Client-Class": "component",
     })
@@ -252,12 +252,12 @@ def test_renew_accepts_unrevoked_serial(client, tmp_pki, monkeypatch):
 
     with _store.locked():
         from control_plane.app.stores import agents
-        agents.add("node-a", "", role_disk=True, enabled=True, tags=["auto"])
+        agents.add("23456789abcd", "", role_disk=True, enabled=True, tags=["auto"])
     res = client.post("/enroll/renew", json={
-        "agent_id": "node-a", "component": "agent",
+        "agent_id": "23456789abcd", "component": "agent",
         "csr_client": "FAKE", "csr_serving": "FAKE",
     }, headers={
-        "X-Client-Cert-Dn": "/CN=agent-node-a",
+        "X-Client-Cert-Dn": "/CN=agent-23456789abcd",
         "X-Client-Cert-Serial": serial,
         "X-Client-Class": "component",
     })

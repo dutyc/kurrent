@@ -158,11 +158,11 @@ spec:
 | --- | --- | --- | --- |
 | `apiVersion` | string | yes | Fixed `kurrent.io/v1` |
 | `kind` | string | yes | Fixed `NodeConfiguration` |
-| `metadata.name` | string | yes | Node identity (agent_id), 1–63 chars, lowercase letters, digits, dot or dash |
-| `metadata.remark` | string | no | Human-readable note, defaults to empty |
+| `metadata.name` | string | yes | Node identity (agent_id): 12 lowercase hex characters, same form as the disk `os_tag` |
+| `metadata.remark` | string | no | Human-readable note (the only place for a descriptive name), defaults to empty |
 | `spec` | object | yes | See below |
 
-`metadata.name` is both the control-plane registry key and the component certificate CN, bound by the bootstrap token. After `kurrent join` writes it, it should not be edited by hand.
+`metadata.name` is both the control-plane registry key and the component certificate CN, bound by the bootstrap token. After `kurrent join` writes it, it should not be edited by hand. Descriptive names belong in `metadata.remark`, never in the identity field.
 
 ### `spec.agent`
 
@@ -185,7 +185,7 @@ spec:
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  name: storage-nvmet-01
+  name: 3f2a9c1d8b7e
   remark: Production storage
 spec:
   agent:

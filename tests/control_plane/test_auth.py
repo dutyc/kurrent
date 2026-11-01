@@ -80,7 +80,7 @@ class TestCredentialChain:
 
     def test_bearer_bootstrap_token_rejected(self, client, secure):
         """bootstrap token（usage=enroll）不是管理凭据 → 401。"""
-        token = pki.issue_bootstrap_token(settings.pki_dir, agent_id="auto-01")
+        token = pki.issue_bootstrap_token(settings.pki_dir, agent_id="456789abcdef")
         res = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
         assert res.status_code == 401
 

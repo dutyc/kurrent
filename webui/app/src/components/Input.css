@@ -44,6 +44,12 @@
   cursor: not-allowed;
 }
 
+.field-input[readonly] {
+  background: var(--gray-50);
+  color: var(--gray-600);
+  cursor: default;
+}
+
 .field-input-error {
   border-color: var(--gray-700);
 }

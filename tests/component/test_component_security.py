@@ -189,10 +189,10 @@ def test_nvmet_host_gate_uses_nodes_issuer(monkeypatch):
     store = nvmet_security.CrlStore()
     store.update("nodes", x509.load_pem_x509_crl(_crl(key, ca).encode()))
     ident = nvmet_security.verify_peer(
-        _scope(cn="agent-node-a", issuer="kurrent-ca-nodes", serial=1),
-        allowed_cns={"agent-node-a", "nvmet-node-a"},
+        _scope(cn="agent-23456789abcd", issuer="kurrent-ca-nodes", serial=1),
+        allowed_cns={"agent-23456789abcd", "nvmet-23456789abcd"},
         issuer_cn="kurrent-ca-nodes", crl_kind="nodes", store=store)
-    assert ident.cn == "agent-node-a"
+    assert ident.cn == "agent-23456789abcd"
 
 
 @pytest.mark.parametrize("mod", [agent_security, nvmet_security])

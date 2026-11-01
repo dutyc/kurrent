@@ -33,7 +33,7 @@ def _valid_node() -> dict:
     return {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "storage-01", "remark": "生产存储"},
+        "metadata": {"name": "3f2a9c1d8b7e", "remark": "生产存储"},
         "spec": {
             "agent": {
                 "backend": "nvmet",
@@ -52,6 +52,8 @@ CORPUS = [
     {**_valid_node(), "kind": "Other"},
     {**_valid_node(), "metadata": {"name": "Bad Name"}},
     {**_valid_node(), "metadata": {"name": "ok", "remark": "备注"}},
+    {**_valid_node(), "metadata": {"name": "storage-01", "remark": "旧式可读名"}},
+    {**_valid_node(), "metadata": {"name": "3F2A9C1D8B7E", "remark": "大写 hex"}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "/x", "nqnBase": "nqn.2026-07.com.x"}}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "relative", "nqnBase": "nqn.2026-07.com.x"},
                               "controlPlane": {"url": "https://10.0.0.1"}}},

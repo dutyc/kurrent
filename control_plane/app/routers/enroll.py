@@ -17,12 +17,12 @@
 import logging
 
 from fastapi import Header, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .. import audit, config, pki, stores
 from ..auth import settings
 from ..principal import PrincipalRouter, principal
-from ..utils import client_host
+from ..utils import AGENT_ID_RE, client_host
 
 log = logging.getLogger("control-plane")
 
@@ -38,6 +38,13 @@ class EnrollReq(BaseModel):
     base_url: str = ""  # 控制面可达地址；agent 首次引导时上报，自动登记写入
     remark: str = ""  # 备注（人类识别用）；agent 首次引导时上报，随自动登记写入
     capabilities: dict = {}  # agent 上报自身能力（backend/cd），自动登记推导角色/标签；旧 agent 可缺省
+
+    @field_validator("agent_id")
+    @classmethod
+    def _check_agent_id(cls, value: str) -> str:
+        if not AGENT_ID_RE.fullmatch(value):
+            raise ValueError("agent_id must be 12 lowercase hex characters")
+        return value
 
 
 def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:

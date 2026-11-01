@@ -11,7 +11,7 @@ from control_plane.app.config import settings
 from control_plane.app.routers.workers import reconcile_credentials_once, rotate_due_credentials
 
 AGENT_BODY = {
-    "id": "ag-01", "base_url": "http://ag-01:8000",
+    "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
     "role": {"disk": True, "cd": False}, "tags": ["storage", "nvmet"],
 }
 
@@ -103,11 +103,11 @@ def test_rotation_push_failure_keeps_old_secret(client, auth_headers, mock_agent
 def test_rotation_partial_failure_rolls_back_delivered(client, auth_headers, mock_agent_client):
     """部分送达：已收到新密钥的目标回推旧密钥；台账保持不变。"""
     old = _setup(client, auth_headers)
-    agent_b = dict(AGENT_BODY, id="ag-02")
+    agent_b = dict(AGENT_BODY, id="b2c3d4e5f601")
     assert client.post("/agents", json=agent_b, headers=auth_headers).status_code == 201
     targets = {
-        "ag-01": ["nqn.2026-07.io.kurrent:w1"],
-        "ag-02": ["nqn.2026-07.io.kurrent:w1-b"],
+        "a1b2c3d4e5f6": ["nqn.2026-07.io.kurrent:w1"],
+        "b2c3d4e5f601": ["nqn.2026-07.io.kurrent:w1-b"],
     }
     calls = []
 
@@ -126,7 +126,7 @@ def test_rotation_partial_failure_rolls_back_delivered(client, auth_headers, moc
     finally:
         mod._sync_targets = orig
     assert summary == {"rotated": 0, "failed": 1, "skipped": 0}
-    # 顺序：新密钥 → ag-01 成功、ag-02 失败；随后 ag-01 回推旧密钥
+    # 顺序：新密钥 → a1b2c3d4e5f6 成功、b2c3d4e5f601 失败；随后 a1b2c3d4e5f6 回推旧密钥
     assert len(calls) == 3
     assert calls[0][1] != old and calls[1][1] == calls[0][1]
     assert calls[2][1] == old

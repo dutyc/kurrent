@@ -60,56 +60,65 @@ def _enroll(client, token, agent_id, component, base_url="", capabilities=None, 
 
 
 class TestEnrollAutoRegister:
+    @pytest.mark.parametrize("bad_id", ["storage-01", "3F2A9C1D8B7E", "3f2a9c1d8b"])
+    def test_enroll_rejects_non_hex_agent_id(self, client, bad_id):
+        """enroll/renew 请求体同样只接受 12 位小写 hex。"""
+        res = client.post("/enroll", json={
+            "agent_id": bad_id, "component": "agent",
+            "csr_client": "FAKE", "csr_serving": "FAKE",
+        })
+        assert res.status_code == 422
+
     def test_agent_auto_registered(self, client, tmp_pki, monkeypatch):
         """不在册 agent 用绑定 token 引导 → 201 + agents.yml 自动登记（base_url 上报）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-01")
-        resp = _enroll(client, token, "auto-01", "agent", "https://192.168.1.50:4840")
+        token = _token(tmp_pki, "456789abcdef")
+        resp = _enroll(client, token, "456789abcdef", "agent", "https://192.168.1.50:4840")
         assert resp.status_code == 201
         assert resp.json()["certificates"] == {k: v.decode() for k, v in _FAKE_CERTS.items()}
         assert resp.json()["ca_nodes_crt"] == "FAKE-CA"
         assert resp.json()["ca_control_crt"] == "FAKE-CA"
-        a = agents.get("auto-01")
+        a = agents.get("456789abcdef")
         assert a.base_url == "https://192.168.1.50:4840"
         assert a.role_disk and not a.role_cd and a.enabled
 
     def test_auto_registered_with_remark(self, client, tmp_pki, monkeypatch):
         """上报 remark（声明 metadata.remark）→ 随自动登记写入台账（备注，人类识别用）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-10")
-        resp = _enroll(client, token, "auto-10", "agent", "https://192.168.1.50:4840",
+        token = _token(tmp_pki, "def012345678")
+        resp = _enroll(client, token, "def012345678", "agent", "https://192.168.1.50:4840",
                        remark="storage-nvmet-01")
         assert resp.status_code == 201
-        assert agents.get("auto-10").remark == "storage-nvmet-01"
+        assert agents.get("def012345678").remark == "storage-nvmet-01"
 
     def test_auto_registered_without_base_url(self, client, tmp_pki, monkeypatch):
         """无 base_url 也自动登记（空地址，控制面不探测，WebUI/CLI 可补）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-02")
-        resp = _enroll(client, token, "auto-02", "agent")
+        token = _token(tmp_pki, "56789abcdef0")
+        resp = _enroll(client, token, "56789abcdef0", "agent")
         assert resp.status_code == 201
-        assert agents.get("auto-02").base_url == ""
+        assert agents.get("56789abcdef0").base_url == ""
 
     def test_reenroll_refreshes_declaration_fields(self, client, tmp_pki, monkeypatch):
         """A2 裁定（声明权威）：已在册 agent 再次 enroll/renew 时按节点声明刷新
         base_url / remark / role.cd；控制面属性（enabled/storager_ip/tags）原样保留。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-r1", max_uses=2)
-        assert _enroll(client, token, "auto-r1", "agent", "https://10.0.0.5:4840",
+        token = _token(tmp_pki, "aaaabbbbcccc", max_uses=2)
+        assert _enroll(client, token, "aaaabbbbcccc", "agent", "https://10.0.0.5:4840",
                        capabilities={"backend": "nvmet", "cd": False},
                        remark="old-remark").status_code == 201
         # 运维在控制面侧设置属性（base_url 传现值——自动登记节点禁改地址）
-        res = client.put("/agents/auto-r1", json={
+        res = client.put("/agents/aaaabbbbcccc", json={
             "base_url": "https://10.0.0.5:4840", "storager_ip": "10.0.0.5",
             "role": {"disk": True, "cd": False}, "tags": ["custom"],
             "enabled": False, "remark": "old-remark",
         }, headers={"Authorization": "Bearer test-control-token"})
         assert res.status_code == 200, res.text
         # 节点搬家 + 改备注 + 光驱能力变化 → renew 按声明对齐
-        assert _enroll(client, token, "auto-r1", "agent", "https://10.0.0.9:4840",
+        assert _enroll(client, token, "aaaabbbbcccc", "agent", "https://10.0.0.9:4840",
                        capabilities={"backend": "nvmet", "cd": True},
                        remark="new-remark").status_code == 201
-        a = agents.get("auto-r1")
+        a = agents.get("aaaabbbbcccc")
         assert a.base_url == "https://10.0.0.9:4840"  # 声明权威：地址随节点
         assert a.remark == "new-remark"
         assert a.role_cd is True
@@ -120,11 +129,11 @@ class TestEnrollAutoRegister:
     def test_reenroll_unreported_fields_preserved(self, client, tmp_pki, monkeypatch):
         """旧 agent 兼容：再次 enroll 未上报 base_url/remark/capabilities → 不清空现有值。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-r2", max_uses=2)
-        assert _enroll(client, token, "auto-r2", "agent", "https://10.0.0.5:4840",
+        token = _token(tmp_pki, "bbbbccccdddd", max_uses=2)
+        assert _enroll(client, token, "bbbbccccdddd", "agent", "https://10.0.0.5:4840",
                        remark="kept").status_code == 201
-        assert _enroll(client, token, "auto-r2", "agent").status_code == 201
-        a = agents.get("auto-r2")
+        assert _enroll(client, token, "bbbbccccdddd", "agent").status_code == 201
+        a = agents.get("bbbbccccdddd")
         assert a.base_url == "https://10.0.0.5:4840"
         assert a.remark == "kept"
         assert not a.role_cd
@@ -132,21 +141,21 @@ class TestEnrollAutoRegister:
     def test_nvmet_host_enroll_does_not_refresh(self, client, tmp_pki, monkeypatch):
         """仅 agent 组件承载声明字段：nvmet-host enroll 不触发台账刷新。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-r3")
-        assert _enroll(client, token, "auto-r3", "agent", "https://10.0.0.5:4840").status_code == 201
-        nvmet_token = _token(tmp_pki, "auto-r3", "nvmet-host")
-        assert _enroll(client, nvmet_token, "auto-r3", "nvmet-host",
+        token = _token(tmp_pki, "ccccddddeeee")
+        assert _enroll(client, token, "ccccddddeeee", "agent", "https://10.0.0.5:4840").status_code == 201
+        nvmet_token = _token(tmp_pki, "ccccddddeeee", "nvmet-host")
+        assert _enroll(client, nvmet_token, "ccccddddeeee", "nvmet-host",
                        "https://10.9.9.9:4840").status_code == 201
-        assert agents.get("auto-r3").base_url == "https://10.0.0.5:4840"
+        assert agents.get("ccccddddeeee").base_url == "https://10.0.0.5:4840"
 
     def test_token_bound_to_agent_rejects_other(self, client, tmp_pki, monkeypatch):
         """token 绑定 agent_id：同一 token 不能引导另一个节点（默认拒绝）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "node-a")
-        assert _enroll(client, token, "node-a", "agent").status_code == 201
-        assert _enroll(client, token, "node-b", "agent").status_code == 401
+        token = _token(tmp_pki, "23456789abcd")
+        assert _enroll(client, token, "23456789abcd", "agent").status_code == 201
+        assert _enroll(client, token, "3456789abcde", "agent").status_code == 401
         with pytest.raises(KeyError):
-            agents.get("node-b")
+            agents.get("3456789abcde")
 
     def test_nvmet_derives_component_token(self, client, tmp_pki, monkeypatch):
         """agent 上报 backend=nvmet → 响应携带派生 nvmet-host token（绑 agent_id）。
@@ -155,41 +164,41 @@ class TestEnrollAutoRegister:
         换 agent_id 使用 → 401（防串用）。
         """
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-07")
-        resp = _enroll(client, token, "auto-07", "agent", "https://192.168.1.50:4840",
+        token = _token(tmp_pki, "abcdef012345")
+        resp = _enroll(client, token, "abcdef012345", "agent", "https://192.168.1.50:4840",
                        capabilities={"backend": "nvmet", "cd": False})
         assert resp.status_code == 201
-        a = agents.get("auto-07")
+        a = agents.get("abcdef012345")
         assert a.tags == ("auto", "storage")  # 后端类型不进 tags（运行事实由 /capabilities 实时判定）
         assert a.role_disk and not a.role_cd
         nvmet_token = resp.json().get("nvmet_token")
         assert nvmet_token and re.fullmatch(r"[0-9a-f]{6}\.[0-9a-f]{16}", nvmet_token)
         # 派生 token 引导 nvmet-host（agent 已登记）→ 201
-        assert _enroll(client, nvmet_token, "auto-07", "nvmet-host").status_code == 201
+        assert _enroll(client, nvmet_token, "abcdef012345", "nvmet-host").status_code == 201
         # 派生 token 绑 agent_id：换 id 使用 → 401（对方 agent 在册时才走到 token 校验）
-        assert _enroll(client, _token(tmp_pki, "other-node"), "other-node", "agent").status_code == 201
-        assert _enroll(client, nvmet_token, "other-node", "nvmet-host").status_code == 401
+        assert _enroll(client, _token(tmp_pki, "fedcba987650"), "fedcba987650", "agent").status_code == 201
+        assert _enroll(client, nvmet_token, "fedcba987650", "nvmet-host").status_code == 401
 
     def test_stgt_no_derivation(self, client, tmp_pki, monkeypatch):
         """stgt 后端（无 nvmet-host 组件）→ 响应不含 nvmet_token。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-08")
-        resp = _enroll(client, token, "auto-08", "agent", "https://192.168.1.51:4840",
+        token = _token(tmp_pki, "bcdef0123456")
+        resp = _enroll(client, token, "bcdef0123456", "agent", "https://192.168.1.51:4840",
                        capabilities={"backend": "stgt", "cd": True})
         assert resp.status_code == 201
         assert "nvmet_token" not in resp.json()
-        a = agents.get("auto-08")
+        a = agents.get("bcdef0123456")
         assert a.tags == ("auto", "storage")
         assert a.role_disk and a.role_cd
 
     def test_auto_registered_without_capabilities_backward_compat(self, client, tmp_pki, monkeypatch):
         """旧 agent 不上报能力 → 兼容默认（仅 auto 标签、无 cd 角色、不派生）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-09")
-        resp = _enroll(client, token, "auto-09", "agent")
+        token = _token(tmp_pki, "cdef01234567")
+        resp = _enroll(client, token, "cdef01234567", "agent")
         assert resp.status_code == 201
         assert "nvmet_token" not in resp.json()
-        a = agents.get("auto-09")
+        a = agents.get("cdef01234567")
         assert a.tags == ("auto",)
         assert a.role_disk and not a.role_cd
         assert a.remark == ""  # 旧 agent 不上报 remark → 空备注
@@ -197,21 +206,21 @@ class TestEnrollAutoRegister:
     def test_invalid_base_url_rejected(self, client, tmp_pki, monkeypatch):
         """上报地址格式非法 → 400（不自动登记）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-03")
-        resp = _enroll(client, token, "auto-03", "agent", "not-a-url")
+        token = _token(tmp_pki, "6789abcdef01")
+        resp = _enroll(client, token, "6789abcdef01", "agent", "not-a-url")
         assert resp.status_code == 400
         with pytest.raises(KeyError):
-            agents.get("auto-03")
+            agents.get("6789abcdef01")
 
     def test_nvmet_not_auto_registered(self, client, tmp_pki, monkeypatch):
         """nvmet-host 不在册不自动登记（共享 agent_id，须 agent 组件先行在册）。"""
         _mock_issue(monkeypatch)
-        token = _token(tmp_pki, "auto-04", "nvmet-host")
-        resp = _enroll(client, token, "auto-04", "nvmet-host")
+        token = _token(tmp_pki, "789abcdef012", "nvmet-host")
+        resp = _enroll(client, token, "789abcdef012", "nvmet-host")
         assert resp.status_code == 400
         assert "not registered" in resp.json()["detail"]
         with pytest.raises(KeyError):
-            agents.get("auto-04")
+            agents.get("789abcdef012")
 
     def test_nvmet_token_not_burned_when_agent_missing(self, client, tmp_pki, monkeypatch):
         """nvmet-host 在 agent 未在册时 400 且 token 不消耗：agent 登记后重试仍成功。
@@ -219,12 +228,12 @@ class TestEnrollAutoRegister:
         （token 校验本就 TTL 复用不消耗——400 先于 token 校验，重试语义天然成立）
         """
         _mock_issue(monkeypatch)
-        nvmet_tok = _token(tmp_pki, "auto-06", "nvmet-host")
-        assert _enroll(client, nvmet_tok, "auto-06", "nvmet-host").status_code == 400
+        nvmet_tok = _token(tmp_pki, "9abcdef01234", "nvmet-host")
+        assert _enroll(client, nvmet_tok, "9abcdef01234", "nvmet-host").status_code == 400
         # agent 组件登记后，用同一 nvmet token 重试 → 201（token 未被消耗）
-        agent_tok = _token(tmp_pki, "auto-06")
-        assert _enroll(client, agent_tok, "auto-06", "agent").status_code == 201
-        assert _enroll(client, nvmet_tok, "auto-06", "nvmet-host").status_code == 201
+        agent_tok = _token(tmp_pki, "9abcdef01234")
+        assert _enroll(client, agent_tok, "9abcdef01234", "agent").status_code == 201
+        assert _enroll(client, nvmet_tok, "9abcdef01234", "nvmet-host").status_code == 201
 
 
 class TestTokenEndpoint:
@@ -232,13 +241,13 @@ class TestTokenEndpoint:
 
     def test_issue(self, client, tmp_pki, auth_headers):
         """签发成功：token 格式 <6位>.<16位>，明文仅本次可见；响应含绑定字段。"""
-        resp = client.post("/pki/tokens", json={"agent_id": "auto-01"}, headers=auth_headers)
+        resp = client.post("/pki/tokens", json={"agent_id": "456789abcdef"}, headers=auth_headers)
         assert resp.status_code == 201
         body = resp.json()
         assert re.fullmatch(r"[0-9a-f]{6}\.[0-9a-f]{16}", body["token"])
         assert body["expires_at"]
         assert body["usage"] == ["enroll"]
-        assert body["agent_id"] == "auto-01" and body["component"] == "agent"
+        assert body["agent_id"] == "456789abcdef" and body["component"] == "agent"
 
     def test_requires_agent_id(self, client, tmp_pki, auth_headers):
         """bootstrap token 不绑 agent_id → 400（默认拒绝，不再签发通用 token）。"""
@@ -255,22 +264,22 @@ class TestTokenEndpoint:
 
     def test_each_issue_is_new(self, client, tmp_pki, auth_headers):
         """每次签发都是新 token（多 token 并存；默认一次性）。"""
-        first = client.post("/pki/tokens", json={"agent_id": "auto-01"},
+        first = client.post("/pki/tokens", json={"agent_id": "456789abcdef"},
                             headers=auth_headers).json()["token"]
-        second = client.post("/pki/tokens", json={"agent_id": "auto-01"},
+        second = client.post("/pki/tokens", json={"agent_id": "456789abcdef"},
                              headers=auth_headers).json()["token"]
         assert first != second
 
     def test_requires_bearer(self, client, tmp_pki, monkeypatch):
         """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
         monkeypatch.setenv("KURRENT_CP_INSECURE", "")
-        resp = client.post("/pki/tokens", json={"agent_id": "auto-01"})
+        resp = client.post("/pki/tokens", json={"agent_id": "456789abcdef"})
         assert resp.status_code == 401
 
     def test_token_validate_rejects_unknown(self, client, tmp_pki, monkeypatch):
         """校验：未登记 token / 过期 token → 401（enroll 链路）。"""
         _mock_issue(monkeypatch)
-        resp = _enroll(client, "deadbe.0123456789abcdef", "auto-x", "agent")
+        resp = _enroll(client, "deadbe.0123456789abcdef", "ddddeeeeffff", "agent")
         assert resp.status_code == 401
 
 
@@ -329,22 +338,22 @@ class TestEnrollDualComponent:
     def test_agent_and_nvmet_enroll_independent(self, client, tmp_pki, monkeypatch):
         """agent token + nvmet 派生 token（各自绑 agent_id）：互不影响。"""
         _mock_issue(monkeypatch)
-        agent_tok = _token(tmp_pki, "auto-05")
-        nvmet_tok = _token(tmp_pki, "auto-05", "nvmet-host")
+        agent_tok = _token(tmp_pki, "89abcdef0123")
+        nvmet_tok = _token(tmp_pki, "89abcdef0123", "nvmet-host")
         assert agent_tok and nvmet_tok
-        assert _enroll(client, agent_tok, "auto-05", "agent").status_code == 201
+        assert _enroll(client, agent_tok, "89abcdef0123", "agent").status_code == 201
         # agent 在册后，nvmet 组件用自己 token 引导
-        resp = _enroll(client, nvmet_tok, "auto-05", "nvmet-host")
+        resp = _enroll(client, nvmet_tok, "89abcdef0123", "nvmet-host")
         assert resp.status_code == 201
 
 
 class TestDeleteAgent:
     def test_delete(self, client, auth_headers):
-        client.post("/agents", json={"id": "del-01", "base_url": "https://127.0.0.1:4840",
+        client.post("/agents", json={"id": "ef0123456789", "base_url": "https://127.0.0.1:4840",
                                      "role": {"disk": True, "cd": False}}, headers=auth_headers)
-        resp = client.delete("/agents/del-01", headers=auth_headers)
+        resp = client.delete("/agents/ef0123456789", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json()["deleted"] == "del-01"
+        assert resp.json()["deleted"] == "ef0123456789"
         assert client.get("/agents?live=false", headers=auth_headers).json() == []
 
     def test_missing_404(self, client, auth_headers):

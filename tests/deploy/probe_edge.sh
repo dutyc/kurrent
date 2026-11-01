@@ -240,7 +240,7 @@ if [ -n "$ENROLL_TOKEN" ]; then
     check_code 403 "enroll token 不能换会话" \
         "$(code -X POST -H "Authorization: Bearer $ENROLL_TOKEN" "$BASE/api/cp/session")"
     BOOT_JSON=$(curl -sk --max-time 5 -H "Authorization: Bearer $ENROLL_TOKEN" \
-        -H 'Content-Type: application/json' -d '{"usage":"bootstrap","agent_id":"probe-enroll"}' \
+        -H 'Content-Type: application/json' -d '{"usage":"bootstrap","agent_id":"abcdef123456"}' \
         "$BASE/api/cp/pki/tokens")
     BOOT_ID=$(printf '%s' "$BOOT_JSON" | python3 -c \
         'import json,sys; d=json.load(sys.stdin); print(d.get("token","").split(".")[0])' 2>/dev/null)

@@ -49,17 +49,17 @@ def test_legacy_ca_promoted_to_nodes(tmp_path):
 def test_component_csr_with_o_rejected(tmp_path):
     """组件 CSR 自报 O → 拒绝（组只能来自 users.yml）。"""
     ca_set = pki.ensure_ca_set(tmp_path)
-    csr = pki._build_csr(_key(), "agent-x", orgs=["admin"])
+    csr = pki._build_csr(_key(), "agent-abcdef012345", orgs=["admin"])
     with pytest.raises(ValueError, match="subject attribute not allowed"):
-        pki.sign_component_certs(*ca_set["nodes"], "x", "agent", csr, csr, [])
+        pki.sign_component_certs(*ca_set["nodes"], "abcdef012345", "agent", csr, csr, [])
 
 
 def test_component_cert_subject_is_cn_only_and_signed_by_nodes(tmp_path):
     ca_set = pki.ensure_ca_set(tmp_path)
-    client_csr = pki._build_csr(_key(), "agent-x")
-    serving_csr = pki._build_csr(_key(), "agent-x", ["127.0.0.1"])
+    client_csr = pki._build_csr(_key(), "agent-abcdef012345")
+    serving_csr = pki._build_csr(_key(), "agent-abcdef012345", ["127.0.0.1"])
     certs = pki.sign_component_certs(
-        *ca_set["nodes"], "x", "agent", client_csr, serving_csr, ["127.0.0.1"])
+        *ca_set["nodes"], "abcdef012345", "agent", client_csr, serving_csr, ["127.0.0.1"])
     cert = x509.load_pem_x509_certificate(certs["client.crt"])
     assert [attr.oid for attr in cert.subject] == [NameOID.COMMON_NAME]
     assert _cn(cert.issuer) == "kurrent-ca-nodes"
@@ -78,7 +78,7 @@ def test_nginx_bundle_contains_users_and_nodes_only(tmp_path):
 def test_bootstrap_token_must_bind_agent(tmp_path):
     with pytest.raises(ValueError, match="must bind agent_id"):
         pki.issue_bootstrap_token(tmp_path)
-    token = pki.issue_bootstrap_token(tmp_path, agent_id="node-a")
-    pki.validate_bootstrap_token(tmp_path, token, "node-a", "agent")
+    token = pki.issue_bootstrap_token(tmp_path, agent_id="23456789abcd")
+    pki.validate_bootstrap_token(tmp_path, token, "23456789abcd", "agent")
     with pytest.raises(ValueError, match="agent mismatch"):
-        pki.validate_bootstrap_token(tmp_path, token, "node-b", "agent")
+        pki.validate_bootstrap_token(tmp_path, token, "3456789abcde", "agent")

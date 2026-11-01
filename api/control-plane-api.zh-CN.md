@@ -484,7 +484,7 @@ isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-
 
 ```yaml
 agents:
-  storage-lio-01:
+  a1b2c3d4e5f6:
     base_url: http://host.docker.internal:4840
     storager_ip: 192.168.80.3
 ```
@@ -652,7 +652,7 @@ curl -s --cert "$CERT" --key "$KEY" "$BASE_URL/config"
 
 `health` 三态：`ok`（健康）；`degraded`（agent 在线但数据面未就绪——nvmet 后端为宿主服务不可达或 configfs 未就绪，具体原因见 `error` 字段）；`error`（agent 不可达或能力探测失败）。`live=false` 时不探测、无 `health` 字段。
 
-身份分层：`id` 为机器身份（正常流程由 `kurrent join` 自动生成随机短标识——12 位 hex，与盘 os_tag 同构，enroll 自动登记；手工登记见 6.1，示例中的可读 id 仅为示意）；`remark` 为备注（人类识别用，来自节点声明 `metadata.remark`，WebUI 卡片展示、编辑表单或 6.3 可改）。
+身份分层：`id` 为机器身份，只接受 12 位小写十六进制（与盘 `os_tag` 同构；正常流程由 `kurrent join` 自动生成，enroll 自动登记；手工登记见 6.1）；`remark` 为备注（人类识别用，描述性名称的唯一归属，来自节点声明 `metadata.remark`，WebUI 卡片展示、编辑表单或 6.3 可改）。
 
 ### Query 参数
 
@@ -681,7 +681,7 @@ curl -s "$BASE_URL/agents?live=false" \
 ```json
 [
   {
-    "id": "storage-lio-01",
+    "id": "a1b2c3d4e5f6",
     "base_url": "http://10.0.0.11:4840",
     "role": {
       "disk": true,
@@ -718,7 +718,7 @@ curl -s "$BASE_URL/agents?live=false" \
 
 | 字段 | 必填 | 说明 |
 |---|---:|---|
-| `id` | 是 | Agent 编号。自动转小写，规则同 worker id（字母、数字、点、下划线、短横线） |
+| `id` | 是 | 机器身份：12 位小写十六进制；描述性名称写 `remark` |
 | `base_url` | 是 | Agent 控制面 API 地址，须以 `http://` 或 `https://` 开头，末尾 `/` 自动去除 |
 | `storager_ip` | 否 | 数据面地址（业务网段 IP，协议中立）。缺省时回退为 `base_url` 的主机名 |
 | `role` | 否 | 角色：`disk`=可建系统盘（存储节点），`cd`=可挂载 ISO（光驱节点）；默认 `{disk: false, cd: false}` |
@@ -733,7 +733,7 @@ curl -s -X POST "$BASE_URL/agents" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "storage-stgt-02",
+    "id": "c3d4e5f60123",
     "base_url": "http://host.docker.internal:4840",
     "storager_ip": "192.168.1.6",
     "role": {"disk": true, "cd": false},
@@ -747,7 +747,7 @@ curl -s -X POST "$BASE_URL/agents" \
 
 ```json
 {
-  "id": "storage-stgt-02",
+  "id": "c3d4e5f60123",
   "base_url": "http://host.docker.internal:4840",
   "storager_ip": "192.168.1.6",
   "role": {"disk": true, "cd": false},
@@ -844,7 +844,7 @@ curl -s -X POST "$BASE_URL/agents/probe" \
 ### curl
 
 ```bash
-curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
+curl -s -X PUT "$BASE_URL/agents/c3d4e5f60123" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -861,7 +861,7 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
 
 ```json
 {
-  "id": "storage-stgt-02",
+  "id": "c3d4e5f60123",
   "base_url": "http://host.docker.internal:4840",
   "storager_ip": "192.168.1.8",
   "role": {"disk": true, "cd": false},
@@ -903,7 +903,7 @@ curl -s -X PUT "$BASE_URL/agents/storage-stgt-02" \
 #### curl
 
 ```bash
-curl -s -X PUT "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/tag" \
+curl -s -X PUT "$BASE_URL/agents/a1b2c3d4e5f6/masters/_tpl_ubuntu_2204.img/tag" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -915,13 +915,13 @@ curl -s -X PUT "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/tag
 #### 成功返回
 
 ```json
-{ "agent": "storage-lio-01", "name": "_tpl_ubuntu_2204.img", "os": "ubuntu", "os_version": "22.04" }
+{ "agent": "a1b2c3d4e5f6", "name": "_tpl_ubuntu_2204.img", "os": "ubuntu", "os_version": "22.04" }
 ```
 
 ### DELETE（清除）
 
 ```bash
-curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/tag" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/masters/_tpl_ubuntu_2204.img/tag" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -939,20 +939,21 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/masters/_tpl_ubuntu_2204.img/
 
 ### 说明
 
-控制面签发**绑定节点身份的 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要，TTL 默认 **60 分钟**、上限 24 小时）：签发时指定 `agent_id`（= 节点声明 `metadata.name`，字符集 `[a-z0-9][a-z0-9.-]*`），enroll 只接受同一身份。token **默认一次性**：使用额度在签发前原子占用，签发失败退回；批量引导用 `max_uses`（`--uses N`，上限 100）显式放开次数，不使用无限复用。每次签发都是新 token（明文不可恢复、不可再查）；**支持吊销**（`DELETE /pki/tokens/{token_id}`，删除即失效），未吊销的 token 到期自然失效。
+控制面签发**绑定节点身份的 bootstrap token**（`<6位>.<16位>`，仅存 sha256 摘要，TTL 默认 **60 分钟**、上限 24 小时）：签发时指定 `agent_id`（= 节点声明 `metadata.name`，只接受 12 位小写十六进制），enroll 只接受同一身份。token **默认一次性**：使用额度在签发前原子占用，签发失败退回；批量引导用 `max_uses`（`--uses N`，1..1000，且不超过 `spec.pki.bootstrapTokenMaxUses`，默认 100）显式放开次数，不使用无限复用。每次签发都是新 token（明文不可恢复、不可再查）；**支持吊销**（`DELETE /pki/tokens/{token_id}`，删除即失效），未吊销的 token 到期自然失效。
 
-节点身份是机器身份：`kurrent token create` 省略 `--agent-id` 时生成随机 12 位 hex 短标识，
-并把它写进输出的 join 命令（`--agent-id`）；人工识别用备注写 `metadata.remark`。
+节点身份是机器身份：只接受 12 位小写十六进制；`kurrent token create` 省略 `--agent-id` 时自动生成，
+并把它写进输出的 join 命令（`--agent-id`）；描述性名称写 `metadata.remark`。
 
 `nvmet-host` 组件凭据**不在此签发**：agent enroll 上报 `backend=nvmet` 时控制面派生（绑 agent_id）随 enroll/renew 响应下发，agent 落盘 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）。
 
 ### POST /pki/tokens
 
 请求体：`{"usage": "bootstrap", "agent_id": "<节点 id>", "component": "agent", "max_uses": 1}`
-（默认 bootstrap；`component` 取 `agent` | `nvmet-host`；`max_uses` 1-100，默认 1），或
+（默认 bootstrap；`component` 取 `agent` | `nvmet-host`；`max_uses` 1..1000，默认 1，
+且不超过 `spec.pki.bootstrapTokenMaxUses`），或
 `{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}`
 （管理 token，认证器链 Bearer 用；scope 取 `admin` | `readonly` | `enroll`，省略 =
-`admin`；TTL 1-720 小时，默认 24）。scope 是权限上限：`readonly` 只读，`enroll`
+`admin`；TTL 1 小时至 `spec.auth.tokenMaxTtlHours`（默认 720），默认 24）。scope 是权限上限：`readonly` 只读，`enroll`
 只能签发 bootstrap token（其余读写接口与换会话一律 `403`）；`readonly` / `enroll`
 token 不得签发 admin token。
 
@@ -963,7 +964,7 @@ token 不得签发 admin token。
 curl -s -X POST "$BASE_URL/pki/tokens" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"agent_id": "node-01"}'
+  -d '{"agent_id": "3f2a9c1d8b7e"}'
 
 # 管理 token（供脚本调用与 WebUI 登录；等同 admin 证书身份）
 curl -s -X POST "$BASE_URL/pki/tokens" \
@@ -989,7 +990,7 @@ curl -s -X POST "$BASE_URL/pki/tokens" \
   "scopes": [],
   "uses": 0,
   "max_uses": 1,
-  "agent_id": "node-01",
+  "agent_id": "3f2a9c1d8b7e",
   "component": "agent"
 }
 ```
@@ -1062,11 +1063,11 @@ curl -s -X DELETE "$BASE_URL/pki/tokens/a1b2c3" \
 
 ```bash
 # 控制面（签发绑定节点身份的 bootstrap token；--cp-url = 存储节点可达的控制面 HTTPS 入口，
-# 缺省按 --server 推导；--agent-id 省略则生成随机 12 位 hex 身份）：
-kurrent token create --agent-id node-01 --cp-url https://<cp-host>
+# 缺省按 --server 推导；--agent-id 为 12 位小写 hex，省略则自动生成）：
+kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://<cp-host>
 
 # 存储节点（命令已携带地址与节点 id，粘贴执行；业务键可用 kurrent config print node-defaults 预置模板编辑）：
-kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id node-01
+kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id 3f2a9c1d8b7e
 ```
 
 ### 6.5.3 GET /enroll/crl（组件 CRL 分发）
@@ -1108,14 +1109,14 @@ mTLS 且只放行 `class=component`（人类证书 `403`，无证书 `401`）：
 ### curl
 
 ```bash
-curl -s -X DELETE "$BASE_URL/agents/storage-lio-01" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 成功返回
 
 ```json
-{ "deleted": "storage-lio-01", "master_tags_removed": false, "disks_hosted": 3, "affected_workers": ["worker-01", "worker-02"] }
+{ "deleted": "a1b2c3d4e5f6", "master_tags_removed": false, "disks_hosted": 3, "affected_workers": ["worker-01", "worker-02"] }
 ```
 
 ### 常见错误
@@ -1224,8 +1225,8 @@ WebUI「凭据」页展示 token 权限 / 最近使用与会话台账。
 ```json
 [
   {
-    "cn": "agent-node-a",
-    "agent_id": "node-a",
+    "cn": "agent-23456789abcd",
+    "agent_id": "23456789abcd",
     "kind": "client",
     "serial": "3f9c1b7e",
     "fingerprint": "9c1f...",
@@ -1479,7 +1480,7 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
   "state": "ready",
   "disks": [
     {
-      "agent": "storage-lio-01",
+      "agent": "a1b2c3d4e5f6",
       "nqn": "nqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89",  # NVMe-oF 数据面标识（权威，NQN 不用 IQN 定义；后缀带 os_tag）
       "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89",  # iSCSI 数据面标识（由 NQN 派生）
       "filename": "worker-01.ubuntu.0d26b6f33a89.img",
@@ -1508,7 +1509,7 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
   "state": "ready",
   "disks": [
     {
-      "agent": "storage-lio-01",
+      "agent": "a1b2c3d4e5f6",
       "iqn": "iqn.2026-07.com.controller:worker-00.ubuntu.5f1c2a3b4d5e",
       "filename": "worker-00.ubuntu.5f1c2a3b4d5e.img",
       "backing": "/home/iscsi_img/worker-00.ubuntu.5f1c2a3b4d5e.img",
@@ -1570,7 +1571,7 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
     "os": "ubuntu",
     "name": "_tpl_ubuntu_2204.img",
     "workers": ["worker-01", "worker-02", "worker-03"],
-    "placement": { "candidates": ["storage-lio-01", "storage-lio-02"] },
+    "placement": { "candidates": ["a1b2c3d4e5f6", "b2c3d4e5f601"] },
     "dry_run": true
   }'
 ```
@@ -1581,13 +1582,13 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 {
   "dry_run": true,
   "plan": [
-    { "worker_id": "worker-01", "agent": "storage-lio-01", "action": "create" },
-    { "worker_id": "worker-02", "agent": "storage-lio-02", "action": "create" },
-    { "worker_id": "worker-03", "agent": "storage-lio-01", "action": "skip",
+    { "worker_id": "worker-01", "agent": "a1b2c3d4e5f6", "action": "create" },
+    { "worker_id": "worker-02", "agent": "b2c3d4e5f601", "action": "create" },
+    { "worker_id": "worker-03", "agent": "a1b2c3d4e5f6", "action": "skip",
       "reason": "already has a ubuntu system disk" }
   ],
   "warnings": [
-    { "agent": "storage-stgt-01", "reason": "does not have master _tpl_ubuntu_2204.img" }
+    { "agent": "e5f601234567", "reason": "does not have master _tpl_ubuntu_2204.img" }
   ]
 }
 ```
@@ -1605,9 +1606,9 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
     "os": "ubuntu",
     "name": "_tpl_ubuntu_2204.img",
     "targets": [
-      { "worker_id": "worker-01", "agent": "storage-lio-01" },
-      { "worker_id": "worker-02", "agent": "storage-lio-01" },
-      { "worker_id": "worker-03", "agent": "storage-stgt-01" }
+      { "worker_id": "worker-01", "agent": "a1b2c3d4e5f6" },
+      { "worker_id": "worker-02", "agent": "a1b2c3d4e5f6" },
+      { "worker_id": "worker-03", "agent": "e5f601234567" }
     ]
   }'
 ```
@@ -1617,14 +1618,14 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 ```json
 {
   "succeeded": [
-    { "worker_id": "worker-01", "agent": "storage-lio-01", "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89" },
-    { "worker_id": "worker-03", "agent": "storage-stgt-01", "iqn": "iqn.2026-07.com.controller:worker-03.ubuntu.a1b2c3d4e5f6" }
+    { "worker_id": "worker-01", "agent": "a1b2c3d4e5f6", "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89" },
+    { "worker_id": "worker-03", "agent": "e5f601234567", "iqn": "iqn.2026-07.com.controller:worker-03.ubuntu.a1b2c3d4e5f6" }
   ],
   "skipped": [
     { "worker_id": "worker-02", "reason": "already has a ubuntu 22.04 system disk" }
   ],
   "failed": [
-    { "worker_id": "worker-04", "agent": "storage-lio-01", "error": "worker not found: worker-04" }
+    { "worker_id": "worker-04", "agent": "a1b2c3d4e5f6", "error": "worker not found: worker-04" }
   ]
 }
 ```
@@ -1672,7 +1673,7 @@ curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
   "state": "installing",
   "disks": [
     {
-      "agent": "storage-lio-01",
+      "agent": "a1b2c3d4e5f6",
       "iqn": "iqn.2026-07.com.controller:worker-win-build.windows.9b8a7c6d5e4f",
       "filename": "worker-win-build.windows.9b8a7c6d5e4f.img",
       "backing": "/home/iscsi_img/worker-win-build.windows.9b8a7c6d5e4f.img",
@@ -1686,7 +1687,7 @@ curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
     }
   ],
   "cd": {
-    "agent": "controller-stgt",
+    "agent": "f60123456789",
     "iqn": "iqn.2026-07.com.controller:worker-win-build.windows.iso",
     "iso": "Win11_24H2.iso",
     "backing": "/home/iscsi_img/Win11_24H2.iso"
@@ -2057,7 +2058,7 @@ curl -X PUT "$BASE_URL/workers/worker-01/credential" \
     "result": "ok",
     "updated_at": "2026-10-05T15:30:00+08:00",
     "agents": [
-      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+      {"agent_id": "d4e5f6012345", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
     ]
   }
 }
@@ -2098,7 +2099,7 @@ curl -s "$BASE_URL/workers/worker-01/credential" -H "Authorization: Bearer $TOKE
     "result": "ok",
     "updated_at": "2026-10-05T15:30:00+08:00",
     "agents": [
-      {"agent_id": "storage-nvmet-01", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
+      {"agent_id": "d4e5f6012345", "result": "ok", "updated_at": "2026-10-05T15:30:00+08:00"}
     ]
   }
 }
@@ -2132,7 +2133,7 @@ curl -s "$BASE_URL/workers" \
     "state": "ready",
     "disks": [
       {
-        "agent": "storage-lio-01",
+        "agent": "a1b2c3d4e5f6",
         "iqn": "iqn.2026-07.com.controller:worker-00.ubuntu",
         "filename": "worker-00.ubuntu.img",
         "backing": "/home/iscsi_img/worker-00.ubuntu.img",
@@ -2210,7 +2211,7 @@ curl -s "$BASE_URL/workers/worker-01/status" \
     "state": "ready",
     "disks": [
       {
-        "agent": "storage-lio-01",
+        "agent": "a1b2c3d4e5f6",
         "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu",
         "filename": "worker-01.ubuntu.img",
         "backing": "/home/iscsi_img/worker-01.ubuntu.img",
@@ -2408,7 +2409,7 @@ curl -s "$BASE_URL/operations?since=10&limit=100" \
       "op": "agent.create_disk",
       "status": "ok",
       "worker_id": "worker-01",
-      "agent": "storage-lio-01",
+      "agent": "a1b2c3d4e5f6",
       "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu"
     }
   ]
@@ -2538,7 +2539,7 @@ Control Plane 可以直接管理任意 Agent 上的 iSCSI target/LUN。请求经
 所有接口都需要鉴权（见 1.3 认证器链）。Agent 不存在时返回 `404 agent not found`；Agent 不可达时返回 `503`；Agent 侧的业务校验错误（如 IQN 前缀不匹配、文件已存在、IQN 已存在）会透传其状态码与 `detail`：
 
 ```json
-{"agent": "storage-lio-01", "error": "iqn base mismatch: ..."}
+{"agent": "a1b2c3d4e5f6", "error": "iqn base mismatch: ..."}
 ```
 
 ### 14.1 GET /agents/{agent_id}/luns
@@ -2554,7 +2555,7 @@ Control Plane 可以直接管理任意 Agent 上的 iSCSI target/LUN。请求经
 #### curl
 
 ```bash
-curl -s "$BASE_URL/agents/storage-lio-01/luns" \
+curl -s "$BASE_URL/agents/a1b2c3d4e5f6/luns" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -2596,7 +2597,7 @@ curl -s "$BASE_URL/agents/storage-lio-01/luns" \
 
 ```bash
 # 从母盘克隆
-curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
+curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2605,7 +2606,7 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
   }'
 
 # 建空白盘
-curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
+curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2638,7 +2639,7 @@ curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/disk" \
 #### curl
 
 ```bash
-curl -s -X POST "$BASE_URL/agents/controller-stgt/luns/cd" \
+curl -s -X POST "$BASE_URL/agents/f60123456789/luns/cd" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2662,11 +2663,11 @@ curl -s -X POST "$BASE_URL/agents/controller-stgt/luns/cd" \
 
 ```bash
 # 只删 target，保留 backing 文件
-curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu" \
   -H "Authorization: Bearer $TOKEN"
 
 # 连 backing 文件一起删，target 已不存在也继续
-curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu&delete_file=true&ignore_missing=true" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu&delete_file=true&ignore_missing=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -2696,7 +2697,7 @@ curl -s -X DELETE "$BASE_URL/agents/storage-lio-01/luns?iqn=iqn.2026-07.com.cont
 #### curl
 
 ```bash
-curl -s -X POST "$BASE_URL/agents/storage-lio-01/luns/scan" \
+curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/scan" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -2745,7 +2746,7 @@ curl -s "$BASE_URL/masters" \
 {
   "agents": [
     {
-      "agent": "storage-lio-01",
+      "agent": "a1b2c3d4e5f6",
       "storager_ip": "192.168.80.3",
       "masters": [
         {"name": "_tpl_ubuntu_2204.img", "size": 10737418240, "mtime": 1785643200, "gpt": "4k"},

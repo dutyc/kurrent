@@ -158,11 +158,11 @@ spec:
 | --- | --- | --- | --- |
 | `apiVersion` | string | 是 | 固定 `kurrent.io/v1` |
 | `kind` | string | 是 | 固定 `NodeConfiguration` |
-| `metadata.name` | string | 是 | 节点身份（agent_id），1–63 字符，小写字母、数字、点或短横线 |
-| `metadata.remark` | string | 否 | 人类备注，默认空 |
+| `metadata.name` | string | 是 | 节点身份（agent_id）：12 位小写十六进制，与盘 `os_tag` 同构 |
+| `metadata.remark` | string | 否 | 人类备注（描述性名称的唯一归属），默认空 |
 | `spec` | object | 是 | 见下 |
 
-`metadata.name` 同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定。`kurrent join` 写入后不应手工改写。
+`metadata.name` 同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定。`kurrent join` 写入后不应手工改写；描述性名称写 `metadata.remark`，不得占用身份字段。
 
 ### `spec.agent`
 
@@ -185,7 +185,7 @@ spec:
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  name: storage-nvmet-01
+  name: 3f2a9c1d8b7e
   remark: 生产存储
 spec:
   agent:

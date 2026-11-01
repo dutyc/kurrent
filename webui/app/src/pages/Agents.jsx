@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { getAgents, issueBootstrapToken, probeAgent, updateAgent } from '../api/client'
+import { newNodeId } from '../api/identity'
 import { useI18n } from '../i18n'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
@@ -333,18 +334,13 @@ function AgentForm({ agentId, initial, onClose, onSaved }) {
   )
 }
 
-// 节点身份随机短标识（12 位 hex，与 CLI join / 盘 os_tag 同构；机器身份，人类备注写 remark）
-function newAgentID() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 // 加入节点弹窗：签发绑定节点身份的 bootstrap token（agent_id = 声明 metadata.name）
 // 并输出带控制面地址的 join 命令（节点粘贴即用：声明 storager/kurrent.yaml 缺失时由
 // join 按命令生成；nvmet-host 凭据由 enroll 按能力自动派生）。
 function JoinAgentModal({ onClose }) {
   const { t } = useI18n()
   const [cpUrl, setCpUrl] = useState(() => `https://${window.location.hostname}`)
-  const [agentId, setAgentId] = useState(newAgentID)
+  const [agentId] = useState(newNodeId)
   const [issuing, setIssuing] = useState(false)
   const [error, setError] = useState(null)
   const [tok, setTok] = useState(null) // { token, expires_at, agent_id }
@@ -392,8 +388,7 @@ function JoinAgentModal({ onClose }) {
           <Input
             label={t('agents.agentIdLabel')}
             value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
-            placeholder="12-hex"
+            readOnly
           />
           <Input
             label={t('agents.cpUrlLabel')}
@@ -407,7 +402,7 @@ function JoinAgentModal({ onClose }) {
           <Button
             type="submit"
             variant="primary"
-            disabled={issuing || !agentId.trim()}
+            disabled={issuing}
           >
             {issuing ? t('agents.issuing') : t('agents.issueBtn')}
           </Button>

@@ -39,7 +39,7 @@ def _client(monkeypatch, pki_dir, captured, resp_payload=None, **kwargs):
         return _FakeResp(resp_payload)
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    defaults = dict(agent_id="t-ag-1", component="agent", pki_dir=pki_dir,
+    defaults = dict(agent_id="23456789abce", component="agent", pki_dir=pki_dir,
                     cp_base="https://cp", cp_ca=None, bootstrap_token=None)
     defaults.update(kwargs)
     return pki_client.PkiClient(**defaults)
@@ -57,7 +57,7 @@ def test_enroll_payload_carries_advertise_url(monkeypatch, pki_dir, captured):
     c._enroll(renew=False)
     assert captured["url"] == "https://cp/api/cp/enroll"
     assert captured["auth"] == "Bearer tok.123"
-    assert captured["body"]["agent_id"] == "t-ag-1"
+    assert captured["body"]["agent_id"] == "23456789abce"
     assert captured["body"]["component"] == "agent"
     assert captured["body"]["base_url"] == "https://192.168.1.50:4840"
     assert "csr_client" in captured["body"] and "csr_serving" in captured["body"]

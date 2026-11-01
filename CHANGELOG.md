@@ -17,6 +17,7 @@
 
 ### 变更
 
+- **节点身份收紧为 12 位小写 hex**：存储节点 `agent_id`、节点声明 `metadata.name`、bootstrap token `--agent-id` 在 CLI、控制面 API、enroll/renew 与两份节点 schema 中统一只接受 12 位小写十六进制；描述性名称写入 `metadata.remark`。WebUI「加入节点」的节点 ID 由系统生成并只读显示。旧式可读 id（如 `storage-nvmet-01`）不再通过校验，需重新签发 token 并以新身份 join。
 - **CLI 参数解析与帮助严格化**：每个命令声明自己的字符串/布尔标志、必填项与位置参数上下界；未知、重复、缺值与多余参数报用法错误（退出码 2）；`-h`/`--help` 与 `kurrent help [group [verb]]` 在任何副作用之前返回；退出码统一为 0 成功/帮助、1 运行失败、2 用法错误。全局标志只在命令组之前解析，子命令中误写会得到明确提示。
 - **CLI 输入校验与密钥输入**：所有对象 ID 做路径转义；URL、agent id、IP、role/tags、scope、TTL、uses、serial 与吊销原因在请求前校验。`workers credential set` 只接受 `--secret-file` / `--secret-stdin` / `--generate`，拒绝命令行明文 `--secret`；文件须为普通文件且权限不宽于 0600，密钥按 DHHC-1 载荷与 CRC32 校验。`cert issue` 在调用签发端点前检查输出路径并创建目录。
 - **CLI 上限与地址处理对齐控制面策略**：bootstrap token `--uses` 不再硬编码 100、管理 token `--ttl` 不再硬编码 720h，CLI 只挡 schema 绝对上限（1000 / 8760h），具体上限由控制面声明裁决；`join`/`--cp-url` 自动去除误贴的 `/api/cp` 后缀，IPv6 控制面地址按 `url.Hostname` + `JoinHostPort` 推导 advertise 地址。

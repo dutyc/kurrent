@@ -254,7 +254,7 @@ class TestBootVarsWithDisk:
     def test_bound_worker_with_disk_projects_iscsi(self, client, auth_headers, ec_keypair, mock_agent_client):
         # 注册 agent（role.disk）+ mock client → 建盘 → 验签后投影 iqn/server/sep
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
         }, headers=auth_headers)
         hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
@@ -272,7 +272,7 @@ class TestBootVarsWithDisk:
         assert f"set disk-nqn {disk['nqn']}" in res.text  # 完整盘 NQN 原样下发（盘记录权威值）
         assert "set base-nqn" not in res.text  # 不再下发前缀，固件不重拼
         assert "set base-iqn iqn.2026-07.com.test" in res.text  # base-iqn 为前缀，worker 后缀由 iPXE 拼装
-        assert "set storager-ip ag-01" in res.text  # storager_ip 缺省回退 base_url 主机名
+        assert "set storager-ip a1b2c3d4e5f6" in res.text  # storager_ip 缺省回退 base_url 主机名
         assert "set iscsi-sep :::1:" in res.text  # stgt 后端差异连接符
         assert "set os ubuntu" in res.text  # 盘 os 投影（默认盘 = 唯一盘）
         assert "set menu-default boot-os" in res.text  # 单盘建盘自动成为默认盘 → 通用 OS 项
@@ -284,7 +284,7 @@ class TestBootVarsWithDisk:
         此处注册时 tags 带陈旧的 nvmet，Agent /capabilities 实报 stgt → 必须按 stgt 拼（发 iscsi-sep）。
         """
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "nvmet"],
         }, headers=auth_headers)
         hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
@@ -303,7 +303,7 @@ class TestBootVarsWithDisk:
         """enabled=排空语义的边界回归：停用只拦新增，存量盘的引导投影照常
         （storager_ip_for 无 enabled 守卫是裁定的一部分，不是遗漏）。"""
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
         }, headers=auth_headers)
         hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
@@ -312,8 +312,8 @@ class TestBootVarsWithDisk:
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
         disk = res.json()["disks"][0]
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6:8000", "role": {"disk": True, "cd": False},
             "tags": ["storage"], "enabled": False,
         }, headers=auth_headers)
         assert res.status_code == 200
@@ -322,12 +322,12 @@ class TestBootVarsWithDisk:
         sig = ec_keypair["sign"](MAC_A, nonce)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce, sig=sig)
         assert res.status_code == 200
-        assert "set storager-ip ag-01" in res.text  # 存量盘照常投影
+        assert "set storager-ip a1b2c3d4e5f6" in res.text  # 存量盘照常投影
         assert f"set disk-nqn {disk['nqn']}" in res.text
 
     def test_default_disk_projects_boot_vars(self, client, auth_headers, ec_keypair, mock_agent_client):
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
         }, headers=auth_headers)
         hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")
@@ -360,7 +360,7 @@ class TestBootVarsWithDisk:
     def test_default_disk_projects_os_version(self, client, auth_headers, ec_keypair, mock_agent_client):
         """带版本的默认盘：boot-vars 投影 os-version（menu 侧 os-label 拼版本展示）。"""
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
         }, headers=auth_headers)
         hostname = _claim_and_bind(client, auth_headers, ec_keypair, mac=MAC_A, worker_id="worker-01")

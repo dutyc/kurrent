@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from . import config
+from .utils import AGENT_ID_RE
 
 log = logging.getLogger("control-plane")
 
@@ -1011,6 +1012,8 @@ def sign_component_certs(ca_cert, ca_key, agent_id: str, component: str,
     CSR 的 CN 必须与登记身份一致（防冒名）：CN = <prefix>-<agent_id>。
     给出 pki_dir 时把两张证书登记进组件登记表（吊销/CRL 的依据）。
     """
+    if not AGENT_ID_RE.fullmatch(agent_id):
+        raise ValueError("agent_id must be 12 lowercase hex characters")
     prefix = COMPONENT_PREFIX.get(component)
     if not prefix:
         raise ValueError(f"unknown component: {component}")
@@ -1057,8 +1060,8 @@ def parse_dn_cn(dn: str) -> str:
 # - nvmet-host 派生 token（绑 agent_id）：agent enroll 上报 backend=nvmet 时控制面
 #   自动签发随响应下发（能力上报驱动，签发不预知后端）
 
-# 节点身份字符集：与 CLI normalizeAgentID / 证书 CN 一致（小写字母/数字/./-）
-AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
+# 节点身份 = 12 位小写 hex（与盘 os_tag / Docker 容器短 ID 同构）：机器身份不承载
+# 人类语义，描述性名称写入节点声明 metadata.remark。
 
 
 def _token_file(pki_dir: Path) -> Path:
@@ -1145,7 +1148,7 @@ def issue_bootstrap_token(pki_dir: Path, agent_id: str = "", component: str = "a
         if not agent_id:
             raise ValueError("bootstrap token must bind agent_id")
         if not AGENT_ID_RE.fullmatch(agent_id):
-            raise ValueError("agent_id must match [a-z0-9][a-z0-9.-]*")
+            raise ValueError("agent_id must be 12 lowercase hex characters")
         if ttl_hours is not None:
             raise ValueError("ttl_hours only applies to admin tokens")
         if scopes:

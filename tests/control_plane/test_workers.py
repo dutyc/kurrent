@@ -13,7 +13,7 @@ MAC_C = "00:11:22:33:44:77"
 def register_agent(client, auth_headers, mock_agent_client):
     """注册磁盘角色 Agent（mock client 已就位，无网络）。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text
@@ -231,7 +231,7 @@ class TestWorkerDisks:
         assert disk["nqn"] == f"nqn.2026-07.com.test:worker-01.ubuntu.{disk['os_tag']}"
         assert disk["iqn"] == "iqn." + disk["nqn"][4:]
         assert disk["filename"] == f"worker-01.ubuntu.{disk['os_tag']}.img"
-        assert disk["agent"] == "ag-01"
+        assert disk["agent"] == "a1b2c3d4e5f6"
         assert disk["source"] == {"type": "master", "name": "ubuntu-24.04-master"}
         # 只有一块盘 → 它就是默认启动盘（菜单不再落到 reboot）
         assert body["default_disk"] == disk["os_tag"]
@@ -281,14 +281,14 @@ class TestWorkerDisks:
     def test_create_disk_disabled_agent_409(self, client, auth_headers, register_agent):
         """enabled=排空语义：显式点名停用节点建盘 → 409（不碰存量是另一条边界，见 trust_chain）。"""
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6:8000", "role": {"disk": True, "cd": False},
             "tags": ["storage"], "enabled": False,
         }, headers=auth_headers)
         assert res.status_code == 200
         res = client.post("/workers/worker-01/luns/disk", json={
             "type": "master", "os": "ubuntu", "name": "ubuntu-24.04-master",
-            "disk_agent": "ag-01",
+            "disk_agent": "a1b2c3d4e5f6",
         }, headers=auth_headers)
         assert res.status_code == 409
         assert "disabled" in res.json()["detail"]
@@ -298,16 +298,16 @@ class TestWorkerDisks:
         （回归：agents.get 抛 KeyError，原死代码 `if not disk_agent` 使其落成 500 "'xx'"）。"""
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-02"}, headers=auth_headers)
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6:8000", "role": {"disk": True, "cd": False},
             "tags": ["storage"], "enabled": False,
         }, headers=auth_headers)
         assert res.status_code == 200
         res = client.post("/workers/luns/disk/batch", json={
             "type": "empty", "os": "ubuntu", "size": "40G",
             "targets": [
-                {"worker_id": "worker-01", "agent": "ag-01"},
-                {"worker_id": "worker-02", "agent": "ag-gone"},
+                {"worker_id": "worker-01", "agent": "a1b2c3d4e5f6"},
+                {"worker_id": "worker-02", "agent": "0123456789ab"},
             ],
         }, headers=auth_headers)
         assert res.status_code == 200
@@ -315,7 +315,7 @@ class TestWorkerDisks:
         assert body["succeeded"] == []
         failed = {item["worker_id"]: item["error"] for item in body["failed"]}
         assert "disabled" in failed["worker-01"]
-        assert failed["worker-02"] == "agent not found: ag-gone"
+        assert failed["worker-02"] == "agent not found: 0123456789ab"
 
     def test_create_disk_duplicate_os_409(self, client, auth_headers, register_agent):
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
@@ -367,8 +367,8 @@ class TestWorkerDisks:
         client.post("/workers/batch", json={"count": 2, "name_prefix": "node-"}, headers=auth_headers)
         res = client.post("/workers/luns/disk/batch", json={
             "type": "empty", "os": "debian", "os_version": "12", "size": "40G",
-            "targets": [{"worker_id": "node-01", "agent": "ag-01"},
-                        {"worker_id": "node-02", "agent": "ag-01"}],
+            "targets": [{"worker_id": "node-01", "agent": "a1b2c3d4e5f6"},
+                        {"worker_id": "node-02", "agent": "a1b2c3d4e5f6"}],
         }, headers=auth_headers)
         assert res.status_code == 200
         body = res.json()
@@ -387,7 +387,7 @@ class TestWorkerDisks:
         }, headers=auth_headers)
         res = client.post("/workers/luns/disk/batch", json={
             "type": "empty", "os": "ubuntu", "size": "40G",
-            "targets": [{"worker_id": "worker-01", "agent": "ag-01"}],
+            "targets": [{"worker_id": "worker-01", "agent": "a1b2c3d4e5f6"}],
         }, headers=auth_headers)
         body = res.json()
         assert len(body["succeeded"]) == 0
@@ -525,8 +525,8 @@ class TestWorkerDelete:
             "type": "master", "os": "ubuntu", "name": "m",
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
-        assert client.delete("/agents/ag-01", headers=auth_headers).status_code == 200
-        # 回归：原 KeyError（agents.get / _delete_target）落成 500 "'ag-01'"
+        assert client.delete("/agents/a1b2c3d4e5f6", headers=auth_headers).status_code == 200
+        # 回归：原 KeyError（agents.get / _delete_target）落成 500 "'a1b2c3d4e5f6'"
         res = client.delete("/workers/worker-01", headers=auth_headers)
         assert res.status_code == 404
         assert "agent not registered" in res.json()["detail"]["error"]

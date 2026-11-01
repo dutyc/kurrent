@@ -8,8 +8,8 @@ from control_plane.app.agent_client import AgentClient
 @pytest.fixture()
 def agent_payload():
     return {
-        "id": "ag-01",
-        "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6",
+        "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": True},
         "tags": ["storage", "stgt"],
         "enabled": True,
@@ -24,7 +24,7 @@ class TestAgentCrud:
         res = client.post("/agents", json=agent_payload, headers=auth_headers)
         assert res.status_code == 201
         body = res.json()
-        assert body["id"] == "ag-01"
+        assert body["id"] == "a1b2c3d4e5f6"
         assert body["role"] == {"disk": True, "cd": True}
         assert body["storager_ip"] is None  # 未显式配置 → 缺省空；回退 base_url 主机名仅在 boot-vars 投影时
         assert body["remark"] == "主存储节点"  # 备注（人类识别用，展示性质）
@@ -38,20 +38,24 @@ class TestAgentCrud:
         res = client.post("/agents", json=agent_payload, headers=auth_headers)
         assert res.status_code == 409
 
-    def test_create_invalid_id_400(self, client, auth_headers, agent_payload):
-        agent_payload["id"] = "Bad ID!"
+    @pytest.mark.parametrize("bad_id", [
+        "Bad ID!", "storage-01", "3F2A9C1D8B7E", "3f2a9c1d8b", "3f2a9c1d8b7e0",
+    ])
+    def test_create_invalid_id_400(self, client, auth_headers, agent_payload, bad_id):
+        agent_payload["id"] = bad_id
         res = client.post("/agents", json=agent_payload, headers=auth_headers)
         assert res.status_code == 400
+        assert "12 lowercase hex" in res.json()["detail"]
 
     def test_create_invalid_base_url_400(self, client, auth_headers, agent_payload):
-        agent_payload["base_url"] = "ag-01:8000"  # 缺 scheme
+        agent_payload["base_url"] = "a1b2c3d4e5f6:8000"  # 缺 scheme
         res = client.post("/agents", json=agent_payload, headers=auth_headers)
         assert res.status_code == 400
 
     def test_update_agent(self, client, auth_headers, agent_payload):
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01-new:9000",
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6-new:9000",
             "role": {"disk": True, "cd": False},
             "tags": ["storage", "lio"],
             "enabled": False,
@@ -59,7 +63,7 @@ class TestAgentCrud:
         }, headers=auth_headers)
         assert res.status_code == 200
         body = res.json()
-        assert body["base_url"] == "http://ag-01-new:9000"
+        assert body["base_url"] == "http://a1b2c3d4e5f6-new:9000"
         assert body["role"] == {"disk": True, "cd": False}
         assert body["tags"] == ["storage", "lio"]
         assert body["enabled"] is False
@@ -70,17 +74,17 @@ class TestAgentCrud:
         """自动登记（tags 含 auto）节点：base_url 由节点声明管理，PUT 改地址 → 409 并指路
         （改了也会在下次 renew 被声明值冲掉）；同址提交（WebUI 编辑保存的常规形态）不受限。"""
         client.post("/agents", json={
-            "id": "ag-auto", "base_url": "http://ag-auto:8000",
+            "id": "c3d4e5f60123", "base_url": "http://c3d4e5f60123:8000",
             "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
         }, headers=auth_headers)
-        res = client.put("/agents/ag-auto", json={
-            "base_url": "http://ag-auto-moved:9000",
+        res = client.put("/agents/c3d4e5f60123", json={
+            "base_url": "http://c3d4e5f60123-moved:9000",
             "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
         }, headers=auth_headers)
         assert res.status_code == 409
         assert "node declaration" in res.json()["detail"]
-        res = client.put("/agents/ag-auto", json={
-            "base_url": "http://ag-auto:8000",
+        res = client.put("/agents/c3d4e5f60123", json={
+            "base_url": "http://c3d4e5f60123:8000",
             "role": {"disk": True, "cd": False}, "tags": ["auto", "storage"],
         }, headers=auth_headers)
         assert res.status_code == 200
@@ -88,16 +92,16 @@ class TestAgentCrud:
     def test_update_base_url_allowed_for_manual_agent(self, client, auth_headers, agent_payload):
         """手工登记节点（无 auto 标签）：无节点声明可依，地址归控制面，仍可改。"""
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01-moved:9000",
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6-moved:9000",
             "role": {"disk": True, "cd": False}, "tags": ["storage"],
         }, headers=auth_headers)
         assert res.status_code == 200
-        assert res.json()["base_url"] == "http://ag-01-moved:9000"
+        assert res.json()["base_url"] == "http://a1b2c3d4e5f6-moved:9000"
 
     def test_update_missing_404(self, client, auth_headers):
-        res = client.put("/agents/ag-01", json={
-            "base_url": "http://ag-01:8000", "role": {"disk": True, "cd": False},
+        res = client.put("/agents/a1b2c3d4e5f6", json={
+            "base_url": "http://a1b2c3d4e5f6:8000", "role": {"disk": True, "cd": False},
         }, headers=auth_headers)
         assert res.status_code == 404
 
@@ -110,10 +114,10 @@ class TestAgentCrud:
             "type": "master", "os": "ubuntu", "name": "m",
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
-        res = client.delete("/agents/ag-01", headers=auth_headers)
+        res = client.delete("/agents/a1b2c3d4e5f6", headers=auth_headers)
         assert res.status_code == 200
         body = res.json()
-        assert body["deleted"] == "ag-01"
+        assert body["deleted"] == "a1b2c3d4e5f6"
         assert body["disks_hosted"] == 1
         assert body["affected_workers"] == ["worker-01"]
 
@@ -202,9 +206,9 @@ class TestAgentProbe:
 
         monkeypatch.setattr(AgentClient, "capabilities", boom)
         # 尾斜杠顺带验证 base_url 规范化（strip + rstrip "/"）
-        res = client.post("/agents/probe", json={"base_url": "http://ag-down:8000/"}, headers=auth_headers)
+        res = client.post("/agents/probe", json={"base_url": "http://d4e5f6012345:8000/"}, headers=auth_headers)
         assert res.status_code == 502
-        assert res.json()["detail"] == {"agent": "http://ag-down:8000", "error": "capabilities exploded"}
+        assert res.json()["detail"] == {"agent": "http://d4e5f6012345:8000", "error": "capabilities exploded"}
 
     def test_probe_edit_scenario(self, client, auth_headers, monkeypatch):
         """编辑场景探测：经控制面 mTLS 客户端证书鉴权（鉴权不用 token），
@@ -212,11 +216,11 @@ class TestAgentProbe:
         monkeypatch.setattr(AgentClient, "healthz", lambda self: {"status": "ok"})
         monkeypatch.setattr(AgentClient, "capabilities", lambda self: {"backend": "stgt"})
         client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False},
         }, headers=auth_headers)
         res = client.post("/agents/probe", json={
-            "base_url": "http://ag-01:8000", "agent_id": "ag-01",
+            "base_url": "http://a1b2c3d4e5f6:8000", "agent_id": "a1b2c3d4e5f6",
         }, headers=auth_headers)
         assert res.status_code == 200
         assert res.json()["backend"] == "stgt"
@@ -227,16 +231,16 @@ class TestAgentLuns:
 
     def test_list_luns_empty(self, client, auth_headers, agent_payload, mock_agent_client):
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.get("/agents/ag-01/luns", headers=auth_headers)
+        res = client.get("/agents/a1b2c3d4e5f6/luns", headers=auth_headers)
         assert res.status_code == 200
         assert res.json() == []
 
     def test_luns_missing_agent_404(self, client, auth_headers):
-        assert client.get("/agents/ag-01/luns", headers=auth_headers).status_code == 404
+        assert client.get("/agents/a1b2c3d4e5f6/luns", headers=auth_headers).status_code == 404
 
     def test_create_disk_lun(self, client, auth_headers, agent_payload, mock_agent_client):
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.post("/agents/ag-01/luns/disk", json={
+        res = client.post("/agents/a1b2c3d4e5f6/luns/disk", json={
             "iqn": "iqn.2026-07.com.test:worker-01.ubuntu",
             "filename": "worker-01.ubuntu.img",
             "master": "ubuntu-24.04-master",
@@ -246,35 +250,35 @@ class TestAgentLuns:
 
     def test_create_cd_lun(self, client, auth_headers, agent_payload, mock_agent_client):
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.post("/agents/ag-01/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
+        res = client.post("/agents/a1b2c3d4e5f6/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
         assert res.status_code == 201
 
     def test_create_cd_on_non_cd_agent_400(self, client, auth_headers, agent_payload, mock_agent_client):
         agent_payload["role"] = {"disk": True, "cd": False}
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.post("/agents/ag-01/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
+        res = client.post("/agents/a1b2c3d4e5f6/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
         assert res.status_code == 400
 
     def test_create_on_disabled_agent_409(self, client, auth_headers, agent_payload, mock_agent_client):
         """enabled=排空语义：停用节点不接任何新增（显式点名也拒），查询/删除不受限。"""
         agent_payload["enabled"] = False
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.post("/agents/ag-01/luns/disk", json={
+        res = client.post("/agents/a1b2c3d4e5f6/luns/disk", json={
             "iqn": "iqn.2026-07.com.test:worker-01.ubuntu",
             "filename": "worker-01.ubuntu.img",
             "master": "ubuntu-24.04-master",
         }, headers=auth_headers)
         assert res.status_code == 409
         assert "disabled" in res.json()["detail"]
-        res = client.post("/agents/ag-01/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
+        res = client.post("/agents/a1b2c3d4e5f6/luns/cd", json={"iso": "windows-11.iso"}, headers=auth_headers)
         assert res.status_code == 409
         # 非新增入口不受 enabled 限制
-        assert client.get("/agents/ag-01/luns", headers=auth_headers).status_code == 200
-        assert client.post("/agents/ag-01/luns/scan", headers=auth_headers).status_code == 200
+        assert client.get("/agents/a1b2c3d4e5f6/luns", headers=auth_headers).status_code == 200
+        assert client.post("/agents/a1b2c3d4e5f6/luns/scan", headers=auth_headers).status_code == 200
 
     def test_scan(self, client, auth_headers, agent_payload, mock_agent_client):
         client.post("/agents", json=agent_payload, headers=auth_headers)
-        res = client.post("/agents/ag-01/luns/scan", headers=auth_headers)
+        res = client.post("/agents/a1b2c3d4e5f6/luns/scan", headers=auth_headers)
         assert res.status_code == 200
         assert res.json() == {"created": [], "skipped": []}
 
@@ -293,7 +297,7 @@ class TestMasters:
                               "path": f"/srv/{agent.id}/x.img"}],
             })
         monkeypatch.setattr(agents, "client", fake_client)
-        for aid in ("ag-01", "ag-02"):
+        for aid in ("a1b2c3d4e5f6", "b2c3d4e5f601"):
             client.post("/agents", json={
                 "id": aid, "base_url": f"http://{aid}:8000",
                 "role": {"disk": True, "cd": False},
@@ -313,14 +317,14 @@ class TestMasters:
         from control_plane.app.stores import agents
 
         def flaky(agent):
-            if agent.id == "ag-02":
+            if agent.id == "b2c3d4e5f601":
                 raise AgentAPIError(agent.id, 500, "boom")
             return SimpleNamespace(list_masters=lambda: {
                 "masters": [{"name": "ubuntu-24.04-master", "size": "20G",
                               "path": f"/srv/{agent.id}/x.img"}],
             })
         monkeypatch.setattr(agents, "client", flaky)
-        for aid in ("ag-01", "ag-02"):
+        for aid in ("a1b2c3d4e5f6", "b2c3d4e5f601"):
             client.post("/agents", json={
                 "id": aid, "base_url": f"http://{aid}:8000",
                 "role": {"disk": True, "cd": False},
@@ -328,7 +332,7 @@ class TestMasters:
         res = client.get("/masters", headers=auth_headers)
         assert res.status_code == 200  # 单台失败不阻塞整体
         body = res.json()
-        failed = [e for e in body["agents"] if e["agent"] == "ag-02"][0]
+        failed = [e for e in body["agents"] if e["agent"] == "b2c3d4e5f601"][0]
         assert failed["masters"] == []
         assert failed["error"] == "boom"
 
@@ -338,61 +342,61 @@ class TestMasterTags:
 
     def _register_agent(self, client, auth_headers):
         res = client.post("/agents", json={
-            "id": "ag-01", "base_url": "http://ag-01:8000",
+            "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
             "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
 
     def test_set_master_tag(self, client, auth_headers):
         self._register_agent(client, auth_headers)
-        res = client.put("/agents/ag-01/masters/ubuntu-24.04-master/tag",
+        res = client.put("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag",
                          json={"os": "Ubuntu", "os_version": "24.04"}, headers=auth_headers)
         assert res.status_code == 200
         assert res.json() == {
-            "agent": "ag-01", "name": "ubuntu-24.04-master",
+            "agent": "a1b2c3d4e5f6", "name": "ubuntu-24.04-master",
             "os": "ubuntu", "os_version": "24.04", "remark": "",  # os 小写归一
         }
         # 覆盖更新（同键幂等）
-        res = client.put("/agents/ag-01/masters/ubuntu-24.04-master/tag",
+        res = client.put("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag",
                          json={"os": "ubuntu", "os_version": "24.04.1"}, headers=auth_headers)
         assert res.status_code == 200
         assert res.json()["os_version"] == "24.04.1"
 
     def test_set_master_tag_version_optional(self, client, auth_headers):
         self._register_agent(client, auth_headers)
-        res = client.put("/agents/ag-01/masters/debian-master/tag",
+        res = client.put("/agents/a1b2c3d4e5f6/masters/debian-master/tag",
                          json={"os": "debian"}, headers=auth_headers)
         assert res.status_code == 200
         assert res.json()["os_version"] == ""  # 缺省 → ''（库表形态：无版本）
 
     def test_set_master_tag_invalid_os_400(self, client, auth_headers):
         self._register_agent(client, auth_headers)
-        res = client.put("/agents/ag-01/masters/x/tag",
+        res = client.put("/agents/a1b2c3d4e5f6/masters/x/tag",
                          json={"os": "bad os!"}, headers=auth_headers)
         assert res.status_code == 400
         assert "invalid os" in res.json()["detail"]
 
     def test_clear_master_tag(self, client, auth_headers):
         self._register_agent(client, auth_headers)
-        client.put("/agents/ag-01/masters/ubuntu-24.04-master/tag",
+        client.put("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag",
                    json={"os": "ubuntu", "os_version": "24.04"}, headers=auth_headers)
-        res = client.delete("/agents/ag-01/masters/ubuntu-24.04-master/tag", headers=auth_headers)
+        res = client.delete("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag", headers=auth_headers)
         assert res.status_code == 200
-        assert res.json() == {"agent": "ag-01", "name": "ubuntu-24.04-master", "removed": True}
+        assert res.json() == {"agent": "a1b2c3d4e5f6", "name": "ubuntu-24.04-master", "removed": True}
         # 再清 → 未登记（removed=false）
-        res = client.delete("/agents/ag-01/masters/ubuntu-24.04-master/tag", headers=auth_headers)
+        res = client.delete("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag", headers=auth_headers)
         assert res.json()["removed"] is False
 
     def test_master_tag_missing_agent_404(self, client, auth_headers):
-        assert client.put("/agents/ag-99/masters/x/tag", json={"os": "ubuntu"},
+        assert client.put("/agents/123456789abc/masters/x/tag", json={"os": "ubuntu"},
                           headers=auth_headers).status_code == 404
-        assert client.delete("/agents/ag-99/masters/x/tag", headers=auth_headers).status_code == 404
+        assert client.delete("/agents/123456789abc/masters/x/tag", headers=auth_headers).status_code == 404
 
     def test_master_tag_requires_token(self, client, monkeypatch, agent_payload):
         """无凭据 401（关闭开发模式；认证器链行为见 test_auth.py）。"""
         monkeypatch.setenv("KURRENT_CP_INSECURE", "")
-        assert client.put("/agents/ag-01/masters/x/tag", json={"os": "ubuntu"}).status_code == 401
-        assert client.delete("/agents/ag-01/masters/x/tag").status_code == 401
+        assert client.put("/agents/a1b2c3d4e5f6/masters/x/tag", json={"os": "ubuntu"}).status_code == 401
+        assert client.delete("/agents/a1b2c3d4e5f6/masters/x/tag").status_code == 401
 
     def test_masters_aggregate_merges_tags(self, client, auth_headers, monkeypatch):
         """/masters 聚合：已登记的母盘条目附加 os/os_version；未登记的不附加。"""
@@ -409,7 +413,7 @@ class TestMasterTags:
             })
         monkeypatch.setattr(agents, "client", fake_client)
         self._register_agent(client, auth_headers)
-        client.put("/agents/ag-01/masters/ubuntu-24.04-master/tag",
+        client.put("/agents/a1b2c3d4e5f6/masters/ubuntu-24.04-master/tag",
                    json={"os": "ubuntu", "os_version": "24.04"}, headers=auth_headers)
 
         res = client.get("/masters", headers=auth_headers)

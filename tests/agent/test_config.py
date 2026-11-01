@@ -19,7 +19,7 @@ def _valid() -> dict:
     return {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "test-node-01"},
+        "metadata": {"name": "0123456789ad"},
         "spec": {
             "agent": {"diskDir": "/tmp/disks", "nqnBase": "nqn.2026-07.com.test"},
             "controlPlane": {"url": "https://127.0.0.1"},
@@ -35,7 +35,7 @@ def _load(tmp_path, data: dict):
 
 def test_load_valid(tmp_path):
     node = _load(tmp_path, _valid())
-    assert node.metadata.name == "test-node-01"
+    assert node.metadata.name == "0123456789ad"
     assert node.spec.agent.disk_dir == "/tmp/disks"
     assert node.spec.agent.nqn_base == "nqn.2026-07.com.test"
     assert node.spec.control_plane.url == "https://127.0.0.1"
@@ -141,7 +141,7 @@ def test_join_generated_shape(tmp_path):
     data = {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "storage-nvmet-01"},
+        "metadata": {"name": "3f2a9c1d8b7e"},
         "spec": {
             "agent": {
                 "backend": "nvmet",
@@ -164,6 +164,8 @@ def test_join_generated_shape(tmp_path):
     (lambda d: d.update(kind="OtherConfiguration"), "kind"),
     (lambda d: d["metadata"].update(name=""), "name"),
     (lambda d: d["metadata"].update(name="Storage-01"), "name"),
+    (lambda d: d["metadata"].update(name="storage-01"), "name"),
+    (lambda d: d["metadata"].update(name="0123456789a"), "name"),
     (lambda d: d["spec"]["agent"].update(diskDir="relative/path"), "absolute"),
     (lambda d: d["spec"]["agent"].update(nqnBase="nqn.not-a-date"), "nqnBase"),
     (lambda d: d["spec"]["agent"].update(advertiseUrl="ftp://host:4840"), "http(s)"),

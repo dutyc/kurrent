@@ -13,6 +13,9 @@ from fastapi import HTTPException, Request
 from .dnsmasq import normalize_mac
 
 WORKER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+# 节点身份（agent_id）= 机器身份：12 位小写 hex（与盘 os_tag / Docker 容器短 ID 同构）。
+# 人类可读信息只进 remark，不得占用身份字符集。
+AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 OS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 OS_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
@@ -25,6 +28,17 @@ def canonical_id(value: str) -> str:
     if not WORKER_ID_RE.match(worker_id):
         raise HTTPException(400, f"invalid worker_id: {value}")
     return worker_id
+
+
+def canonical_agent_id(value: str) -> str:
+    agent_id = value.strip()
+    if not AGENT_ID_RE.match(agent_id):
+        raise HTTPException(
+            400,
+            f"invalid agent id: {value} (expected 12 lowercase hex characters; "
+            f"put human-readable labels in remark)",
+        )
+    return agent_id
 
 
 def canonical_hostname(value: str) -> str:

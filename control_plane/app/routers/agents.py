@@ -19,7 +19,7 @@ from ..models import (
     UpdateAgentRequest,
 )
 from ..stores import agents, master_tags, record, store
-from ..utils import WORKER_ID_RE, canonical_os, canonical_os_version, client_host, worker_disks
+from ..utils import canonical_agent_id, canonical_os, canonical_os_version, client_host, worker_disks
 
 from ..principal import PrincipalRouter
 
@@ -37,11 +37,10 @@ def list_agents(live: bool = True):
 @router.post("/agents", status_code=201)
 def create_agent(req: CreateAgentRequest, request: Request):
     """注册新 Agent：写入 agents.yml（重复 id 返回 409）。
+    id 为机器身份：12 位小写 hex，人类可读名称写 remark；
     base_url 须 http(s):// 开头；
     role 决定磁盘/光驱角色；storager_ip 为数据面地址（缺省用 base_url 主机名）。"""
-    agent_id = req.id.strip().lower()
-    if not WORKER_ID_RE.match(agent_id):  # Agent id 与 worker id 同一命名规则
-        raise HTTPException(400, f"invalid agent id: {req.id}")
+    agent_id = canonical_agent_id(req.id)
     base_url = req.base_url.strip().rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         raise HTTPException(400, "base_url must start with http:// or https://")
@@ -73,7 +72,7 @@ def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
     enabled=false 停用（排空语义：不接新增盘，存量盘照常服务）。
     base_url 归属：自动登记（tags 含 auto）的节点其地址由节点声明管理——
     控制面侧改动会在下次 renew 被声明值冲掉，故拒绝并指路；手工登记节点仍可改。"""
-    agent_id = agent_id.strip().lower()
+    agent_id = agent_id.strip()
     base_url = req.base_url.strip().rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         raise HTTPException(400, "base_url must start with http:// or https://")

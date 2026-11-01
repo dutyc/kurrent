@@ -18,7 +18,7 @@ def make_secret(key: bytes = b"0123456789abcdef0123456789abcdef") -> str:
 
 
 AGENT_BODY = {
-    "id": "ag-01", "base_url": "http://ag-01:8000",
+    "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
     "role": {"disk": True, "cd": False}, "tags": ["storage", "nvmet"],
 }
 
@@ -61,7 +61,7 @@ def test_push_state_recorded_and_projected(client, auth_headers, mock_agent_clie
     push = res.json()["push"]
     assert push["result"] == "ok" and push["updated_at"]
     agents_view = push["agents"]
-    assert agents_view == [{"agent_id": "ag-01", "result": "ok",
+    assert agents_view == [{"agent_id": "a1b2c3d4e5f6", "result": "ok",
                             "updated_at": agents_view[0]["updated_at"]}]
 
     body = client.get("/workers/worker-01/credential", headers=auth_headers).json()
@@ -172,7 +172,7 @@ def test_reconcile_key_check_uses_agent_config(client, auth_headers, mock_agent_
     summary = reconcile_credentials_once()
     assert summary == {"targets": 1, "pushed": 0, "skipped": 1, "failed": 0}
     assert not pushes
-    assert seen and seen[0].id == "ag-01"
+    assert seen and seen[0].id == "a1b2c3d4e5f6"
 
 
 def test_generation_advances_and_stale_result_ignored(client, auth_headers, mock_agent_client):
@@ -194,11 +194,11 @@ def test_generation_advances_and_stale_result_ignored(client, auth_headers, mock
     from control_plane.app.routers import workers as wmod
     # 迟到的旧结果：不应把台账覆盖回 ok/旧 generation
     with wmod.credential_pushes.locked():
-        before = wmod.credential_pushes.load()["pushes"]["worker-01/ag-01"]
-    assert wmod._set_push_state("worker-01", "ag-01", "failed", None,
+        before = wmod.credential_pushes.load()["pushes"]["worker-01/a1b2c3d4e5f6"]
+    assert wmod._set_push_state("worker-01", "a1b2c3d4e5f6", "failed", None,
                                 before["generation"] - 1, "stale") is False
     with wmod.credential_pushes.locked():
-        after = wmod.credential_pushes.load()["pushes"]["worker-01/ag-01"]
+        after = wmod.credential_pushes.load()["pushes"]["worker-01/a1b2c3d4e5f6"]
     assert after["generation"] == before["generation"] and after["result"] == "ok"
 
 
@@ -279,13 +279,13 @@ def test_reconcile_prunes_stale_records_and_repushes_after_reregister(
     _setup_agent_and_disk(client, auth_headers)
     client.put("/workers/worker-01/credential",
                json={"secret": make_secret()}, headers=auth_headers)
-    assert "worker-01/ag-01" in settings.credential_push_file.read_text(encoding="utf-8")
+    assert "worker-01/a1b2c3d4e5f6" in settings.credential_push_file.read_text(encoding="utf-8")
 
-    res = client.delete("/agents/ag-01", headers=auth_headers)
+    res = client.delete("/agents/a1b2c3d4e5f6", headers=auth_headers)
     assert res.status_code in (200, 204), res.text
     summary = reconcile_credentials_once()
     assert summary["targets"] == 0
-    assert "worker-01/ag-01" not in settings.credential_push_file.read_text(encoding="utf-8")
+    assert "worker-01/a1b2c3d4e5f6" not in settings.credential_push_file.read_text(encoding="utf-8")
     # 登记已删 → 无从投递，投影不得谎报「待推送」（对账永不消费该对）
     body = client.get("/workers/worker-01/credential", headers=auth_headers).json()
     assert body["exists"] is True
@@ -304,7 +304,7 @@ def test_non_nvmet_target_marked_na(client, auth_headers, mock_agent_client):
     _setup_agent_and_disk(client, auth_headers)
 
     def not_nvmet(w, s, subs, hosts, tls_psk=None, generation=0):
-        raise AgentAPIError("ag-01", 400, "credential push requires backend=nvmet")
+        raise AgentAPIError("a1b2c3d4e5f6", 400, "credential push requires backend=nvmet")
 
     mock_agent_client.set_credential = not_nvmet
     res = client.put("/workers/worker-01/credential",
@@ -370,7 +370,7 @@ def test_worker_delete_forgets_credential(client, auth_headers, mock_agent_clien
     _setup_agent_and_disk(client, auth_headers)
     client.put("/workers/worker-01/credential",
                json={"secret": make_secret()}, headers=auth_headers)
-    assert _credential_keys() == ["worker-01"] and _push_keys() == ["worker-01/ag-01"]
+    assert _credential_keys() == ["worker-01"] and _push_keys() == ["worker-01/a1b2c3d4e5f6"]
 
     res = client.delete("/workers/worker-01", headers=auth_headers)
     assert res.status_code == 200, res.text

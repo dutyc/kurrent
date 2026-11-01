@@ -121,9 +121,9 @@ def test_bootstrap_identity_mismatch_alarms(client, tmp_path):
     original = settings.pki_dir
     object.__setattr__(settings, "pki_dir", tmp_path)
     try:
-        token = pki.issue_bootstrap_token(tmp_path, agent_id="node-a")
+        token = pki.issue_bootstrap_token(tmp_path, agent_id="23456789abcd")
         res = client.post("/enroll", json={
-            "agent_id": "node-b", "component": "agent",
+            "agent_id": "3456789abcde", "component": "agent",
             "csr_client": "x", "csr_serving": "y",
         }, headers={"Authorization": f"Bearer {token}"})
         assert res.status_code == 401

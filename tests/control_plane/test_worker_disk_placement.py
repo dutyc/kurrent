@@ -32,7 +32,7 @@ class AgentSpec:
 def fake_agents(monkeypatch):
     """按 agent id 返回定制 fake client，并统计每个方法被调用的 (agent, 次数)。
 
-    用法：register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=2))
+    用法：register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=2))
     """
     specs: dict[str, AgentSpec] = {}
     calls: dict[str, list[str]] = {"healthz": [], "capabilities": [], "list_masters": [], "list_luns": []}
@@ -83,70 +83,70 @@ def batch(client, auth_headers, **body):
 
 class TestAutoPlacement:
     def test_balances_by_existing_load(self, client, auth_headers, fake_agents):
-        """最少盘优先：ag-01 已有 2 块、ag-02 空 → 3 个 Worker 落成 ag-02, ag-02, ag-01。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=2))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(luns=0))
+        """最少盘优先：a1b2c3d4e5f6 已有 2 块、b2c3d4e5f601 空 → 3 个 Worker 落成 b2c3d4e5f601, b2c3d4e5f601, a1b2c3d4e5f6。"""
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=2))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01", "w-02", "w-03"])
 
         res = batch(client, auth_headers, workers=["w-01", "w-02", "w-03"])
         assert res.status_code == 200, res.text
         placed = [item["agent"] for item in res.json()["succeeded"]]
-        assert placed == ["ag-02", "ag-02", "ag-01"]
+        assert placed == ["b2c3d4e5f601", "b2c3d4e5f601", "a1b2c3d4e5f6"]
 
     def test_candidates_restrict_auto_placement(self, client, auth_headers, fake_agents):
-        """candidates 只让 ag-02 参与 → 全部落 ag-02（未列入的节点连探测都跳过）。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(luns=0))
+        """candidates 只让 b2c3d4e5f601 参与 → 全部落 b2c3d4e5f601（未列入的节点连探测都跳过）。"""
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01", "w-02"])
 
         res = batch(client, auth_headers, workers=["w-01", "w-02"],
-                    placement={"candidates": ["ag-02"]})
-        assert [i["agent"] for i in res.json()["succeeded"]] == ["ag-02", "ag-02"]
-        assert fake_agents["calls"]["healthz"] == ["ag-02"]
+                    placement={"candidates": ["b2c3d4e5f601"]})
+        assert [i["agent"] for i in res.json()["succeeded"]] == ["b2c3d4e5f601", "b2c3d4e5f601"]
+        assert fake_agents["calls"]["healthz"] == ["b2c3d4e5f601"]
 
     def test_master_missing_on_node_is_excluded(self, client, auth_headers, fake_agents):
         """母盘必须在该节点本地存在（克隆在节点本地完成）→ 缺母盘的节点被排除并给出原因。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=[MASTER]))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(masters=["other_tpl_.img"]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=[MASTER]))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(masters=["other_tpl_.img"]))
         make_workers(client, auth_headers, ["w-01", "w-02"])
 
         res = batch(client, auth_headers, workers=["w-01", "w-02"])
         body = res.json()
-        assert [i["agent"] for i in body["succeeded"]] == ["ag-01", "ag-01"]
+        assert [i["agent"] for i in body["succeeded"]] == ["a1b2c3d4e5f6", "a1b2c3d4e5f6"]
 
     def test_empty_disk_type_ignores_master_check(self, client, auth_headers, fake_agents):
         """空白盘不需要母盘 → 缺母盘的节点照样是候选。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=[]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=[]))
         make_workers(client, auth_headers, ["w-01"])
 
         res = batch(client, auth_headers, type="empty", size="40G", name=None, workers=["w-01"])
         assert res.status_code == 200, res.text
-        assert [i["agent"] for i in res.json()["succeeded"]] == ["ag-01"]
+        assert [i["agent"] for i in res.json()["succeeded"]] == ["a1b2c3d4e5f6"]
 
     def test_no_eligible_agent_returns_503_with_reasons(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=["other_tpl_.img"]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=["other_tpl_.img"]))
         make_workers(client, auth_headers, ["w-01"])
 
         res = batch(client, auth_headers, workers=["w-01"])
         assert res.status_code == 503
         detail = res.json()["detail"]
         assert detail["error"] == f"no eligible disk agent has master {MASTER}"
-        assert detail["excluded"] == [{"agent": "ag-01", "reason": f"does not have master {MASTER}"}]
+        assert detail["excluded"] == [{"agent": "a1b2c3d4e5f6", "reason": f"does not have master {MASTER}"}]
 
     def test_excluded_reasons_for_role_and_drain(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-cd", AgentSpec(disk=False, cd=True))
-        register(client, auth_headers, fake_agents, "ag-off", AgentSpec(enabled=False))
+        register(client, auth_headers, fake_agents, "e5f601234567", AgentSpec(disk=False, cd=True))
+        register(client, auth_headers, fake_agents, "f60123456789", AgentSpec(enabled=False))
         make_workers(client, auth_headers, ["w-01"])
 
         res = batch(client, auth_headers, workers=["w-01"])
         assert res.status_code == 503
         reasons = {e["agent"]: e["reason"] for e in res.json()["detail"]["excluded"]}
-        assert reasons["ag-cd"] == "not a disk-role agent"
-        assert "draining" in reasons["ag-off"]
+        assert reasons["e5f601234567"] == "not a disk-role agent"
+        assert "draining" in reasons["f60123456789"]
 
     def test_degraded_backend_excluded(self, client, auth_headers, fake_agents):
         """agent 进程活着但数据面未就绪（backend_ready=false）→ 不放新盘。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(
             health={"status": "ok", "backend": "nvmet", "backend_ready": False,
                     "backend_detail": "configfs not mounted"}))
         make_workers(client, auth_headers, ["w-01"])
@@ -159,43 +159,43 @@ class TestAutoPlacement:
 
 class TestPins:
     def test_pin_overrides_auto_placement(self, client, auth_headers, fake_agents):
-        """pin 是显式覆盖：w-02 钉到 ag-02（自动放置本来会给 ag-01）。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(luns=0))
+        """pin 是显式覆盖：w-02 钉到 b2c3d4e5f601（自动放置本来会给 a1b2c3d4e5f6）。"""
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01", "w-02"])
 
         res = batch(client, auth_headers, workers=["w-01", "w-02"],
-                    placement={"pins": {"w-02": "ag-02"}})
+                    placement={"pins": {"w-02": "b2c3d4e5f601"}})
         placed = {i["worker_id"]: i["agent"] for i in res.json()["succeeded"]}
-        assert placed["w-02"] == "ag-02"
-        assert placed["w-01"] == "ag-01"
+        assert placed["w-02"] == "b2c3d4e5f601"
+        assert placed["w-01"] == "a1b2c3d4e5f6"
 
     def test_pin_outside_candidates_is_still_honoured(self, client, auth_headers, fake_agents):
         """candidates 只约束自动放置；被 pin 的节点即使不在 candidates 内也要可用。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01"])
 
         res = batch(client, auth_headers, workers=["w-01"],
-                    placement={"candidates": ["ag-01"], "pins": {"w-01": "ag-02"}})
-        assert [i["agent"] for i in res.json()["succeeded"]] == ["ag-02"]
+                    placement={"candidates": ["a1b2c3d4e5f6"], "pins": {"w-01": "b2c3d4e5f601"}})
+        assert [i["agent"] for i in res.json()["succeeded"]] == ["b2c3d4e5f601"]
 
     def test_pin_to_unusable_node_is_503(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(enabled=False))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(enabled=False))
         make_workers(client, auth_headers, ["w-01"])
 
-        res = batch(client, auth_headers, workers=["w-01"], placement={"pins": {"w-01": "ag-02"}})
+        res = batch(client, auth_headers, workers=["w-01"], placement={"pins": {"w-01": "b2c3d4e5f601"}})
         assert res.status_code == 503
-        assert "pinned agent ag-02 is not usable for w-01" in res.json()["detail"]["error"]
-        assert [e["agent"] for e in res.json()["detail"]["excluded"]] == ["ag-02"]
+        assert "pinned agent b2c3d4e5f601 is not usable for w-01" in res.json()["detail"]["error"]
+        assert [e["agent"] for e in res.json()["detail"]["excluded"]] == ["b2c3d4e5f601"]
 
 
 class TestDryRun:
     def test_dry_run_plan_matches_execution_and_creates_nothing(self, client, auth_headers, fake_agents):
         """预览与执行是同一份实现：dry_run 给出的落点必须与随后执行的结果一致，且预览不落盘。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=1))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=1))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01", "w-02", "w-03"])
 
         preview = batch(client, auth_headers, workers=["w-01", "w-02", "w-03"], dry_run=True)
@@ -214,10 +214,10 @@ class TestDryRun:
         assert executed == planned
 
     def test_dry_run_reports_skip_and_missing(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01"])
         client.post("/workers/w-01/luns/disk", json={
-            "type": "empty", "os": "ubuntu", "size": "40G", "disk_agent": "ag-01",
+            "type": "empty", "os": "ubuntu", "size": "40G", "disk_agent": "a1b2c3d4e5f6",
         }, headers=auth_headers)
 
         res = batch(client, auth_headers, type="empty", size="40G", name=None,
@@ -231,28 +231,28 @@ class TestDryRun:
 class TestBackwardCompatibility:
     def test_explicit_targets_still_work(self, client, auth_headers, fake_agents):
         """targets 是原有调用方式（WebUI 现在就在用），必须原样可用。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01"])
 
-        res = batch(client, auth_headers, targets=[{"worker_id": "w-01", "agent": "ag-01"}])
+        res = batch(client, auth_headers, targets=[{"worker_id": "w-01", "agent": "a1b2c3d4e5f6"}])
         assert res.status_code == 200, res.text
-        assert [i["agent"] for i in res.json()["succeeded"]] == ["ag-01"]
+        assert [i["agent"] for i in res.json()["succeeded"]] == ["a1b2c3d4e5f6"]
 
     def test_targets_bypass_placement(self, client, auth_headers, fake_agents):
         """显式点名不走放置：节点没有母盘也照样提交（由 agent 决定成败）。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=[]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=[]))
         make_workers(client, auth_headers, ["w-01"])
 
-        res = batch(client, auth_headers, targets=[{"worker_id": "w-01", "agent": "ag-01"}])
+        res = batch(client, auth_headers, targets=[{"worker_id": "w-01", "agent": "a1b2c3d4e5f6"}])
         assert res.status_code == 200, res.text
         assert len(res.json()["succeeded"]) == 1
 
     def test_targets_and_workers_are_mutually_exclusive(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01"])
 
         res = batch(client, auth_headers, workers=["w-01"],
-                    targets=[{"worker_id": "w-01", "agent": "ag-01"}])
+                    targets=[{"worker_id": "w-01", "agent": "a1b2c3d4e5f6"}])
         assert res.status_code == 400
         assert "not both" in res.json()["detail"]
 
@@ -263,29 +263,29 @@ class TestBackwardCompatibility:
 
     def test_agent_probed_once_per_request(self, client, auth_headers, fake_agents):
         """放置已探过的 agent 在执行阶段复用（缓存），不按 Worker 数重复 healthz。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01", "w-02", "w-03", "w-04"])
 
         res = batch(client, auth_headers, workers=["w-01", "w-02", "w-03", "w-04"])
         assert len(res.json()["succeeded"]) == 4
-        assert fake_agents["calls"]["healthz"] == ["ag-01"]
+        assert fake_agents["calls"]["healthz"] == ["a1b2c3d4e5f6"]
 
 
 class TestSingleDiskPlacement:
     def test_auto_pick_skips_node_without_master(self, client, auth_headers, fake_agents):
         """单盘不点名节点时同样走放置：缺母盘的节点不会被选中（原先会选中并在 agent 侧失败）。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=["other_tpl_.img"]))
-        register(client, auth_headers, fake_agents, "ag-02", AgentSpec(masters=[MASTER]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=["other_tpl_.img"]))
+        register(client, auth_headers, fake_agents, "b2c3d4e5f601", AgentSpec(masters=[MASTER]))
         make_workers(client, auth_headers, ["w-01"])
 
         res = client.post("/workers/w-01/luns/disk", json={
             "type": "master", "os": "ubuntu", "name": MASTER,
         }, headers=auth_headers)
         assert res.status_code == 201, res.text
-        assert res.json()["disks"][0]["agent"] == "ag-02"
+        assert res.json()["disks"][0]["agent"] == "b2c3d4e5f601"
 
     def test_auto_pick_without_master_anywhere_is_503(self, client, auth_headers, fake_agents):
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(masters=[]))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(masters=[]))
         make_workers(client, auth_headers, ["w-01"])
 
         res = client.post("/workers/w-01/luns/disk", json={
@@ -296,11 +296,11 @@ class TestSingleDiskPlacement:
 
     def test_explicit_disk_agent_still_wins(self, client, auth_headers, fake_agents):
         """显式 disk_agent 不走放置（保持原语义：点名即用，不做母盘存在性预检）。"""
-        register(client, auth_headers, fake_agents, "ag-01", AgentSpec(luns=0))
+        register(client, auth_headers, fake_agents, "a1b2c3d4e5f6", AgentSpec(luns=0))
         make_workers(client, auth_headers, ["w-01"])
 
         res = client.post("/workers/w-01/luns/disk", json={
             "type": "master", "os": "ubuntu", "name": "master-not-listed",
-            "disk_agent": "ag-01",
+            "disk_agent": "a1b2c3d4e5f6",
         }, headers=auth_headers)
         assert res.status_code == 201, res.text

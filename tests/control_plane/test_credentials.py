@@ -184,7 +184,7 @@ def test_boot_vars_injects_nbft_secret(
     _bound_worker(client, auth_headers, register_claimed_device)
     # 建盘（Host NQN 与盘 NQN 同域派生需盘 NQN：base = agent 上报的 capabilities.base_nqn）
     client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
     }, headers=auth_headers)
     res = client.post("/workers/worker-01/luns/disk", json={
@@ -217,7 +217,7 @@ def _setup_worker_with_disk(
     """
     _bound_worker(client, auth_headers, register_claimed_device)
     client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage"],
     }, headers=auth_headers)
     caps = {"base_nqn": "nqn.2026-07.com.test", "cd": False, "backend": backend}
@@ -409,7 +409,7 @@ def _disk_nqn(worker_record: dict) -> str:
 def _setup_agent_and_disk(client, auth_headers, worker_id="worker-01") -> dict:
     """注册 disk agent + 空转 worker + 建系统盘（mock_agent_client 接管 Agent 调用）。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text
@@ -493,7 +493,7 @@ def test_push_on_bind_unbind(client, auth_headers, register_claimed_device, mock
 def test_push_on_disk_create(client, auth_headers, register_claimed_device, mock_agent_client):
     """建盘触发推送：新子系统立即登记 hosts（worker 已有密钥时）。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage", "stgt"],
     }, headers=auth_headers)
     assert res.status_code == 201
@@ -557,7 +557,7 @@ def test_disk_create_issues_credential_on_nvmet(client, auth_headers, mock_agent
 
     推送携带明文（注入必需）；审计只记事件与哈希，密钥本体既不进审计也不经 API 回传。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text
@@ -589,7 +589,7 @@ def test_disk_create_issues_credential_on_nvmet(client, auth_headers, mock_agent
 def test_disk_create_keeps_existing_credential_on_nvmet(client, auth_headers, mock_agent_client):
     """已有密钥的 worker 再建盘不轮换：按 Worker 跟盘，多盘共用一把（updated_at 不动）。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text
@@ -616,7 +616,7 @@ def test_disk_create_keeps_existing_credential_on_nvmet(client, auth_headers, mo
 def test_disk_create_no_credential_on_non_nvmet(client, auth_headers, mock_agent_client):
     """非 nvmet 后端不签发（stgt 默认）：DHHC-1 是 NVMe-oF 专属，iSCSI 链路不受影响。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "tags": ["storage"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text
@@ -636,7 +636,7 @@ def test_disk_create_no_credential_on_non_nvmet(client, auth_headers, mock_agent
 def test_batch_disk_create_issues_credentials(client, auth_headers, mock_agent_client):
     """批量建盘 N 台 = N 份密钥一次到位，各 worker 密钥互不相同。"""
     res = client.post("/agents", json={
-        "id": "ag-01", "base_url": "http://ag-01:8000",
+        "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
         "role": {"disk": True, "cd": False}, "enabled": True, "tags": ["storage"],
     }, headers=auth_headers)
     assert res.status_code == 201, res.text

@@ -33,7 +33,7 @@ _CONF_FILE.write_text(
     f"""apiVersion: kurrent.io/v1
 kind: NodeConfiguration
 metadata:
-  name: test-agent-01
+  name: 0123456789ae
 spec:
   agent:
     backend: nvmet

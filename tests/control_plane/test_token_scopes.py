@@ -63,10 +63,10 @@ def test_enroll_token_can_only_issue_bootstrap_tokens(client, secure):
     token = out["token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    created = client.post("/pki/tokens", json={"usage": "bootstrap", "agent_id": "node-01"},
+    created = client.post("/pki/tokens", json={"usage": "bootstrap", "agent_id": "456789abcdea"},
                           headers=headers)
     assert created.status_code == 201, created.text
-    assert created.json()["agent_id"] == "node-01"
+    assert created.json()["agent_id"] == "456789abcdea"
     # 提权：enroll token 不得签发 admin token，也不得做其他写操作
     assert client.post("/pki/tokens", json={"usage": "admin"}, headers=headers).status_code == 403
     assert client.post("/devices", json={"mac": TEST_MAC}, headers=headers).status_code == 403
@@ -99,6 +99,6 @@ def test_last_used_at_recorded(client, secure):
 
 def test_bootstrap_token_rejects_admin_fields():
     with pytest.raises(ValueError, match="ttl_hours only applies"):
-        pki.issue_bootstrap_token(settings.pki_dir, agent_id="node-02", ttl_hours=2)
+        pki.issue_bootstrap_token(settings.pki_dir, agent_id="56789abcdef1", ttl_hours=2)
     with pytest.raises(ValueError, match="scopes only apply"):
-        pki.issue_bootstrap_token(settings.pki_dir, agent_id="node-02", scopes=["readonly"])
+        pki.issue_bootstrap_token(settings.pki_dir, agent_id="56789abcdef1", scopes=["readonly"])

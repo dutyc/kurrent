@@ -23,7 +23,7 @@ const ASSETS = {
 }
 
 const AGENTS = [{
-  id: 'storage-nvmet-01',
+  id: '3f2a9c1d8b7e',
   enabled: true,
   health: 'ok',
   capabilities: { backend: 'nvmet', port: { trsvcid: '4421', tsas: 'tls1.3', ready: true } },
