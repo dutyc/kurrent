@@ -1,5 +1,5 @@
 // 身份与访问页的纯数据分类：token 按用途/绑定的节点拆分，会话按是否有证书指纹
-// 区分用户与自动化；节点标识由系统生成（12 位 hex，与 join / token create 同构）。
+// 区分用户与自动化。节点标识由控制面签发 token 时分配（12 位 hex），前端只消费响应。
 
 const usageOf = (token) => (Array.isArray(token.usage) ? token.usage : [])
 
@@ -61,13 +61,4 @@ export function agentLabels(agents) {
 export function nodeName(agentId, labels) {
   const remark = labels instanceof Map ? labels.get(agentId) : ''
   return remark || agentId || ''
-}
-
-export function newNodeId() {
-  const bytes = new Uint8Array(6)
-  if (!globalThis.crypto?.getRandomValues) {
-    throw new Error('crypto.getRandomValues unavailable')
-  }
-  globalThis.crypto.getRandomValues(bytes)
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }

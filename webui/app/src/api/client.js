@@ -171,8 +171,10 @@ export function updateAgent(agentId, data) {
 }
 
 export function issueBootstrapToken(agentId) {
-  // 签发 bootstrap token：绑定节点身份（agent_id = 节点声明 metadata.name），每次新签
-  return request('/pki/tokens', { method: 'POST', body: { usage: 'bootstrap', agent_id: agentId } });
+  // 签发 bootstrap token：省略 agent_id 时由控制面分配新身份；显式传入用于恢复已有身份
+  const body = { usage: 'bootstrap' };
+  if (agentId) body.agent_id = agentId;
+  return request('/pki/tokens', { method: 'POST', body });
 }
 
 export function probeAgent(data) {

@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   agentLabels,
   isManagementToken,
-  newNodeId,
   nodeName,
   splitSessions,
   splitTokens,
@@ -77,10 +76,4 @@ test('agentLabels / nodeName：备注优先，缺失回退机器身份', () => {
   assert.equal(nodeName('7f3a9c2b10de', labels), '主存储节点')
   assert.equal(nodeName('9c1e4a7b2d60', labels), '9c1e4a7b2d60')
   assert.equal(nodeName('unknown', labels), 'unknown')
-})
-
-test('newNodeId：12 位小写 hex，多次生成不重复', () => {
-  const ids = new Set(Array.from({ length: 20 }, () => newNodeId()))
-  assert.equal(ids.size, 20)
-  for (const id of ids) assert.match(id, /^[0-9a-f]{12}$/)
 })

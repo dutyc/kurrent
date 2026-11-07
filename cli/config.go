@@ -365,35 +365,27 @@ const nodeDefaultsTemplate = `# Node declarative configuration
 # when missing). The agent and nvmet-host containers mount the same file
 # (/etc/kurrent/kurrent.yaml, read-only) and each loads its own spec subtree.
 #
-# Layering: this file declares node-level business configuration (identity/data-plane parameters) only.
+# Layering: this file declares node-level business configuration (data-plane parameters) only.
 # - Container paths (pki/cp-ca/logs/cache/disk mounts) and listen/internal addresses belong
 #   to the deployment manifest (docker-compose.yml); the application fixes mount targets in constants.
-# - Bootstrap credentials live in separate files under storager/bootstrap/: agent.token (bound to the
+# - Node identity is node state, not declaration: <state>/storager/state/agent.id holds the
+#   12 lowercase hex agent_id (written once by join from --agent-id, printed by kurrent token create).
+# - The nickname is owned by the control-plane ledger (agents.yml); edit it in the WebUI or CLI.
+# - Bootstrap credentials live in separate files under <state>/storager/bootstrap/: agent.token (bound to the
 #   node identity; written by join, single-use, 60 minutes) and nvmet-host.token (derived by the
 #   control plane when an agent enrolls with backend=nvmet and returned in the response; bound to
 #   agent_id, without knowing the backend in advance).
-# - diskDir = host storage path (data directory declaration; join syncs it to the .env
-#   KURRENT_DISK_DIR interpolation key used as the compose mount source).
+# - diskDir = host storage path (declaration; join passes it to compose as the KURRENT_DISK_DIR
+#   interpolation variable for the mount source; no .env file is written).
 #
 # Validation semantics (pydantic v2): unknown fields are rejected (extra="forbid"), missing
-# required fields fail, defaults are injected, and identity/path/NQN semantics are validated.
+# required fields fail, defaults are injected, and path/NQN semantics are validated.
 # kurrent join and kurrent config validate use the same schema inside the agent image before
 # writing, so configuration errors do not wait for container startup.
 # The container path is fixed at /etc/kurrent/kurrent.yaml (KURRENT_CONFIG_FILE can override
 # it for test injection).
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  # Node identity = agent_id (control-plane agents.yml key, component certificate CN): a machine
-  # identity that accepts only 12 lowercase hex characters (same shape as disk os_tag and short
-  # Docker container IDs), bound by the bootstrap token (kurrent token create --agent-id;
-  # generated when omitted). join writes and persists it; do not edit it by hand. The identity
-  # must stay stable and is naturally unique per node. The template leaves it empty: join must write it.
-  name: ""
-  # Remark (optional, for human recognition): the only place for a descriptive name
-  # (e.g. production storage / rack A). It is registered on first enroll (shown on WebUI agent
-  # cards and editable in the form) and is not used in any identity or data-plane computation.
-  remark: ""
 spec:
   agent:
     # Data-plane backend (required): nvmet (preferred/default) | stgt | lio
@@ -401,8 +393,7 @@ spec:
     # Control-plane reachable address (enroll registers it as agents.yml base_url; kurrent join
     # derives https://<cp-host>:4840 by default; edit this key for NAT and similar cases)
     # advertiseUrl: https://host.docker.internal:4840
-    # Host storage path (required, absolute; data directory declaration; compose mount source
-    # synced through the .env interpolation key)
+    # Host storage path (required, absolute; join passes it to compose as the mount source)
     diskDir: /storager_img
     # Disk identifier namespace (required; NQN is authoritative; the iSCSI data-plane IQN is derived from it)
     # The control plane does not declare an NQN domain: both host NQN and disk NQN bases use

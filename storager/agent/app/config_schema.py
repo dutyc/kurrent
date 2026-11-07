@@ -5,8 +5,8 @@
 
 校验语义：
 - 未知字段拒绝（extra="forbid"）、默认值注入、apiVersion/kind 锁定；
-- 节点身份（metadata.name）是组件证书 CN 与控制面登记键，字符集/长度在声明期
-  约束；diskDir 必须是宿主绝对路径；nqnBase 必须是合法 NQN 命名域；
+- 节点身份不在声明里：它是节点状态，由 storager/state/agent.id 承载；
+- diskDir 必须是宿主绝对路径；nqnBase 必须是合法 NQN 命名域；
 - 容器内路径/监听/内部通讯地址属 compose 职责，不在声明中（出现即拒绝）。
 """
 
@@ -23,7 +23,6 @@ from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
 
 CONFIG_API_VERSION = "kurrent.io/v1"
 
-_AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _NQN_BASE_RE = re.compile(r"^nqn\.[0-9]{4}-[0-9]{2}\.[A-Za-z0-9][A-Za-z0-9.-]{0,222}$")
 
 BackendType = Literal["nvmet", "stgt", "lio"]
@@ -85,23 +84,6 @@ class ControlPlaneSpec(BaseModel):
         return _check_url(value.strip(), "url")
 
 
-class MetadataSpec(BaseModel):
-    """metadata：节点身份（name = agent_id，机器身份；remark = 人类备注）。"""
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    name: str = Field(alias="name", min_length=12, max_length=12)
-    remark: str = Field("", alias="remark")
-
-    @field_validator("name")
-    @classmethod
-    def _check_name(cls, value: str) -> str:
-        if not _AGENT_ID_RE.fullmatch(value):
-            raise ValueError(
-                "name is the node identity (agent_id): 12 lowercase hex characters; "
-                "human-readable names belong in remark")
-        return value
-
-
 class NodeSpec(BaseModel):
     """spec：agent / controlPlane 子块（一次性 token 在独立凭据文件）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -111,12 +93,11 @@ class NodeSpec(BaseModel):
 
 
 class NodeConfiguration(BaseModel):
-    """节点级配置根（apiVersion/kind/metadata/spec）。"""
+    """节点级配置根（apiVersion/kind/spec）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: Literal["kurrent.io/v1"] = Field(CONFIG_API_VERSION, alias="apiVersion")
     kind: Literal["NodeConfiguration"] = "NodeConfiguration"
-    metadata: MetadataSpec
     spec: NodeSpec
 
 

@@ -19,7 +19,6 @@ def _valid() -> dict:
     return {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "0123456789ad"},
         "spec": {
             "agent": {"diskDir": "/tmp/disks", "nqnBase": "nqn.2026-07.com.test"},
             "controlPlane": {"url": "https://127.0.0.1"},
@@ -35,7 +34,7 @@ def _load(tmp_path, data: dict):
 
 def test_load_valid(tmp_path):
     node = _load(tmp_path, _valid())
-    assert node.metadata.name == "0123456789ad"
+    assert "metadata" not in node.model_dump()
     assert node.spec.agent.disk_dir == "/tmp/disks"
     assert node.spec.agent.nqn_base == "nqn.2026-07.com.test"
     assert node.spec.control_plane.url == "https://127.0.0.1"
@@ -51,16 +50,12 @@ bootstrap）属部署清单 compose 职责，不在 yml 声明。"""
     assert spec.agent.advertise_url == ""
 
 
-def test_metadata_remark_default_empty(tmp_path):
-    """remark 可缺省（备注：人类识别用，随首次 enroll 登记进控制面台账）→ 默认空串。"""
-    assert _load(tmp_path, _valid()).metadata.remark == ""
-
-
-def test_metadata_remark_loaded(tmp_path):
-    """remark 显式声明原样加载（自由文本，不做格式校验）。"""
+def test_metadata_rejected(tmp_path):
+    """身份与昵称都不在声明里：metadata 出现即拒绝（extra="forbid"）。"""
     data = _valid()
-    data["metadata"]["remark"] = "storage-nvmet-01（生产存储）"
-    assert _load(tmp_path, data).metadata.remark == "storage-nvmet-01（生产存储）"
+    data["metadata"] = {"name": "0123456789ad", "remark": "生产存储"}
+    with pytest.raises(RuntimeError, match="metadata"):
+        _load(tmp_path, data)
 
 
 def test_container_path_keys_rejected(tmp_path):
@@ -141,7 +136,6 @@ def test_join_generated_shape(tmp_path):
     data = {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "3f2a9c1d8b7e"},
         "spec": {
             "agent": {
                 "backend": "nvmet",
@@ -162,10 +156,6 @@ def test_join_generated_shape(tmp_path):
 @pytest.mark.parametrize("mutate,needle", [
     (lambda d: d.update(apiVersion="kurrent.io/v2"), "apiVersion"),
     (lambda d: d.update(kind="OtherConfiguration"), "kind"),
-    (lambda d: d["metadata"].update(name=""), "name"),
-    (lambda d: d["metadata"].update(name="Storage-01"), "name"),
-    (lambda d: d["metadata"].update(name="storage-01"), "name"),
-    (lambda d: d["metadata"].update(name="0123456789a"), "name"),
     (lambda d: d["spec"]["agent"].update(diskDir="relative/path"), "absolute"),
     (lambda d: d["spec"]["agent"].update(nqnBase="nqn.not-a-date"), "nqnBase"),
     (lambda d: d["spec"]["agent"].update(advertiseUrl="ftp://host:4840"), "http(s)"),

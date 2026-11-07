@@ -39,6 +39,12 @@ Commands:
                [--uses N] [--scope admin,readonly,enroll] [--ttl 24h]
                                               Issue a credential.
                                               bootstrap (default): --agent-id (12 lowercase hex
+                                              characters; omit it and the control plane allocates
+                                              a new identity; join never generates one),
+                                              --cp-url, --uses
+                                              (1..1000, bounded by the control-plane
+                                              bootstrapTokenMaxUses setting); nicknames belong
+                                              to the control-plane ledger.
                                               admin: --scope (admin/readonly/enroll), --ttl
                                               (default 24h; bounded by tokenMaxTtlHours,
                                               default 720h)
@@ -185,6 +191,9 @@ const tokenGroupUsage = `Usage:
 const tokenCreateUsage = `Usage: kurrent token create [--usage bootstrap|admin] [flags]
 
   bootstrap (default):
+    --agent-id ID      Existing node identity to bind (12 lowercase hex).
+                       Omit it and the control plane allocates a new one;
+                       the response returns the id used in the join command
     --cp-url URL       Control-plane entry written into the join command
                        (http(s)://; a mistakenly pasted /api/cp suffix is removed)
     --uses N           Maximum uses, 1..1000 and not above the control-plane

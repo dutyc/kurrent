@@ -42,7 +42,7 @@ from pydantic import BaseModel
 
 from .config import (  # noqa: E402
     CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_HOST_DISK_DIR,
-    DEFAULT_HOST_SOCKET, DEFAULT_PKI_DIR,
+    DEFAULT_HOST_SOCKET, DEFAULT_PKI_DIR, NODE_ID,
 )
 from .pki_client import build_client, ensure_pki
 from .ownership import align_tree
@@ -628,7 +628,7 @@ def verify_client_cert(request: Request) -> None:
     TLS 层强制客户端证书链；应用层校验 issuer、CN（agent-<id>，健康检查自检
     另允许 nvmet-<id>）与 nodes CRL（可热更新，无需重启）。
     """
-    allowed = {f"agent-{CONFIG.metadata.name}", f"nvmet-{CONFIG.metadata.name}"}
+    allowed = {f"agent-{NODE_ID}", f"nvmet-{NODE_ID}"}
     security.verify_peer(
         request.scope,
         allowed_cns=allowed,

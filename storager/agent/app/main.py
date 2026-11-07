@@ -26,8 +26,9 @@ FICLONE = 0x40049409
 # 节点声明式配置：业务配置收敛到 storager/kurrent.yaml
 # （pydantic 校验：未知字段拒绝/必填缺失报错/默认值注入）；
 # 容器内路径（盘目录挂载点/日志/缓存/pki/cp-ca/容器名）属部署清单 compose 职责，以模块常量固化；
-# 一次性 bootstrap token 在独立凭据文件。
-# .env 仅保留 compose 插值键。文件缺失/校验失败在 import 即抛错阻断启动。
+# 节点身份在 storager/state/agent.id（join 写入），一次性 bootstrap token 在独立凭据文件。
+# compose 挂载源由 kurrent join 以进程变量注入，不再落盘派生的 .env。
+# 文件缺失/校验失败在 import 即抛错阻断启动。
 from .config import (  # noqa: E402
     CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_DISK_DIR, DEFAULT_ISCSI_CONTAINER,
     DEFAULT_LOG_FILE, DEFAULT_NVMET_CACHE_FILE, DEFAULT_NVMET_HOST_SOCKET, DEFAULT_PKI_DIR,
@@ -38,7 +39,7 @@ from . import security  # noqa: E402
 def nqn_to_iqn(nqn: str) -> str:
     """NVMe NQN → iSCSI IQN（同后缀前缀变换，派生方向：NQN 权威，IQN 自动生成）：
     nqn.2026-07.com.kurrent:worker-01.ubuntu → iqn.2026-07.com.kurrent:worker-01.ubuntu。
-    节点只配置 NQN 命名空间（KURRENT_NQN_BASE），iSCSI 数据面消费的 IQN 由此派生。"""
+    节点只声明 NQN 命名空间（spec.agent.nqnBase），iSCSI 数据面消费的 IQN 由此派生。"""
     nqn = nqn.strip().lower()
     if nqn.startswith("iqn."):
         return nqn

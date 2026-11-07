@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { getAgents, issueBootstrapToken, probeAgent, updateAgent } from '../api/client'
-import { newNodeId } from '../api/identity'
 import { useI18n } from '../i18n'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
@@ -334,13 +333,13 @@ function AgentForm({ agentId, initial, onClose, onSaved }) {
   )
 }
 
-// 加入节点弹窗：签发绑定节点身份的 bootstrap token（agent_id = 声明 metadata.name）
-// 并输出带控制面地址的 join 命令（节点粘贴即用：声明 storager/kurrent.yaml 缺失时由
-// join 按命令生成；nvmet-host 凭据由 enroll 按能力自动派生）。
+// 加入节点弹窗：签发绑定节点身份的 bootstrap token（agent_id 由控制面签发时分配，
+// join 写入节点状态文件 storager/state/agent.id）并输出带控制面地址的 join 命令
+//（节点粘贴即用：声明 storager/kurrent.yaml 缺失时由 join 按命令生成；
+// nvmet-host 凭据由 enroll 按能力自动派生）。
 function JoinAgentModal({ onClose }) {
   const { t } = useI18n()
   const [cpUrl, setCpUrl] = useState(() => `https://${window.location.hostname}`)
-  const [agentId] = useState(newNodeId)
   const [issuing, setIssuing] = useState(false)
   const [error, setError] = useState(null)
   const [tok, setTok] = useState(null) // { token, expires_at, agent_id }
@@ -352,7 +351,7 @@ function JoinAgentModal({ onClose }) {
     setError(null)
     setTok(null)
     try {
-      setTok(await issueBootstrapToken(agentId.trim()))
+      setTok(await issueBootstrapToken())
     } catch (err) {
       setError(err.message)
     } finally {
@@ -361,7 +360,7 @@ function JoinAgentModal({ onClose }) {
   }
 
   const joinCmd = () =>
-    tok ? `kurrent join ${cpUrl.trim()} --token ${tok.token} --agent-id ${tok.agent_id || agentId.trim()}` : ''
+    tok ? `kurrent join ${cpUrl.trim()} --token ${tok.token} --agent-id ${tok.agent_id}` : ''
 
   const handleCopy = async () => {
     try {
@@ -385,11 +384,6 @@ function JoinAgentModal({ onClose }) {
       <form onSubmit={handleIssue}>
         <p className="create-hint">{t('agents.joinHint')}</p>
         <div className="create-form-grid">
-          <Input
-            label={t('agents.agentIdLabel')}
-            value={agentId}
-            readOnly
-          />
           <Input
             label={t('agents.cpUrlLabel')}
             value={cpUrl}
@@ -421,6 +415,10 @@ function JoinAgentModal({ onClose }) {
               <span className="join-token-expires">
                 {t('agents.expires')}: {tok.expires_at}
               </span>
+            </div>
+            <div className="join-token-row">
+              <span className="join-token-label">{t('agents.agentIdLabel')}</span>
+              <code className="join-token-code">{tok.agent_id}</code>
             </div>
           </div>
           <p className="create-hint">{t('agents.burnHint')}</p>

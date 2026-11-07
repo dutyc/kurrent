@@ -102,7 +102,7 @@ class PkiClient:
     def __init__(self, agent_id: str, component: str, pki_dir: Path,
                  cp_base: str, cp_ca: Path | None, bootstrap_token: str | None,
                  advertise_url: str | None = None, capabilities: dict | None = None,
-                 remark: str = "", derived_token_file: Path | None = None):
+                 derived_token_file: Path | None = None):
         self.component = component          # agent | nvmet-host（与控制面 COMPONENT_PREFIX 键一致）
         self.agent_id = agent_id
         # CN 前缀：nvmet-host → nvmet（与控制面 sign_component_certs 的规则一致）
@@ -114,7 +114,6 @@ class PkiClient:
         self.bootstrap_token = bootstrap_token
         self.advertise_url = (advertise_url or "").strip()  # 自动登记时写入 agents.yml
         self.capabilities = capabilities or {}  # 后端能力摘要（backend/cd），自动登记时推导角色/标签
-        self.remark = (remark or "").strip()   # 备注（人类识别用），自动登记时写入 agents.yml
         # nvmet-host 派生凭据落盘路径（仅 agent 组件）：控制面按 backend=nvmet 能力签发
         # 随 enroll/renew 响应下发，本组件写入供 nvmet-host 容器引导（compose 共享目录）
         self.derived_token_file = Path(derived_token_file) if derived_token_file else None
@@ -248,8 +247,6 @@ class PkiClient:
             "base_url": self.advertise_url,
             # 自身能力摘要（声明 spec.agent.backend → cd 能力）：控制面自动登记推导 role.cd 与标签
             "capabilities": self.capabilities,
-            # 备注（metadata.remark，人类识别用）：控制面自动登记时写入 agents.yml
-            "remark": self.remark,
         }
         headers = {"Content-Type": "application/json"}
         context = self._cp_context(renew)
@@ -353,16 +350,16 @@ def _write_token(path: Path, token: str) -> None:
 def build_client() -> PkiClient:
     """按节点声明装配 PkiClient（不触发 enroll/renew；CRL 刷新复用同一配置）。"""
     from .config import (CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA,
-                         DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE, DEFAULT_PKI_DIR)
+                         DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE, DEFAULT_PKI_DIR,
+                         NODE_ID)
     spec = CONFIG.spec
     backend = spec.agent.backend
     capabilities = {"backend": backend, "cd": BACKEND_CD_CAPABILITY.get(backend, False)}
     return PkiClient(
-        CONFIG.metadata.name, "agent", Path(DEFAULT_PKI_DIR), spec.control_plane.url,
+        NODE_ID, "agent", Path(DEFAULT_PKI_DIR), spec.control_plane.url,
         Path(DEFAULT_CP_CA),
         _read_bootstrap_token(Path(DEFAULT_BOOTSTRAP_TOKEN_FILE)),
         spec.agent.advertise_url or None, capabilities,
-        remark=CONFIG.metadata.remark,
         derived_token_file=Path(DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE))
 
 

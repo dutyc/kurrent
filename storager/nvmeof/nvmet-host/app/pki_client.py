@@ -310,9 +310,9 @@ def _read_bootstrap_token(path: Path) -> str | None:
 
 def build_client() -> PkiClient:
     """按节点声明装配 PkiClient（不触发 enroll/renew；CRL 刷新复用同一配置）。"""
-    from .config import CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA, DEFAULT_PKI_DIR
+    from .config import CONFIG, DEFAULT_BOOTSTRAP_TOKEN_FILE, DEFAULT_CP_CA, DEFAULT_PKI_DIR, NODE_ID
     spec = CONFIG.spec
-    return PkiClient(CONFIG.metadata.name, "nvmet-host", Path(DEFAULT_PKI_DIR),
+    return PkiClient(NODE_ID, "nvmet-host", Path(DEFAULT_PKI_DIR),
                      spec.control_plane.url,
                      Path(DEFAULT_CP_CA),
                      _read_bootstrap_token(Path(DEFAULT_BOOTSTRAP_TOKEN_FILE)))

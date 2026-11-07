@@ -7,6 +7,7 @@
 import importlib.util
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -18,22 +19,24 @@ AGENT_SCHEMA = ROOT / "storager" / "agent" / "app" / "config_schema.py"
 NVMET_CONFIG = ROOT / "storager" / "nvmeof" / "nvmet-host" / "app" / "config.py"
 
 
-def _load_module(path: Path, name: str):
+def _load_module(path: Path, package: str):
+    """按文件路径加载为 <package>.<stem>；父目录注册为命名空间包以解析模块内相对导入。"""
+    if package not in sys.modules:
+        pkg = types.ModuleType(package)
+        pkg.__path__ = [str(path.parent)]
+        sys.modules[package] = pkg
+    name = f"{package}.{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.modules.pop(name, None)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _valid_node() -> dict:
     return {
         "apiVersion": "kurrent.io/v1",
         "kind": "NodeConfiguration",
-        "metadata": {"name": "3f2a9c1d8b7e", "remark": "生产存储"},
         "spec": {
             "agent": {
                 "backend": "nvmet",
@@ -50,10 +53,8 @@ CORPUS = [
     _valid_node(),
     {**_valid_node(), "apiVersion": "kurrent.io/v2"},
     {**_valid_node(), "kind": "Other"},
-    {**_valid_node(), "metadata": {"name": "Bad Name"}},
-    {**_valid_node(), "metadata": {"name": "ok", "remark": "备注"}},
-    {**_valid_node(), "metadata": {"name": "storage-01", "remark": "旧式可读名"}},
-    {**_valid_node(), "metadata": {"name": "3F2A9C1D8B7E", "remark": "大写 hex"}},
+    {**_valid_node(), "metadata": {"name": "3f2a9c1d8b7e"}},
+    {**_valid_node(), "metadata": {"remark": "生产存储"}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "/x", "nqnBase": "nqn.2026-07.com.x"}}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "relative", "nqnBase": "nqn.2026-07.com.x"},
                               "controlPlane": {"url": "https://10.0.0.1"}}},
@@ -77,18 +78,27 @@ def _outcome(model, data: dict):
 
 @pytest.fixture(scope="module")
 def schemas(tmp_path_factory):
-    agent = _load_module(AGENT_SCHEMA, "kurrent_agent_node_schema")
-    config_file = tmp_path_factory.mktemp("node") / "kurrent.yaml"
+    agent = _load_module(AGENT_SCHEMA, "kurrent_parity_agent")
+    state = tmp_path_factory.mktemp("node")
+    config_file = state / "kurrent.yaml"
     config_file.write_text(yaml.safe_dump(_valid_node(), allow_unicode=True), encoding="utf-8")
-    old = os.environ.get("KURRENT_CONFIG_FILE")
+    node_id_file = state / "agent.id"
+    node_id_file.write_text("3f2a9c1d8b7e\n", encoding="utf-8")
+    old_config = os.environ.get("KURRENT_CONFIG_FILE")
+    old_id = os.environ.get("KURRENT_NODE_ID_FILE")
     os.environ["KURRENT_CONFIG_FILE"] = str(config_file)
+    os.environ["KURRENT_NODE_ID_FILE"] = str(node_id_file)
     try:
-        nvmet = _load_module(NVMET_CONFIG, "kurrent_nvmet_node_schema")
+        nvmet = _load_module(NVMET_CONFIG, "kurrent_parity_nvmet")
     finally:
-        if old is None:
+        if old_config is None:
             os.environ.pop("KURRENT_CONFIG_FILE", None)
         else:
-            os.environ["KURRENT_CONFIG_FILE"] = old
+            os.environ["KURRENT_CONFIG_FILE"] = old_config
+        if old_id is None:
+            os.environ.pop("KURRENT_NODE_ID_FILE", None)
+        else:
+            os.environ["KURRENT_NODE_ID_FILE"] = old_id
     return agent, nvmet
 
 

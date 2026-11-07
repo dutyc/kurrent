@@ -349,7 +349,7 @@ class TestBootVarsWithDisk:
         assert "set os-tag" not in res.text  # NQN 已完整下发，不再暴露后缀
         assert "set os-version" not in res.text  # 无版本 → 不下发
         # default_disk > boot.menu_default 推导链：显式 menu_default 不覆盖 default_disk
-        client.put("/workers/worker-01/default-disk", json={"menu_default": "windows"}, headers=auth_headers)
+        client.put("/workers/worker-01/default-disk", json={"menu_default": "reboot"}, headers=auth_headers)
         nonce2 = _challenge(client)
         sig2 = ec_keypair["sign"](MAC_A, nonce2)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce2, sig=sig2)

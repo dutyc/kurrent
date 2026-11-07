@@ -46,7 +46,7 @@ def _token(tmp_pki, agent_id, component="agent", max_uses=1):
                                          max_uses=max_uses)
 
 
-def _enroll(client, token, agent_id, component, base_url="", capabilities=None, remark=None):
+def _enroll(client, token, agent_id, component, base_url="", capabilities=None):
     body = {
         "agent_id": agent_id, "component": component,
         "csr_client": "FAKE", "csr_serving": "FAKE",
@@ -54,8 +54,6 @@ def _enroll(client, token, agent_id, component, base_url="", capabilities=None, 
     }
     if capabilities is not None:
         body["capabilities"] = capabilities
-    if remark is not None:
-        body["remark"] = remark
     return client.post("/enroll", json=body, headers={"Authorization": f"Bearer {token}"})
 
 
@@ -82,14 +80,13 @@ class TestEnrollAutoRegister:
         assert a.base_url == "https://192.168.1.50:4840"
         assert a.role_disk and not a.role_cd and a.enabled
 
-    def test_auto_registered_with_remark(self, client, tmp_pki, monkeypatch):
-        """上报 remark（声明 metadata.remark）→ 随自动登记写入台账（备注，人类识别用）。"""
+    def test_auto_registered_without_remark(self, client, tmp_pki, monkeypatch):
+        """自动登记只写节点上报的地址与能力：昵称归控制面台账，enroll 不产生备注。"""
         _mock_issue(monkeypatch)
         token = _token(tmp_pki, "def012345678")
-        resp = _enroll(client, token, "def012345678", "agent", "https://192.168.1.50:4840",
-                       remark="storage-nvmet-01")
+        resp = _enroll(client, token, "def012345678", "agent", "https://192.168.1.50:4840")
         assert resp.status_code == 201
-        assert agents.get("def012345678").remark == "storage-nvmet-01"
+        assert agents.get("def012345678").remark == ""
 
     def test_auto_registered_without_base_url(self, client, tmp_pki, monkeypatch):
         """无 base_url 也自动登记（空地址，控制面不探测，WebUI/CLI 可补）。"""
@@ -101,41 +98,37 @@ class TestEnrollAutoRegister:
 
     def test_reenroll_refreshes_declaration_fields(self, client, tmp_pki, monkeypatch):
         """A2 裁定（声明权威）：已在册 agent 再次 enroll/renew 时按节点声明刷新
-        base_url / remark / role.cd；控制面属性（enabled/storager_ip/tags）原样保留。"""
+        base_url / role.cd；控制面属性（enabled/storager_ip/tags/remark）原样保留。"""
         _mock_issue(monkeypatch)
         token = _token(tmp_pki, "aaaabbbbcccc", max_uses=2)
         assert _enroll(client, token, "aaaabbbbcccc", "agent", "https://10.0.0.5:4840",
-                       capabilities={"backend": "nvmet", "cd": False},
-                       remark="old-remark").status_code == 201
+                       capabilities={"backend": "nvmet", "cd": False}).status_code == 201
         # 运维在控制面侧设置属性（base_url 传现值——自动登记节点禁改地址）
         res = client.put("/agents/aaaabbbbcccc", json={
             "base_url": "https://10.0.0.5:4840", "storager_ip": "10.0.0.5",
             "role": {"disk": True, "cd": False}, "tags": ["custom"],
-            "enabled": False, "remark": "old-remark",
+            "enabled": False, "remark": "operator-nickname",
         }, headers={"Authorization": "Bearer test-control-token"})
         assert res.status_code == 200, res.text
-        # 节点搬家 + 改备注 + 光驱能力变化 → renew 按声明对齐
+        # 节点搬家 + 光驱能力变化 → renew 按声明对齐，昵称仍是控制面侧的
         assert _enroll(client, token, "aaaabbbbcccc", "agent", "https://10.0.0.9:4840",
-                       capabilities={"backend": "nvmet", "cd": True},
-                       remark="new-remark").status_code == 201
+                       capabilities={"backend": "nvmet", "cd": True}).status_code == 201
         a = agents.get("aaaabbbbcccc")
         assert a.base_url == "https://10.0.0.9:4840"  # 声明权威：地址随节点
-        assert a.remark == "new-remark"
+        assert a.remark == "operator-nickname"
         assert a.role_cd is True
         assert a.enabled is False  # 控制面属性：renew 不碰
         assert a.storager_ip == "10.0.0.5"
         assert a.tags == ("custom",)
 
     def test_reenroll_unreported_fields_preserved(self, client, tmp_pki, monkeypatch):
-        """旧 agent 兼容：再次 enroll 未上报 base_url/remark/capabilities → 不清空现有值。"""
+        """再次 enroll 未上报 base_url/capabilities → 不清空现有值。"""
         _mock_issue(monkeypatch)
         token = _token(tmp_pki, "bbbbccccdddd", max_uses=2)
-        assert _enroll(client, token, "bbbbccccdddd", "agent", "https://10.0.0.5:4840",
-                       remark="kept").status_code == 201
+        assert _enroll(client, token, "bbbbccccdddd", "agent", "https://10.0.0.5:4840").status_code == 201
         assert _enroll(client, token, "bbbbccccdddd", "agent").status_code == 201
         a = agents.get("bbbbccccdddd")
         assert a.base_url == "https://10.0.0.5:4840"
-        assert a.remark == "kept"
         assert not a.role_cd
 
     def test_nvmet_host_enroll_does_not_refresh(self, client, tmp_pki, monkeypatch):
@@ -201,7 +194,7 @@ class TestEnrollAutoRegister:
         a = agents.get("cdef01234567")
         assert a.tags == ("auto",)
         assert a.role_disk and not a.role_cd
-        assert a.remark == ""  # 旧 agent 不上报 remark → 空备注
+        assert a.remark == ""  # 昵称归控制面台账：无侧设置则为空
 
     def test_invalid_base_url_rejected(self, client, tmp_pki, monkeypatch):
         """上报地址格式非法 → 400（不自动登记）。"""
@@ -237,7 +230,7 @@ class TestEnrollAutoRegister:
 
 
 class TestTokenEndpoint:
-    """POST /pki/tokens：绑定 agent_id 的 bootstrap token 签发。"""
+    """POST /pki/tokens：bootstrap token 签发；未给 agent_id 时由控制面分配。"""
 
     def test_issue(self, client, tmp_pki, auth_headers):
         """签发成功：token 格式 <6位>.<16位>，明文仅本次可见；响应含绑定字段。"""
@@ -249,11 +242,14 @@ class TestTokenEndpoint:
         assert body["usage"] == ["enroll"]
         assert body["agent_id"] == "456789abcdef" and body["component"] == "agent"
 
-    def test_requires_agent_id(self, client, tmp_pki, auth_headers):
-        """bootstrap token 不绑 agent_id → 400（默认拒绝，不再签发通用 token）。"""
+    def test_generates_agent_id_when_omitted(self, client, tmp_pki, auth_headers):
+        """未给 agent_id → 控制面分配 12 位 hex 并绑定到该 token；客户端不生成身份。"""
         resp = client.post("/pki/tokens", headers=auth_headers)
-        assert resp.status_code == 400
-        assert "agent_id" in resp.json()["detail"]
+        assert resp.status_code == 201
+        body = resp.json()
+        assert re.fullmatch(r"[0-9a-f]{12}", body["agent_id"])
+        listed = client.get("/pki/tokens", headers=auth_headers).json()
+        assert any(item["agent_id"] == body["agent_id"] for item in listed)
 
     def test_rejects_illegal_agent_id_charset(self, client, tmp_pki, auth_headers):
         """节点身份字符集与证书 CN 同规（小写字母/数字/./-）：非法值 400，不落台账。"""

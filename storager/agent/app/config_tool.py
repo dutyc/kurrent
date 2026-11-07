@@ -51,7 +51,7 @@ def run(cmd: str, raw: str) -> int:
         sys.stdout.write(yaml.safe_dump(
             effective_config(cfg), sort_keys=False, allow_unicode=True))
     else:
-        print(f"ok: {cfg.metadata.name} backend={cfg.spec.agent.backend} "
+        print(f"ok: backend={cfg.spec.agent.backend} "
               f"controlPlane={cfg.spec.control_plane.url}")
     return 0
 

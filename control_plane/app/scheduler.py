@@ -119,13 +119,12 @@ class AgentRegistry:
         *,
         base_url: str,
         role_cd: bool | None,
-        remark: str,
     ) -> bool:
-        """按节点声明刷新声明拥有的字段（base_url / remark / role.cd）。
+        """按节点声明刷新声明拥有的字段（base_url / role.cd）。
 
         A2 裁定（声明权威）：storager/kurrent.yaml 是节点事实的来源，enroll/renew 时
-        以节点上报对齐台账。控制面属性（enabled / storager_ip / tags）与 role.disk
-        不碰；base_url / remark 为空视为"未上报"（旧 agent 兼容），保留现有值；
+        以节点上报对齐台账。控制面属性（enabled / storager_ip / tags）、昵称与
+        role.disk 不碰；base_url 为空视为"未上报"（旧 agent 兼容），保留现有值；
         role_cd=None（capabilities 未含 cd 键）同样跳过。返回是否有实际变更。"""
         with self.agents_file.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -137,10 +136,6 @@ class AgentRegistry:
         base_url = base_url.strip().rstrip("/")
         if base_url and entry.get("base_url") != base_url:
             entry["base_url"] = base_url
-            changed = True
-        remark = remark.strip()
-        if remark and entry.get("remark") != remark:
-            entry["remark"] = remark
             changed = True
         if role_cd is not None:
             role = dict(entry.get("role") or {})

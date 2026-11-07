@@ -6,6 +6,7 @@ import {
   crc32,
   generateDHHC1,
   getComponentCerts,
+  issueBootstrapToken,
   revokeComponentCert,
   revokeUserCert,
 } from './client.js'
@@ -211,4 +212,17 @@ test('getComponentCerts：GET /pki/components', async () => {
   const calls = await captureRequest(() => getComponentCerts())
   assert.equal(calls[0].options.method, 'GET')
   assert.equal(calls[0].url, '/api/cp/pki/components')
+})
+
+test('issueBootstrapToken：省略 agent_id 时由控制面分配，显式传入用于恢复已有身份', async () => {
+  let calls = await captureRequest(() => issueBootstrapToken())
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal(calls[0].url, '/api/cp/pki/tokens')
+  assert.deepEqual(JSON.parse(calls[0].options.body), { usage: 'bootstrap' })
+
+  calls = await captureRequest(() => issueBootstrapToken('7f3a9c2b10de'))
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    usage: 'bootstrap',
+    agent_id: '7f3a9c2b10de',
+  })
 })

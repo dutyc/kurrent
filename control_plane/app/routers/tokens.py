@@ -1,9 +1,11 @@
 """token 端点：bootstrap 引导凭据 + 管理 token 的签发 / 列表 / 吊销。
 
-bootstrap token 必须绑定 component + agent_id：签发时指定节点身份，enroll 只接受
-同一 agent_id 的请求（不再有「任意节点可用」的通用 token）。TTL 内可复用（一次性
-模式见认证蓝图 P3）。usage=admin 的管理 token 不绑组件，供认证器链 Bearer
-（CLI --token / 脚本）与 WebUI 登录使用（groups 携带授权组）。
+bootstrap token 必须绑定 component + agent_id：未提供 agent_id 时由控制面生成
+（12 位小写 hex，节点身份的分配点是 API），enroll 只接受同一 agent_id 的请求
+（不再有「任意节点可用」的通用 token）。显式 agent_id 用于给已有身份重发 token
+（例如恢复流程），客户端不承担身份生成。TTL 内可复用（一次性模式见认证蓝图 P3）。
+usage=admin 的管理 token 不绑组件，供认证器链 Bearer（CLI --token / 脚本）与
+WebUI 登录使用（groups 携带授权组）。
 GET 列出未过期条目（台账可视，不返回明文/hash）；DELETE 吊销 = 删条目
 （删除即失效；留痕在操作审计）。吊销为写操作，经 authorize_request 要求 admin 组。
 nvmet-host 组件凭据不在此签发：agent enroll 上报 backend=nvmet 时控制面派生
@@ -29,8 +31,9 @@ router = PrincipalRouter(
 
 
 class IssueTokenRequest(BaseModel):
-    """签发参数：bootstrap（节点引导，需绑 agent_id）| admin（管理 token）。
+    """签发参数：bootstrap（节点引导，未给 agent_id 时控制面生成）| admin（管理 token）。
 
+    agent_id 可选：省略 = 分配一个新节点身份；提供 = 绑定已有身份（恢复/重发）。
     admin token 可用 scopes 收窄权限（admin/readonly/enroll）与 ttl_hours
     （默认 24h，上限 720h）。readonly/enroll token 不得签发 admin token。
     """
@@ -46,8 +49,8 @@ class IssueTokenRequest(BaseModel):
 def issue_token(request: Request, req: IssueTokenRequest | None = None):
     """签发 token，返回明文（仅本次响应可见）。
 
-    响应含 token / expires_at / usage / groups / scopes / agent_id；join 命令示例
-    由 CLI 侧组装（kurrent token create --agent-id）。
+    响应含 token / expires_at / usage / groups / scopes / agent_id；未提供 agent_id
+    时返回控制面新分配的身份，客户端只消费该字段。
     """
     ident = request.state.identity
     if req and req.usage == "admin":
@@ -61,9 +64,7 @@ def issue_token(request: Request, req: IssueTokenRequest | None = None):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
-        agent_id = (req.agent_id if req else "").strip()
-        if not agent_id:
-            raise HTTPException(400, "bootstrap token requires agent_id")
+        agent_id = (req.agent_id if req else "").strip() or pki.generate_agent_id()
         try:
             token = pki.issue_bootstrap_token(
                 config.settings.pki_dir, agent_id=agent_id,

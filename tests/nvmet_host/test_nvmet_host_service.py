@@ -5,7 +5,7 @@
 TLS-PSK 供给（psk key 注入 keyring + 子系统挂 TLS 端口）、删除顺序（先摘端口/
 allowed_hosts 再删）。
 真实内核 nvmet 验证留部署环境（本机无内核 nvmet）；keyring 用 fake（真实注入需
-宿主 .nvme keyring + 容器 seccomp/systempaths 豁免，见 blueprint/nvme-tcp-tls-in-kernel.md）。
+宿主 .nvme keyring + 容器 seccomp/systempaths 豁免，见 .local/blueprint/nvme-tcp-tls-in-kernel.md）。
 """
 
 import os

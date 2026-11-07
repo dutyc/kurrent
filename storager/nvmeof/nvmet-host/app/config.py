@@ -3,6 +3,7 @@
 读取同一份 storager/kurrent.yaml（节点级单文件权威配置），本组件消费
 spec.controlPlane（enroll 入口）；spec.agent 块由 agent 组件消费，此处以
 同构模型校验（不消费但节点级配置整体有效——extra="forbid" 语义两侧一致）。
+节点身份不在声明里：由 storager/state/agent.id 承载（join 写入，两侧只读挂载）。
 
 镜像构建上下文相互隔离（nvmet-host 镜像无法 COPY agent 代码），模型在此镜像内
 保持同构；tests 中的 schema parity 用例锁定两侧 JSON Schema 与校验结果一致。
@@ -24,6 +25,8 @@ import yaml
 from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
                       field_validator)
 
+from .node_id import DEFAULT_NODE_ID_FILE, load_node_id
+
 # compose 卷挂载路径（storager/kurrent.yaml → 容器内，只读）
 DEFAULT_CONFIG_FILE = "/etc/kurrent/kurrent.yaml"
 
@@ -31,13 +34,12 @@ DEFAULT_CONFIG_FILE = "/etc/kurrent/kurrent.yaml"
 # 管理面只经共享卷 UDS 暴露（与 agent 同机固定拓扑）：无 TCP 监听，局域网不可达。
 DEFAULT_HOST_SOCKET = "/run/kurrent/nvmet/nvmet-host.sock"
 DEFAULT_HOST_DISK_DIR = "/srv/nvmet-disks"   # compose: 宿主盘目录 → 本路径（device_path 重拼前缀）
-DEFAULT_PKI_DIR = "/etc/kurrent/pki"         # compose: ${KURRENT_NVMET_PKI_HOST} → /etc/kurrent/pki
-DEFAULT_CP_CA = "/etc/kurrent/cp-ca.crt"     # compose: server.crt → /etc/kurrent/cp-ca.crt:ro
+DEFAULT_PKI_DIR = "/etc/kurrent/pki"         # compose: ${KURRENT_NODE_STATE_DIR}/pki/nvmet-${KURRENT_AGENT_ID} → 本路径
+DEFAULT_CP_CA = "/etc/kurrent/cp-ca.crt"     # compose: ${KURRENT_CP_CA_FILE} → 本路径:ro
 DEFAULT_BOOTSTRAP_TOKEN_FILE = "/etc/kurrent/bootstrap/nvmet-host.token"  # nvmet-host 派生引导凭据（agent enroll 按能力
-                                                                           # 签发并落盘；compose: ../bootstrap → 本目录:ro）
+                                                                           # 签发并落盘；compose: ${KURRENT_NODE_STATE_DIR}/bootstrap → 本目录:ro）
 
 CONFIG_API_VERSION = "kurrent.io/v1"
-_AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _NQN_BASE_RE = re.compile(r"^nqn\.[0-9]{4}-[0-9]{2}\.[A-Za-z0-9][A-Za-z0-9.-]{0,222}$")
 
 BackendType = Literal["nvmet", "stgt", "lio"]
@@ -99,23 +101,6 @@ class ControlPlaneSpec(BaseModel):
         return _check_url(value.strip(), "url")
 
 
-class MetadataSpec(BaseModel):
-    """metadata：节点身份（name = agent_id，机器身份；remark = 人类备注）。"""
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    name: str = Field(alias="name", min_length=12, max_length=12)
-    remark: str = Field("", alias="remark")
-
-    @field_validator("name")
-    @classmethod
-    def _check_name(cls, value: str) -> str:
-        if not _AGENT_ID_RE.fullmatch(value):
-            raise ValueError(
-                "name is the node identity (agent_id): 12 lowercase hex characters; "
-                "human-readable names belong in remark")
-        return value
-
-
 class NodeSpec(BaseModel):
     """spec：agent / controlPlane 子块（一次性 token 在独立凭据文件）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -125,12 +110,11 @@ class NodeSpec(BaseModel):
 
 
 class NodeConfiguration(BaseModel):
-    """节点级配置根（apiVersion/kind/metadata/spec）。"""
+    """节点级配置根（apiVersion/kind/spec）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: Literal["kurrent.io/v1"] = Field(CONFIG_API_VERSION, alias="apiVersion")
     kind: Literal["NodeConfiguration"] = "NodeConfiguration"
-    metadata: MetadataSpec
     spec: NodeSpec
 
 
@@ -156,3 +140,4 @@ def load_config(path: str | None = None) -> NodeConfiguration:
 
 # 模块级单例：import app.config 即加载（main.py / pki_client.py 共同消费）
 CONFIG = load_config()
+NODE_ID = load_node_id()

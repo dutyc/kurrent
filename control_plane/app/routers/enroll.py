@@ -36,7 +36,6 @@ class EnrollReq(BaseModel):
     csr_serving: str  # PEM，CN 同上；签发 serving cert 用
     serving_sans: list[str] = []
     base_url: str = ""  # 控制面可达地址；agent 首次引导时上报，自动登记写入
-    remark: str = ""  # 备注（人类识别用）；agent 首次引导时上报，随自动登记写入
     capabilities: dict = {}  # agent 上报自身能力（backend/cd），自动登记推导角色/标签；旧 agent 可缺省
 
     @field_validator("agent_id")
@@ -58,7 +57,7 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
             raise HTTPException(400, f"agent not registered: {agent_id}") from None
         # 自动登记（首次引导自动注册）：默认 disk 角色，
         # base_url 由 agent 引导时上报（声明 spec.agent.advertiseUrl），加入后可改；
-        # remark（声明 metadata.remark）随首次登记写入，后续在台账侧修改；
+        # 昵称只由控制面台账拥有，enroll 不写入（WebUI/CLI 维护）；
         # 初始标签：agent 上报能力 → tags=[auto,storage]，此后归人工；
         # cd 能力 → role.cd；旧 agent 不上报时兼容默认（仅 auto 标签、无 cd 角色）。
         # 后端类型不进 tags：它是节点运行事实，由 /boot-vars 实时查 /capabilities 判定
@@ -71,13 +70,13 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
         with stores.store.locked():
             stores.agents.add(agent_id, base_url, role_disk=True,
                               role_cd=bool(req.capabilities.get("cd")),
-                              enabled=True, tags=tags, remark=req.remark.strip())
+                              enabled=True, tags=tags)
         log.info("enroll: auto-registered agent %s (base_url=%s, backend=%s)",
                  agent_id, base_url, backend or "-")
     else:
         # 已在册：按节点声明刷新声明拥有的字段（A2 裁定：声明权威——storager/kurrent.yaml
-        # 是节点事实的来源，enroll/renew 同路径覆盖，节点改地址/备注后对齐不再依赖重装）。
-        # 控制面属性（enabled/storager_ip/tags）不碰；旧 agent 未上报的字段保留现有值。
+        # 是节点事实的来源，enroll/renew 同路径覆盖，节点改地址后对齐不再依赖重装）。
+        # 控制面属性（enabled/storager_ip/tags）与昵称不碰。
         # 仅 agent 组件刷新（nvmet-host 的请求体不承载节点声明字段）。
         if component == "agent":
             with stores.store.locked():
@@ -85,11 +84,10 @@ def _issue(agent_id: str, component: str, req: EnrollReq) -> dict:
                     agent_id,
                     base_url=req.base_url,
                     role_cd=bool(req.capabilities["cd"]) if "cd" in req.capabilities else None,
-                    remark=req.remark,
                 )
             if changed:
                 log.info("enroll: refreshed agent %s from node declaration "
-                         "(base_url/remark/role.cd)", agent_id)
+                         "(base_url/role.cd)", agent_id)
 
     ca_set = pki.ensure_ca_set(config.settings.pki_dir)
     ca_cert, ca_key = ca_set["nodes"]

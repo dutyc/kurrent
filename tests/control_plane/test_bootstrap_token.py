@@ -77,7 +77,7 @@ def test_ttl_default_and_bounds():
 
 @pytest.mark.parametrize("bad_id", ["storage-01", "node-01", "3F2A9C1D8B7E", "3f2a9c1d8b"])
 def test_issue_rejects_non_hex_agent_id(bad_id):
-    """节点身份只接受 12 位小写 hex；描述性名称归 metadata.remark。"""
+    """节点身份只接受 12 位小写 hex；描述性昵称归控制面台账。"""
     with pytest.raises(ValueError, match="12 lowercase hex"):
         pki.issue_bootstrap_token(settings.pki_dir, agent_id=bad_id)
 

@@ -35,12 +35,14 @@ os.environ["KURRENT_PKI_SELF_CHECK"] = "0"
 
 _STATE = Path(tempfile.mkdtemp(prefix="nvmet-host-test-"))
 _PKI_DIR = gen_pki_dir(_STATE / "pki")
+_NODE_ID_FILE = _STATE / "state" / "agent.id"
+_NODE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+_NODE_ID_FILE.write_text("0123456789af\n", encoding="utf-8")
+os.environ["KURRENT_NODE_ID_FILE"] = str(_NODE_ID_FILE)
 _CONF_FILE = _STATE / "kurrent.yaml"
 _CONF_FILE.write_text(
     f"""apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 0123456789af
 spec:
   agent:
     backend: nvmet
@@ -60,7 +62,7 @@ if "app" not in sys.modules:
     _app_pkg = types.ModuleType("app")
     _app_pkg.__path__ = []
     sys.modules["app"] = _app_pkg
-for _name in ("config", "pki_client"):
+for _name in ("node_id", "config", "pki_client", "ownership", "security"):
     _spec = importlib.util.spec_from_file_location(
         f"app.{_name}", _SPEC_DIR / f"{_name}.py")
     _mod = importlib.util.module_from_spec(_spec)

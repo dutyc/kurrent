@@ -28,12 +28,14 @@ os.environ["KURRENT_PKI_SELF_CHECK"] = "0"
 
 _STATE = Path(tempfile.mkdtemp(prefix="storager-agent-test-"))
 _PKI_DIR = gen_pki_dir(_STATE / "pki")
+_NODE_ID_FILE = _STATE / "state" / "agent.id"
+_NODE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+_NODE_ID_FILE.write_text("0123456789ae\n", encoding="utf-8")
+os.environ["KURRENT_NODE_ID_FILE"] = str(_NODE_ID_FILE)
 _CONF_FILE = _STATE / "kurrent.yaml"
 _CONF_FILE.write_text(
     f"""apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 0123456789ae
 spec:
   agent:
     backend: nvmet

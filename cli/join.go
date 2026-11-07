@@ -14,9 +14,7 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/x509"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -542,16 +540,6 @@ func hostPreflightNvmet(storagerDir string) error {
 	}
 	return fmt.Errorf("host nvmet prerequisites are not ready (the storage data plane cannot start):\n  %s\n  %s",
 		strings.Join(missing, "\n  "), hint)
-}
-
-// newNodeID 生成节点身份（agent_id）：12 位 hex 随机标识（与盘 os_tag 同构，docker
-// 容器 ID 短形式）——机器身份不承载人类语义，人类识别用 metadata.remark。
-func newNodeID() (string, error) {
-	b := make([]byte, 6)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate node identity: %w", err)
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // newNodeDeclaration 缺省节点声明（kurrent.yaml 缺失时 join 自动生成，权威声明——

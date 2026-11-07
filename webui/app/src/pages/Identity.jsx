@@ -21,7 +21,6 @@ import {
 } from '../api/certs'
 import {
   agentLabels,
-  newNodeId,
   nodeName,
   splitSessions,
   splitTokens,
@@ -93,7 +92,7 @@ const joinCommand = (cpUrl, token, agentId) =>
   `kurrent join ${String(cpUrl || '').trim().replace(/\/+$/, '')} --token ${token} --agent-id ${agentId}`
 
 /* 身份与访问：任务入口 + 按主体分栏的证书/令牌/会话台账。
-   节点以声明里的 remark 显示，机器身份（agent_id）与令牌 ID 只作次级信息；
+   节点以控制面台账的 remark 显示，机器身份（agent_id）与令牌 ID 只作次级信息；
    接入新节点时身份由系统生成，join 命令直接携带，不让人手工输入名称。 */
 export default function Identity() {
   const { t } = useI18n()
@@ -121,7 +120,6 @@ export default function Identity() {
   const [recoverIssuing, setRecoverIssuing] = useState(false)
 
   const [addNodeOpen, setAddNodeOpen] = useState(false)
-  const [addNodeId, setAddNodeId] = useState('')
   const [addNodeCpUrl, setAddNodeCpUrl] = useState('')
   const [addNodeIssued, setAddNodeIssued] = useState(null)
   const [addNodeIssuing, setAddNodeIssuing] = useState(false)
@@ -317,14 +315,6 @@ export default function Identity() {
   }
 
   const openAddNode = () => {
-    let id
-    try {
-      id = newNodeId()
-    } catch {
-      setToast({ tone: 'error', message: t('identity.identityGenerationFailed') })
-      return
-    }
-    setAddNodeId(id)
     setAddNodeCpUrl(window.location.origin)
     setAddNodeIssued(null)
     setCopiedKey('')
@@ -338,7 +328,7 @@ export default function Identity() {
     }
     setAddNodeIssuing(true)
     try {
-      setAddNodeIssued(await issueBootstrapToken(addNodeId))
+      setAddNodeIssued(await issueBootstrapToken())
       await load()
     } catch (e) {
       setToast({ tone: 'error', message: e.message })
@@ -408,7 +398,7 @@ export default function Identity() {
       ? joinCommand(recoverCpUrl, recoverIssued.token, recoverTarget.agentId)
       : ''
   const addNodeCommand = addNodeIssued
-    ? joinCommand(addNodeCpUrl, addNodeIssued.token, addNodeId)
+    ? joinCommand(addNodeCpUrl, addNodeIssued.token, addNodeIssued.agent_id)
     : ''
 
   const showInitialLoading =

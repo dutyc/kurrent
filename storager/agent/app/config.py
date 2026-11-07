@@ -1,23 +1,26 @@
-"""节点声明式配置加载。
+"""节点声明式配置与节点身份加载。
 
-配置来源：storager/kurrent.yaml（apiVersion/kind/metadata/spec 单文件节点权威配置，
+配置来源：storager/kurrent.yaml（apiVersion/kind/spec 单文件节点权威配置，
 kurrent CLI 在 join 时生成与更新，手工业务键编辑此文件）；
 容器内挂载路径固定 /etc/kurrent/kurrent.yaml（KURRENT_CONFIG_FILE 可覆盖，测试注入用）。
 
-分层职责：kurrent.yaml 只声明节点级业务配置（身份/加入凭据/数据面参数），
+身份来源：storager/state/agent.id（节点状态，join 写入；机器身份不进声明）；
+容器内挂载路径固定 /etc/kurrent/state/agent.id（KURRENT_NODE_ID_FILE 可覆盖）。
+
+分层职责：kurrent.yaml 只声明节点级业务配置（数据面参数与加入凭据地址），
 容器内路径（pki/cp-ca/日志/缓存等挂载目标）属于部署清单 docker-compose.yml 职责，
 此处以模块常量固化（与 compose 挂载目标一致，单处维护）。
 
 schema 在 config_schema.py（pydantic v2，单一权威）：未知字段拒绝（extra="forbid"）、
-必填缺失报错、默认值注入、apiVersion/kind 锁定、身份/路径/NQN 语义校验——
-配置错误在 kurrent join 预校验阶段即失败，杜绝 .env 自由键值的静默偏差
-（.env 仅保留 docker-compose 插值键）。
+必填缺失报错、默认值注入、apiVersion/kind 锁定、路径/NQN 语义校验——
+配置错误在 kurrent join 预校验阶段即失败。
 """
 
 import os
 
 from .config_schema import (NodeConfiguration, effective_config,
                             load_config_file)
+from .node_id import DEFAULT_NODE_ID_FILE, load_node_id
 
 # compose 卷挂载路径（storager/kurrent.yaml → 容器内，只读）
 DEFAULT_CONFIG_FILE = "/etc/kurrent/kurrent.yaml"
@@ -43,3 +46,4 @@ def load_config(path: str | None = None) -> NodeConfiguration:
 
 # 模块级单例：import app.config 即加载（main.py / pki_client.py 共同消费）
 CONFIG = load_config()
+NODE_ID = load_node_id()
