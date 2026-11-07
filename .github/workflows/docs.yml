@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'api/**'
+      - 'scripts/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/docs.yml'
