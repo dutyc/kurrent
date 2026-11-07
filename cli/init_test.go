@@ -56,9 +56,9 @@ func TestInitBasic(t *testing.T) {
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"FAKE-DOCKER " + repo + " compose up -d",
-		"FAKE-DOCKER " + repo + " compose restart kurrent-control-plane",
-		"FAKE-DOCKER " + repo + " compose restart kurrent-dnsmasq",
+		"FAKE-DOCKER " + repo + " compose --project-name kurrent up -d",
+		"FAKE-DOCKER " + repo + " compose --project-name kurrent restart kurrent-control-plane",
+		"FAKE-DOCKER " + repo + " compose --project-name kurrent restart kurrent-dnsmasq",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("docker 调用缺 %s\n%s", want, log)
@@ -239,7 +239,7 @@ func TestInitFullSchemaValidationFailureDoesNotApply(t *testing.T) {
 		t.Error("校验失败却改写了 control_plane/kurrent.yaml")
 	}
 	log := readLog(t, logFile)
-	if strings.Contains(log, "compose up -d") || strings.Contains(log, "compose restart") {
+	if strings.Contains(log, "up -d") || strings.Contains(log, "compose --project-name kurrent restart") {
 		t.Errorf("校验失败后仍启动了控制面:\n%s", log)
 	}
 }
@@ -262,10 +262,10 @@ func TestInitRollsBackOnHealthFailure(t *testing.T) {
 		t.Error("健康检查失败后未恢复上一份声明")
 	}
 	log := readLog(t, logFile)
-	if n := strings.Count(log, "compose restart kurrent-control-plane"); n < 2 {
+	if n := strings.Count(log, "compose --project-name kurrent restart kurrent-control-plane"); n < 2 {
 		t.Errorf("期望应用重启 + 回滚重启两次控制面，实际 %d:\n%s", n, log)
 	}
-	if !strings.Contains(log, "compose restart kurrent-dnsmasq") {
+	if !strings.Contains(log, "compose --project-name kurrent restart kurrent-dnsmasq") {
 		t.Errorf("回滚后应重启 dnsmasq 加载旧 conf:\n%s", log)
 	}
 }

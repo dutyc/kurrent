@@ -1,6 +1,7 @@
 // token 子命令：签发 / 列表 / 吊销凭据。
-// usage=bootstrap（默认）：引导 token——绑定节点身份（--agent-id，12 位小写 hex；省略则生成），
-// enroll 只接受同一节点身份；默认一次性、60 分钟（--uses 放开次数）。
+// usage=bootstrap（默认）：引导 token——绑定节点身份（--agent-id 可显式指定已有身份；
+// 省略时由控制面分配 12 位小写 hex），enroll 只接受同一节点身份；默认一次性、60 分钟
+// （--uses 放开次数）。
 // usage=admin：管理 token（认证器链 Bearer）——供脚本调用与 WebUI 登录（粘贴）。
 // list：列出未过期台账条目（无明文/hash）；revoke：删条目即失效。
 // nvmet-host 组件凭据不在此签发：agent enroll 上报 backend=nvmet 时控制面
@@ -137,12 +138,6 @@ func tokenCreate(args []string) {
 			if agentID, err = validateAgentID(p.opt("agent-id", "")); err != nil {
 				usageError(tokenCreateUsage, err)
 			}
-		} else {
-			id, err := newNodeID()
-			if err != nil {
-				fatal("generate node id: %v", err)
-			}
-			agentID = id
 		}
 		if p.has("cp-url") {
 			var err error
@@ -150,7 +145,10 @@ func tokenCreate(args []string) {
 				usageError(tokenCreateUsage, err)
 			}
 		}
-		req := map[string]any{"usage": "bootstrap", "agent_id": agentID}
+		req := map[string]any{"usage": "bootstrap"}
+		if agentID != "" {
+			req["agent_id"] = agentID
+		}
 		if p.has("uses") {
 			raw := strings.TrimSpace(p.opt("uses", ""))
 			uses, err := strconv.Atoi(raw)
@@ -177,8 +175,13 @@ func tokenCreate(args []string) {
 	if strings.TrimSpace(out.Token) == "" {
 		fatal("the control plane returned no token (missing token field)")
 	}
-	if usage == "bootstrap" && out.AgentID != agentID {
-		fatal("server returned agent_id %q, request was %q", out.AgentID, agentID)
+	if usage == "bootstrap" {
+		if strings.TrimSpace(out.AgentID) == "" {
+			fatal("the control plane returned no agent_id")
+		}
+		if agentID != "" && out.AgentID != agentID {
+			fatal("server returned agent_id %q, request was %q", out.AgentID, agentID)
+		}
 	}
 	if usage == "admin" {
 		fmt.Printf("admin token: %s (scopes %s, expires %s)\n",
@@ -191,7 +194,7 @@ func tokenCreate(args []string) {
 	}
 	fmt.Printf("bootstrap token: %s (expires %s, bound node %s, %s)\n",
 		out.Token, out.ExpiresAt, out.AgentID, tokenUseLimit(out.Uses, out.MaxUses))
-	fmt.Printf("\n# Run on the bound node (--agent-id is written to metadata.name):\n")
+	fmt.Printf("\n# Run on the bound node (--agent-id is written to <state>/storager/state/agent.id):\n")
 	fmt.Printf("kurrent join %s --token %s --agent-id %s\n",
 		joinURL, out.Token, out.AgentID)
 	fmt.Printf("# After joining, verify with: kurrent agents list (or the WebUI Agents page, health=ok)\n")

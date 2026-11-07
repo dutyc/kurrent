@@ -1,3 +1,8 @@
+# 部署项目名固定，与仓库目录名解耦（移动/改名 checkout 不改变部署身份）。
+# 运行时状态不在仓库内：KURRENT_STATE_DIR 指向状态根（默认 ~/.local/state/kurrent），
+# 由 kurrent init 创建/迁移并通过进程环境注入。
+name: kurrent
+
 services:
 
   # ── DHCP / TFTP / 引导文件服务 ──
@@ -14,9 +19,9 @@ services:
     cap_add:
       - NET_ADMIN
     volumes:
-      - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf
-      - ./dnsmasq/dhcp-hosts.conf:/etc/dnsmasq.d/dhcp-hosts.conf
-      - ./dnsmasq/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq/dhcp-hosts.conf:/etc/dnsmasq.d/dhcp-hosts.conf
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
       - /etc/localtime:/etc/localtime:ro
       # TFTP 根只暴露首跳所需的两个文件；boot.ipxe.cfg / menu.ipxe 等由 nginx 经 HTTPS 提供。
       # 文件级挂载固定 inode：更新 snponly.efi 后需重建/重启本容器。
@@ -40,6 +45,8 @@ services:
     environment:
       # 容器时区（日志时间戳）
       - TZ=Asia/Shanghai
+      # 宿主 HTTPS 端口：非 443 时写入 admin.conf 的 server（CLI 自检据此连接）
+      - KURRENT_HTTPS_PORT=${KURRENT_HTTPS_PORT:-443}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -48,11 +55,13 @@ services:
       - kurrent-run:/run/kurrent
       # 声明式配置（只读）：spec.networking 是 dnsmasq.conf 的权威来源
       - ./control_plane/kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
-      - ./control_plane/config:/app/config
-      - ./control_plane/state:/app/state
+      # 运行时状态与派生台账都在仓库之外的状态根（挂载源为绝对路径）
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/config/agents.yml:/app/config/agents.yml
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/state:/app/state
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/bootstrap:/app/bootstrap
       - /etc/localtime:/etc/localtime:ro
       # dnsmasq 目录（可写）：dnsmasq.conf 由控制面启动时按 spec.networking 生成，dnsmasq 容器挂载同文件
-      - ./dnsmasq:/app/dnsmasq
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq:/app/dnsmasq
       # 引导链状态（只读）：固件与引导脚本
       - ./tftp:/var/tftp:ro
     healthcheck:
@@ -81,10 +90,10 @@ services:
       # ── iPXE 公开文件目录: ISO, kernel, initrd (被浏览和下载的数据) ──
       - ./webui/deploy/public:/data:ro
       # ── TOFU 自签证书（控制面启动时自动生成到 state/certs，私钥不入库；nginx 只读挂载）──
-      - ./control_plane/state/certs:/etc/nginx/certs:ro
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/state/certs:/etc/nginx/certs:ro
       # ── 客户端证书信任包（ca-users + ca-nodes）：只挂信任包目录 ──
       # 不挂整个 pki 目录：ca.key 与用户私钥不得出现在面向前端的容器文件系统里。
-      - ./control_plane/state/pki/nginx:/etc/nginx/pki:ro
+      - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/state/pki/nginx:/etc/nginx/pki:ro
       # 管理面 unix socket 所在卷（控制面与 nginx 共享；无 TCP 监听）
       - kurrent-run:/run/kurrent
       # ── iPXE 菜单/覆盖脚本 HTTPS 同源 (与 dnsmasq TFTP 同一目录) ──

@@ -172,8 +172,11 @@ def test_nginx_reloads_itself_on_crl_change():
 def test_pep_never_mounts_ca_private_key():
     compose = COMPOSE.read_text(encoding="utf-8")
     assert "./control_plane/state/pki:/etc/nginx/pki:ro" not in compose
-    # 只挂公开信任包目录（控制面写入 users + nodes 的 bundle），不挂任何私钥
-    assert "./control_plane/state/pki/nginx:/etc/nginx/pki:ro" in compose
+    # 只挂公开信任包目录（控制面写入 users + nodes 的 bundle），不挂任何私钥；
+    # 挂载源是状态根下的绝对路径（仓库内相对路径会随 checkout 移动而断）
+    nginx = _service_block(compose, "kurrent-nginx")
+    assert "/control-plane/state/pki/nginx:/etc/nginx/pki:ro" in nginx
+    assert "${KURRENT_STATE_DIR" in nginx
 
     dockerfile = NGINX_DOCKERFILE.read_text(encoding="utf-8")
     assert "nginx/snippets/ /etc/nginx/snippets/" in dockerfile

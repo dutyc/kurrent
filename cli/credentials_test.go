@@ -343,7 +343,7 @@ func TestCredentialsDiscoveryNearest(t *testing.T) {
 	}
 }
 
-// TestCredentialsDiscoveryExeFallback：cwd 与祖先均无凭据时，按可执行文件旁（仓库布局 cli/kurrent → 仓库根）发现。
+// TestCredentialsDiscoveryExeFallback：cwd 与祖先均无凭据时，按可执行文件旁（仓库布局 bin/kurrent → 仓库根）发现。
 func TestCredentialsDiscoveryExeFallback(t *testing.T) {
 	t.Setenv("KURRENT_CREDENTIALS", "")
 	stubUserHome(t)
@@ -401,7 +401,7 @@ func TestCredentialsInstall(t *testing.T) {
 	conf := makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, source, err := installCredentials()
+	target, source, err := installCredentialsFrom(discoverCredentials(), "")
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestCredentialsInstallRefresh(t *testing.T) {
 	makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, _, err := installCredentials()
+	target, _, err := installCredentialsFrom(discoverCredentials(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestCredentialsInstallRefresh(t *testing.T) {
 	if err := os.WriteFile(copied, []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := installCredentials(); err != nil {
+	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err != nil {
 		t.Fatalf("重跑 install: %v", err)
 	}
 	got, _ := os.ReadFile(copied)
@@ -506,7 +506,7 @@ func TestCredentialsInstallRefuseSelf(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(snapDir, "admin.conf"), []byte(adminConfBody))
-	if _, _, err := installCredentials(); err == nil || !strings.Contains(err.Error(), "user-level snapshot") {
+	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err == nil || !strings.Contains(err.Error(), "user-level snapshot") {
 		t.Fatalf("应拒绝以快照为源，实际 err=%v", err)
 	}
 }
@@ -550,7 +550,7 @@ func TestCredentialsRemove(t *testing.T) {
 	conf := makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, _, err := installCredentials()
+	target, _, err := installCredentialsFrom(discoverCredentials(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +591,7 @@ func TestCredentialsShow(t *testing.T) {
 		t.Fatalf("show 应含生效凭据与未安装提示: %s", out)
 	}
 
-	if _, _, err := installCredentials(); err != nil {
+	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err != nil {
 		t.Fatal(err)
 	}
 	outside := t.TempDir()

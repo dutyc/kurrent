@@ -1,10 +1,13 @@
 # NVMe-oF 后端独立编排：内核 nvmet target 在宿主，管理服务容器 kurrent-nvmet-host；与 iscsi/ 互斥。
-# 部署：cd storager/nvmeof && docker compose --env-file ../.env up -d
+# 部署/重启：kurrent join（由它注入宿主挂载路径环境变量并收敛容器）
 # 前置（宿主）：sudo bash host-prepare.sh（nvmet/nvmet-tcp 模块 + configfs 挂载 + 重启持久化，见 nvmet-host/README.md）
 # 本文件为完整编排：含共享 Agent 服务（代码在 storager/agent/，配置来源：../kurrent.yaml，
-# 节点声明式配置；.env 仅保留 compose 插值键）。
+# 节点声明式配置；身份/凭据/PKI 都在仓库外的节点状态根，join 写入）。
+# 项目名固定，与仓库目录名解耦。
 # 注：nvmet 后端由 Agent 经 HTTP 驱动 nvmet-host，不需要 docker.sock（最小权限）；
 # iscsi 后端仍按 storager/iscsi/docker-compose.yml 挂载以 exec 后端容器。
+
+name: kurrent-storage
 
 services:
   # ── 存储节点 Agent（控制面数据面接口）──
@@ -24,19 +27,19 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # nvmet-host 管理面 UDS（共享卷）：无 TCP 监听，仅本机两组件可访问
       - kurrent-nvmet-run:/run/kurrent/nvmet
-      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
-      - ${KURRENT_DISK_DIR:-../../storager_img}:/home/iscsi_img
-      - ../agent/logs:/var/log/kurrent
-      # 组件 PKI：本组件证书目录（可写，引导/轮换时落盘）；
-      # 宿主路径可用 KURRENT_AGENT_PKI_HOST 覆盖（kurrent join 按 agent_id 写入）
-      - ${KURRENT_AGENT_PKI_HOST:-../../control_plane/state/pki/components/agent-storage-lio-01}:/etc/kurrent/pki
-      # 控制面 nginx 服务器证书（自签，作为 enroll/renew 的 TOFU 信任根）
-      - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
-      # 节点声明式配置：agent/nvmet-host 挂载同一份只读配置
+      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 注入）
+      - ${KURRENT_DISK_DIR:?run kurrent join to provide the disk directory}:/home/iscsi_img
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/logs:/var/log/kurrent
+      # 组件 PKI：本组件证书目录（可写，引导/轮换时落盘）；宿主路径在节点状态根下
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/pki/agent-${KURRENT_AGENT_ID:?run kurrent join to provide the node identity}:/etc/kurrent/pki
+      # 控制面 nginx 服务器证书（自签，作为 enroll/renew 的 TOFU 信任根；--cp-ca 可覆盖）
+      - ${KURRENT_CP_CA_FILE:?run kurrent join to provide the control-plane trust anchor}:/etc/kurrent/cp-ca.crt:ro
+      # 节点声明式配置与身份状态：agent/nvmet-host 挂载同一份只读配置与身份文件
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/state:/etc/kurrent/state:ro
       # 引导凭据目录（可写）：agent.token 由 kurrent join 写入；
       # nvmet-host.token 为本组件 enroll 按能力派生后落盘（nvmet-host 容器只读共享）
-      - ../bootstrap:/etc/kurrent/bootstrap
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/bootstrap:/etc/kurrent/bootstrap
 
   # ── NVMe-oF 宿主管理服务（声明 spec.agent.backend=nvmet 时启用）──
   # 内核 nvmet target 在宿主（模块/configfs 由 host-prepare.sh 就位，见 nvmet-host README）；
@@ -70,7 +73,7 @@ services:
     # 生产环境建议改用自定义 profile 仅放行 configfs（见 nvmet-host/README.md）。
     security_opt:
       - apparmor:unconfined
-      # TLS-PSK 目标端供给（内核段加密，见 blueprint/nvme-tcp-tls-in-kernel.md）：
+      # TLS-PSK 目标端供给（内核段加密，见 .local/blueprint/nvme-tcp-tls-in-kernel.md）：
       # 本服务需把 psk key 注入内核全局 .nvme keyring —— 默认策略下两处被挡，
       # 缺任何一条都会静默失败（详见 nvmet-host/app/main.py 的 NvmePskKeyring）：
       #   seccomp：默认策略拒 add_key/keyctl 内核 syscall（EPERM）
@@ -83,17 +86,17 @@ services:
       - kurrent-nvmet-run:/run/kurrent/nvmet
       # 磁盘镜像目录：configfs device_path 由写入进程（本容器）所在挂载命名空间解析，
       # 须让本容器能看见盘文件（与 agent 的 KURRENT_DISK_DIR 一致，容器内路径可不同）
-      - ${KURRENT_DISK_DIR:-../../storager_img}:/srv/nvmet-disks
+      - ${KURRENT_DISK_DIR:?run kurrent join to provide the disk directory}:/srv/nvmet-disks
       - /etc/localtime:/etc/localtime:ro
-      # 组件 PKI：nvmet-host 独立组件身份（cn=nvmet-<agent_id>）；
-      # 宿主路径可用 KURRENT_NVMET_PKI_HOST 覆盖（kurrent join 按 agent_id 写入）
-      - ${KURRENT_NVMET_PKI_HOST:-../../control_plane/state/pki/components/nvmet-storage-lio-01}:/etc/kurrent/pki
-      - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
-      # 节点声明式配置：与 agent 挂载同一份只读配置
+      # 组件 PKI：nvmet-host 独立组件身份（cn=nvmet-<agent_id>）；宿主路径在节点状态根下
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/pki/nvmet-${KURRENT_AGENT_ID:?run kurrent join to provide the node identity}:/etc/kurrent/pki
+      - ${KURRENT_CP_CA_FILE:?run kurrent join to provide the control-plane trust anchor}:/etc/kurrent/cp-ca.crt:ro
+      # 节点声明式配置与身份状态：与 agent 挂载同一份只读配置与身份文件
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/state:/etc/kurrent/state:ro
       # 引导凭据目录（只读共享）：nvmet-host.token 由 agent enroll 按能力派生写入，
       # 本组件引导时读取
-      - ../bootstrap:/etc/kurrent/bootstrap:ro
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/bootstrap:/etc/kurrent/bootstrap:ro
 
 volumes:
   # 管理面 UDS 载体：只有 agent 与 nvmet-host 挂载（无 TCP 监听，局域网不可达）

@@ -1,8 +1,8 @@
 // kurrent —— Kurrent 控制面 CLI。
 // 零第三方依赖（net/http + encoding/json + yaml.v3），go build 出单二进制。
 //
-// 管理凭据：自动发现管理凭据文件（control_plane/state/admin.conf → 可执行文件旁 →
-// ~/.kurrent/admin.conf 用户级快照，admin 证书 mTLS；kurrent credentials install 安装快照）；
+// 管理凭据：自动发现管理凭据文件（部署记录指向的 <state>/control-plane/state/admin.conf →
+// 旧布局 → 可执行文件旁 → ~/.kurrent/admin.conf 用户级快照，admin 证书 mTLS）；
 // 环境变量 KURRENT_CP_URL / KURRENT_CP_TOKEN / KURRENT_CREDENTIALS 兜底。
 // 全局标志只在命令组之前解析；子命令使用严格白名单（未知/缺值/重复一律报用法错误）。
 package main
@@ -72,6 +72,10 @@ func main() {
 		cmdInit(args[1:])
 	case "join":
 		cmdJoin(args[1:])
+	case "deployment":
+		cmdDeployment(args[1:])
+	case "host":
+		cmdHost(args[1:])
 	case "workers":
 		cmdWorkers(args[1:])
 	case "ops":

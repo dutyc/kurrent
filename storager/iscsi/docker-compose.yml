@@ -1,8 +1,10 @@
 # iSCSI 后端独立编排（stgt 用户态 / lio 内核态，二选一）；与 nvmeof/ 互斥（同一节点同一时刻仅一个后端）。
-# 部署：cd storager/iscsi && docker compose --env-file ../.env up -d
+# 部署/重启：kurrent join（由它注入宿主挂载路径环境变量并收敛容器）
 # 本文件为完整编排：含共享 Agent 服务（代码在 storager/agent/，配置来源：../kurrent.yaml，
-# 节点声明式配置；.env 仅保留 compose 插值键）。
+# 节点声明式配置；身份/凭据/PKI 都在仓库外的节点状态根，join 写入）。
 # 注：storager-agent 服务块与 storager/nvmeof/docker-compose.yml 保持一致。
+
+name: kurrent-storage
 
 services:
   # storager-iscsi:
@@ -34,8 +36,8 @@ services:
       - /sys/kernel/config:/sys/kernel/config
       - /etc/localtime:/etc/localtime:ro
       - /lib/modules:/lib/modules:ro
-      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
-      - ${KURRENT_DISK_DIR:-/pool1/iscsi_img}:/home/iscsi_img
+      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 注入）
+      - ${KURRENT_DISK_DIR:?run kurrent join to provide the disk directory}:/home/iscsi_img
       - ./lio/etc/target:/etc/rtslib-fb-target
     command:
       - sh
@@ -63,16 +65,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # 用来 exec 进后端容器（stgt/lio 由 Agent 驱动）
       - /etc/localtime:/etc/localtime:ro
-      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 同步到 .env）
-      - ${KURRENT_DISK_DIR:-/pool1/iscsi_img}:/home/iscsi_img
-      - ../agent/logs:/var/log/kurrent
-      # 组件 PKI：本组件证书目录（可写，引导/轮换时落盘）；
-      # 宿主路径可用 KURRENT_AGENT_PKI_HOST 覆盖（kurrent join 按 agent_id 写入）
-      - ${KURRENT_AGENT_PKI_HOST:-../../control_plane/state/pki/components/agent-storage-lio-01}:/etc/kurrent/pki
-      # 控制面 nginx 服务器证书（自签，作为 enroll/renew 的 TOFU 信任根）
-      - ../../control_plane/state/certs/server.crt:/etc/kurrent/cp-ca.crt:ro
-      # 节点声明式配置：agent 挂载只读节点配置
+      # 盘镜像目录：宿主路径经 KURRENT_DISK_DIR 插值（kurrent.yaml spec.agent.diskDir 权威，join 注入）
+      - ${KURRENT_DISK_DIR:?run kurrent join to provide the disk directory}:/home/iscsi_img
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/logs:/var/log/kurrent
+      # 组件 PKI：本组件证书目录（可写，引导/轮换时落盘）；宿主路径在节点状态根下
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/pki/agent-${KURRENT_AGENT_ID:?run kurrent join to provide the node identity}:/etc/kurrent/pki
+      # 控制面 nginx 服务器证书（自签，作为 enroll/renew 的 TOFU 信任根；--cp-ca 可覆盖）
+      - ${KURRENT_CP_CA_FILE:?run kurrent join to provide the control-plane trust anchor}:/etc/kurrent/cp-ca.crt:ro
+      # 节点声明式配置与身份状态：agent 挂载只读节点配置与身份文件
       - ../kurrent.yaml:/etc/kurrent/kurrent.yaml:ro
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/state:/etc/kurrent/state:ro
       # 引导凭据目录：agent.token 由 kurrent join 写入；
       # （本节点无 nvmet-host 组件，不产生派生凭据）
-      - ../bootstrap:/etc/kurrent/bootstrap
+      - ${KURRENT_NODE_STATE_DIR:?run kurrent join to provide the node state root}/bootstrap:/etc/kurrent/bootstrap

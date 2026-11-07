@@ -120,12 +120,19 @@ func configInspect(cmd string, p parsedArgs) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", configFile, err)
 	}
-	var composeDir, image, label string
+	var composeDir, image, label, project string
+	var buildEnv []string
+	query, err := resolveDeployment(root, "")
+	if err != nil {
+		return err
+	}
 	switch kind {
 	case "ControlPlaneConfiguration":
 		composeDir = root
 		image = "kurrent-control-plane"
 		label = "control_plane/kurrent.yaml"
+		project = query.project()
+		buildEnv = query.composeEnv()
 	case "NodeConfiguration":
 		backend := nodeValueFromYAML(data, "spec", "agent", "backend")
 		sub := "nvmeof"
@@ -135,13 +142,21 @@ func configInspect(cmd string, p parsedArgs) error {
 		composeDir = filepath.Join(root, "storager", sub)
 		image = "storager-agent"
 		label = "storager/kurrent.yaml"
+		project = query.storageProject()
+		// compose 的 ${VAR:?} 在 build 阶段同样参与渲染；校验镜像不挂载这些路径，
+		// 只需满足插值（真实值由 join 在启动容器时注入）。
+		diskDir := strings.TrimSpace(nodeValueFromYAML(data, "spec", "agent", "diskDir"))
+		if diskDir == "" {
+			diskDir = root
+		}
+		buildEnv = query.nodeComposeEnv("validation", diskDir, query.storager("validation").cpCA)
 	default:
 		return fmt.Errorf("%s: kind = %q (expected ControlPlaneConfiguration|NodeConfiguration)",
 			configFile, kind)
 	}
 
 	fmt.Fprintf(os.Stderr, "==> kurrent config %s: building the %s validation image\n", cmd, image)
-	if err := composeRunStderr(composeDir, "build", image); err != nil {
+	if err := composeRunStderr(composeDir, project, buildEnv, "build", image); err != nil {
 		return err
 	}
 	out, err := runConfigTool(image, cmd, data)
@@ -156,11 +171,20 @@ func configInspect(cmd string, p parsedArgs) error {
 	return nil
 }
 
-// resolveRepoRoot 定位仓库根：--dir 显式；否则从 cwd 逐级上溯（含 control_plane/ 与 storager/）。
-// --dir 也接受 control_plane/ 或 storager/ 本身。
+// resolveRepoRoot 定位仓库根：--dir 显式；否则部署记录（部署身份优先于 cwd）；
+// 再否则从 cwd 逐级上溯（含 control_plane/ 与 storager/）。--dir 也接受 control_plane/
+// 或 storager/ 本身。
 func resolveRepoRoot(explicit string) (string, error) {
 	start := explicit
 	if start == "" {
+		if rec, err := readDeploymentRecord(); err != nil {
+			return "", err
+		} else if rec != nil {
+			if isDir(filepath.Join(rec.RepoRoot, "control_plane")) && isDir(filepath.Join(rec.RepoRoot, "storager")) {
+				return rec.RepoRoot, nil
+			}
+			return "", fmt.Errorf("the deployment record points at %s, but that checkout no longer exists; pass --dir with its new location (or run kurrent init --dir <new-checkout>)", rec.RepoRoot)
+		}
 		cwd, err := os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("get current directory: %w", err)

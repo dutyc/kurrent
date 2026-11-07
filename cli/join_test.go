@@ -1,21 +1,17 @@
 // kurrent join 沙盒测试：临时仓库 + fake docker，验证声明校验/补默认写回、
-// .env 收敛为插值键、引导凭据落盘与 compose 收敛调用。
+// 身份状态落盘、compose 环境变量注入、引导凭据落盘与收敛调用。
 package main
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-// nodeIDRe 节点身份（agent_id）：12 位小写 hex（与盘 os_tag 同构）。
-var nodeIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 const (
 	fillAgentID   = "a1b2c3d4e5f6"
@@ -28,7 +24,7 @@ const (
 )
 
 const fakeDocker = `#!/usr/bin/env bash
-echo "FAKE-DOCKER $(pwd) $*" >> "${FAKE_DOCKER_LOG}"
+echo "FAKE-DOCKER $(pwd) $* KURRENT_DISK_DIR=${KURRENT_DISK_DIR:-} KURRENT_AGENT_ID=${KURRENT_AGENT_ID:-} KURRENT_NODE_STATE_DIR=${KURRENT_NODE_STATE_DIR:-} KURRENT_CP_CA_FILE=${KURRENT_CP_CA_FILE:-}" >> "${FAKE_DOCKER_LOG}"
 if [ -n "${FAKE_DOCKER_FAIL:-}" ] && [[ "$*" == *"$FAKE_DOCKER_FAIL"* ]]; then
   echo "fake docker failure: $*" >&2
   exit 1
@@ -104,6 +100,16 @@ func breakHost(t *testing.T) {
 func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	t.Helper()
 	stubHostReady(t)
+	stubBootstrapExchange(t)
+	home := stubUserHome(t)
+	stateRoot := t.TempDir()
+	t.Setenv("KURRENT_STATE_DIR", stateRoot)
+	t.Setenv("KURRENT_DEPLOYMENT_FILE", filepath.Join(home, "deployment.yaml"))
+	// 同机控制面信任锚的节点副本：join 默认直接复用，缺省分机场景由 --cp-ca 用例覆盖。
+	if err := os.MkdirAll(filepath.Join(stateRoot, "storager", "certs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSelfSignedPEM(t, filepath.Join(stateRoot, "storager", "certs", "cp-ca.crt"), "test-cp")
 	// 沙盒里没有真实 agent enroll：默认不等待派生 token；恢复路径由专门用例覆盖。
 	oldWaiter := nvmetTokenWaiter
 	nvmetTokenWaiter = func(string, time.Duration, time.Duration) error { return nil }
@@ -119,11 +125,14 @@ func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	storager = filepath.Join(repo, "storager")
 	for _, d := range []string{
 		"control_plane/app", "control_plane/config", "control_plane/state",
-		"storager/nvmeof", "storager/iscsi",
+		"storager/nvmeof", "storager/iscsi", "webui/app/dist",
 	} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "webui", "app", "dist", "index.html"), []byte("<!doctype html>\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	bin := filepath.Join(repo, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -138,21 +147,65 @@ func newFakeRepo(t *testing.T) (repo, controlPlane, storager, logFile string) {
 	return repo, controlPlane, storager, logFile
 }
 
-// envValues 返回 .env 中某键的全部值（末位为最新）。
-func envValues(t *testing.T, envFile, key string) []string {
+// nodeStateRoot 当前测试部署的状态根（newFakeRepo 已注入 KURRENT_STATE_DIR）。
+func nodeStateRoot(t *testing.T, storager string) string {
 	t.Helper()
-	data, err := os.ReadFile(envFile)
+	q, err := resolveDeployment(storager, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := key + "="
-	var vals []string
-	for _, l := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(l, prefix) {
-			vals = append(vals, strings.TrimPrefix(l, prefix))
-		}
+	return q.stateDir
+}
+
+// nodeBootstrapDir 节点引导凭据目录（状态根下）。
+func nodeBootstrapDir(t *testing.T, storager string) string {
+	t.Helper()
+	return filepath.Join(nodeStateRoot(t, storager), "storager", "bootstrap")
+}
+
+// writeNodeToken 预置节点引导凭据文件。
+func writeNodeToken(t *testing.T, storager, name, body string) string {
+	t.Helper()
+	dir := nodeBootstrapDir(t, storager)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	return vals
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// writeStateID 预置节点身份状态文件（模拟 join 首跑之后的重跑）。
+func writeStateID(t *testing.T, storager, id string) string {
+	t.Helper()
+	dir := filepath.Join(nodeStateRoot(t, storager), "storager", "state")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent.id")
+	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func readStateID(t *testing.T, storager string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(nodeStateRoot(t, storager), "storager", "state", "agent.id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// assertNoEnvFile：部署目录不再保留派生的 .env。
+func assertNoEnvFile(t *testing.T, storager string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(storager, ".env")); !os.IsNotExist(err) {
+		t.Errorf("storager/.env 不应再生成, stat err = %v", err)
+	}
 }
 
 // yamlValue 读取 kurrent.yaml 指定路径的标量值（缺失返回空串）。
@@ -186,9 +239,6 @@ func yamlValue(t *testing.T, configFile string, path ...string) string {
 // nodeYAML 完整节点声明（模板编辑后的形态）。
 const nodeYAML = `apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 3f2a9c1d8b7e
-  remark: 生产存储
 spec:
   agent:
     backend: nvmet
@@ -202,7 +252,7 @@ spec:
 func TestJoinBasic(t *testing.T) {
 	_, _, storager, logFile := newFakeRepo(t)
 	// 预写旧版派生凭据（模拟历史部署：join 曾代写 nvmet-host.token）→ nvmet 后端重跑应清除
-	bootstrapDir := filepath.Join(storager, "bootstrap")
+	bootstrapDir := nodeBootstrapDir(t, storager)
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +263,9 @@ func TestJoinBasic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	configFile := filepath.Join(storager, "kurrent.yaml")
+	// 预置身份状态：重跑只校验，不重新生成
+	writeStateID(t, storager, nodeAgentID)
 	if err := joinRun(joinOpts{
 		dir:        storager,
 		configFile: filepath.Join(storager, "kurrent.yaml"),
@@ -221,11 +274,8 @@ func TestJoinBasic(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	configFile := filepath.Join(storager, "kurrent.yaml")
-	// 声明值原样保留（非 forbid 式合并：手工编辑权威；remark = 人工输入的唯一字段）
+	// 声明值原样保留（非 forbid 式合并：手工编辑权威）
 	for path, want := range map[string]string{
-		"metadata/name":           nodeAgentID,
-		"metadata/remark":         "生产存储",
 		"spec/agent/backend":      "nvmet",
 		"spec/agent/advertiseUrl": "https://192.168.1.10:4840",
 		"spec/agent/diskDir":      "/mnt/disks",
@@ -250,7 +300,7 @@ func TestJoinBasic(t *testing.T) {
 	}
 	// 引导凭据在独立文件：join 只写绑节点身份的 token 到 agent.token；
 	// nvmet-host.token 是派生凭据（agent enroll 按能力签发），join 不写也不产生
-	tokenFile := filepath.Join(storager, "bootstrap", "agent.token")
+	tokenFile := filepath.Join(nodeBootstrapDir(t, storager), "agent.token")
 	data, err := os.ReadFile(tokenFile)
 	if err != nil {
 		t.Fatal(err)
@@ -258,43 +308,44 @@ func TestJoinBasic(t *testing.T) {
 	if got := strings.TrimSpace(string(data)); got != "abc123.def456" {
 		t.Errorf("bootstrap/agent.token = %q, want abc123.def456", got)
 	}
-	if _, err := os.Stat(filepath.Join(storager, "bootstrap", "nvmet-host.token")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(nodeBootstrapDir(t, storager), "nvmet-host.token")); !os.IsNotExist(err) {
 		t.Errorf("bootstrap/nvmet-host.token 不应由 join 生成（enroll 派生），stat err = %v", err)
 	}
-	// nvmet 后端 → .env 含两组件 PKI 插值键（nvmet-host 组件目录仍按 agent_id 分配）
-	envFile := filepath.Join(storager, ".env")
-	got := envValues(t, envFile, "KURRENT_AGENT_PKI_HOST")[0]
-	if !strings.HasSuffix(got, "control_plane/state/pki/components/agent-"+nodeAgentID) {
-		t.Errorf("KURRENT_AGENT_PKI_HOST = %s, want suffix components/agent-%s", got, nodeAgentID)
+	// 身份写在状态文件，声明里没有 metadata
+	if got := readStateID(t, storager); got != nodeAgentID {
+		t.Errorf("state/agent.id = %q, want %s", got, nodeAgentID)
 	}
-	got = envValues(t, envFile, "KURRENT_NVMET_PKI_HOST")[0]
-	if !strings.HasSuffix(got, "control_plane/state/pki/components/nvmet-"+nodeAgentID) {
-		t.Errorf("KURRENT_NVMET_PKI_HOST = %s, want suffix components/nvmet-%s", got, nodeAgentID)
+	if got := yamlValue(t, configFile, "metadata"); got != "" {
+		t.Errorf("声明不应包含 metadata，got %q", got)
 	}
-	got = envValues(t, envFile, "KURRENT_DISK_DIR")[0]
-	if want := "/mnt/disks"; got != want {
-		t.Errorf("KURRENT_DISK_DIR = %s, want %s（yml diskDir 同步）", got, want)
-	}
-	// 业务键已迁移到 kurrent.yaml：.env 不再出现
-	for _, key := range []string{
-		"KURRENT_AGENT_ID", "KURRENT_BOOTSTRAP_TOKEN", "KURRENT_BOOTSTRAP_TOKEN_NVMET",
-		"KURRENT_CP_ENROLL_URL", "KURRENT_ADVERTISE_URL", "KURRENT_BACKEND",
-	} {
-		if vals := envValues(t, envFile, key); len(vals) != 0 {
-			t.Errorf("%s 应已迁移到 kurrent.yaml, .env 残留 %v", key, vals)
-		}
-	}
-	// nvmet 后端 → storager/nvmeof 下执行 compose（up + restart storager-agent 收敛）
+	assertNoEnvFile(t, storager)
+	// nvmet 后端 → storager/nvmeof 下执行 compose（up + restart storager-agent 收敛），
+	// 三个宿主挂载路径经进程环境注入（不再写 .env）
 	logData, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "FAKE-DOCKER "+storager+"/nvmeof compose --env-file ../.env up -d") {
+	// 校验镜像的 build 也读 ${VAR:?} 插值：必须同样拿到挂载变量，否则 compose 直接拒绝渲染
+	if !strings.Contains(log, "compose --project-name kurrent-storage build storager-agent KURRENT_DISK_DIR=/mnt/disks") {
+		t.Errorf("docker build 缺插值环境: %s", log)
+	}
+	if !strings.Contains(log, "FAKE-DOCKER "+storager+"/nvmeof compose --project-name kurrent-storage up -d") {
 		t.Errorf("docker 调用缺 up -d: %s", log)
 	}
-	if !strings.Contains(log, "FAKE-DOCKER "+storager+"/nvmeof compose --env-file ../.env restart storager-agent") {
+	if !strings.Contains(log, "FAKE-DOCKER "+storager+"/nvmeof compose --project-name kurrent-storage restart storager-agent") {
 		t.Errorf("docker 调用缺 restart storager-agent: %s", log)
+	}
+	stateRoot := nodeStateRoot(t, storager)
+	for _, want := range []string{
+		"KURRENT_DISK_DIR=/mnt/disks",
+		"KURRENT_AGENT_ID=" + nodeAgentID,
+		"KURRENT_NODE_STATE_DIR=" + filepath.Join(stateRoot, "storager"),
+		"KURRENT_CP_CA_FILE=" + filepath.Join(stateRoot, "storager", "certs", "cp-ca.crt"),
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("docker 环境缺 %s: %s", want, log)
+		}
 	}
 }
 
@@ -315,10 +366,9 @@ func TestJoinFillsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	// 声明留空 → --agent-id 写入（token 绑定的节点身份）
-	name := yamlValue(t, configFile, "metadata", "name")
-	if name != fillAgentID {
-		t.Errorf("metadata/name = %q, want %s", name, fillAgentID)
+	// 首跑从 --agent-id 写入身份状态文件
+	if got := readStateID(t, storager); got != fillAgentID {
+		t.Errorf("state/agent.id = %q, want %s", got, fillAgentID)
 	}
 	for path, want := range map[string]string{
 		"spec/agent/backend":      "nvmet",
@@ -332,12 +382,7 @@ func TestJoinFillsDefaults(t *testing.T) {
 			t.Errorf("kurrent.yaml %s = %q, want %q", path, got, want)
 		}
 	}
-	// .env PKI 键按生成的 agent_id 同步
-	envFile := filepath.Join(storager, ".env")
-	got := envValues(t, envFile, "KURRENT_AGENT_PKI_HOST")[0]
-	if !strings.HasSuffix(got, "components/agent-"+name) {
-		t.Errorf("KURRENT_AGENT_PKI_HOST = %s, want suffix agent-%s", got, name)
-	}
+	assertNoEnvFile(t, storager)
 }
 
 func TestJoinGeneratesConfig(t *testing.T) {
@@ -347,12 +392,10 @@ func TestJoinGeneratesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	name := yamlValue(t, configFile, "metadata", "name")
-	if name != genAgentID {
-		t.Errorf("metadata/name = %q, want %s", name, genAgentID)
+	if got := readStateID(t, storager); got != genAgentID {
+		t.Errorf("state/agent.id = %q, want %s", got, genAgentID)
 	}
 	for path, want := range map[string]string{
-		"metadata/remark":         "",                     // 人工输入的唯一字段：生成时留空（备注）
 		"spec/controlPlane/url":   "https://192.168.1.10", // 命令地址写入声明
 		"spec/agent/backend":      "nvmet",
 		"spec/agent/advertiseUrl": "https://192.168.1.10:4840",
@@ -377,39 +420,38 @@ func TestJoinGeneratesStableID(t *testing.T) {
 	if err := joinRun(opts); err != nil {
 		t.Fatal(err)
 	}
-	if got := yamlValue(t, opts.configFile, "metadata", "name"); got != stableAgentID {
-		t.Errorf("metadata/name = %q, want %s", got, stableAgentID)
+	if got := readStateID(t, storager); got != stableAgentID {
+		t.Errorf("state/agent.id = %q, want %s", got, stableAgentID)
+	}
+	if got := yamlValue(t, opts.configFile, "metadata"); got != "" {
+		t.Errorf("声明不应包含 metadata，got %q", got)
 	}
 }
 
-func TestJoinGeneratesIDWithoutToken(t *testing.T) {
-	// 无 --token（凭据文件已就位）且声明未给身份 → 自动生成 12 位小写 hex 并持久化
+func TestJoinRequiresAgentIDWithoutState(t *testing.T) {
+	// 无状态文件、无 --agent-id：即使 token 已就位也不生成身份（身份在签发 token 时生成）
 	_, _, storager, _ := newFakeRepo(t)
-	bootstrapDir := filepath.Join(storager, "bootstrap")
+	bootstrapDir := nodeBootstrapDir(t, storager)
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bootstrapDir, "agent.token"), []byte("tok.111\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts := joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10"}
-	if err := joinRun(opts); err != nil {
-		t.Fatal(err)
+	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10"})
+	if err == nil || !strings.Contains(err.Error(), "missing node identity") {
+		t.Fatalf("err = %v, want missing node identity", err)
 	}
-	first := yamlValue(t, opts.configFile, "metadata", "name")
-	if !nodeIDRe.MatchString(first) {
-		t.Fatalf("metadata/name = %q, want 12 位 hex 随机标识", first)
+	if _, statErr := os.Stat(filepath.Join(storager, "state", "agent.id")); !os.IsNotExist(statErr) {
+		t.Error("join 不应生成身份状态文件")
 	}
-	if err := joinRun(opts); err != nil {
-		t.Fatal(err)
-	}
-	if second := yamlValue(t, opts.configFile, "metadata", "name"); second != first {
-		t.Errorf("重跑后 metadata/name = %q, want %q（身份持久化不变）", second, first)
+	if _, statErr := os.Stat(filepath.Join(storager, "kurrent.yaml")); !os.IsNotExist(statErr) {
+		t.Error("缺少身份时不应写声明")
 	}
 }
 
 func TestJoinTokenRequiresAgentID(t *testing.T) {
-	// 给了 --token 却无节点身份 → 提前拒绝（否则随机 id 必然与 token 绑定不符）
+	// 给了 --token 却无节点身份 → 提前拒绝
 	_, _, storager, _ := newFakeRepo(t)
 	err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"),
 		cpURL: "https://192.168.1.10", token: "t"})
@@ -418,9 +460,10 @@ func TestJoinTokenRequiresAgentID(t *testing.T) {
 	}
 }
 
-func TestJoinAgentIDConflictsWithDeclaration(t *testing.T) {
-	// 声明身份已存在且与 --agent-id 不一致 → 拒绝（身份须稳定，勿中途改名）
+func TestJoinAgentIDConflictsWithState(t *testing.T) {
+	// 状态文件身份已存在且与 --agent-id 不一致 → 拒绝（身份须稳定，勿中途改）
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +481,7 @@ func TestJoinURLFromCommand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(noURL), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"}); err != nil {
+	if err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t", agentID: nodeAgentID}); err != nil {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
@@ -449,6 +492,7 @@ func TestJoinURLFromCommand(t *testing.T) {
 
 func TestJoinMissingToken(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -461,10 +505,11 @@ func TestJoinMissingToken(t *testing.T) {
 
 func TestJoinTokenFileReuse(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bootstrapDir := filepath.Join(storager, "bootstrap")
+	bootstrapDir := nodeBootstrapDir(t, storager)
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -486,6 +531,7 @@ func TestJoinTokenFileReuse(t *testing.T) {
 
 func TestJoinIdempotentRerun(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -497,24 +543,21 @@ func TestJoinIdempotentRerun(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(storager, "kurrent.yaml")
-	if got := yamlValue(t, configFile, "metadata", "name"); got != nodeAgentID {
-		t.Errorf("kurrent.yaml name = %q, want %s", got, nodeAgentID)
+	if got := readStateID(t, storager); got != nodeAgentID {
+		t.Errorf("state/agent.id = %q, want %s", got, nodeAgentID)
 	}
 	if got := yamlValue(t, configFile, "spec", "agent", "diskDir"); got != "/mnt/disks" {
 		t.Errorf("diskDir = %q, want /mnt/disks（手工业务键保留）", got)
 	}
 	// token 覆盖写（yml 不含 token——token 在独立凭据文件）
-	data, err := os.ReadFile(filepath.Join(storager, "bootstrap", "agent.token"))
+	data, err := os.ReadFile(filepath.Join(nodeBootstrapDir(t, storager), "agent.token"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(string(data)); got != "bbb.222" {
 		t.Errorf("agent.token = %q, want bbb.222（重跑覆盖）", got)
 	}
-	envFile := filepath.Join(storager, ".env")
-	if vals := envValues(t, envFile, "KURRENT_AGENT_PKI_HOST"); len(vals) != 1 {
-		t.Errorf("KURRENT_AGENT_PKI_HOST 出现 %d 次, want 1（幂等不堆积）: %v", len(vals), vals)
-	}
+	assertNoEnvFile(t, storager)
 }
 
 func TestJoinAppliesExternalConfig(t *testing.T) {
@@ -540,11 +583,10 @@ func TestJoinAppliesExternalConfig(t *testing.T) {
 func TestJoinPreservesUnknownFields(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
 	configFile := filepath.Join(storager, "kurrent.yaml")
+	writeStateID(t, storager, "aabbccddeeff")
 	// 预置带未知字段的既有配置（模拟手工编辑）
 	if err := os.WriteFile(configFile, []byte(`apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: aabbccddeeff
 spec:
   agent:
     diskDir: /mnt/disks
@@ -575,6 +617,7 @@ spec:
 
 func TestJoinInvalidBackend(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	bad := strings.Replace(nodeYAML, "backend: nvmet", "backend: hacker", 1)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(bad), 0o644); err != nil {
 		t.Fatal(err)
@@ -585,9 +628,9 @@ func TestJoinInvalidBackend(t *testing.T) {
 	}
 }
 
-func TestJoinRejectsNonHexName(t *testing.T) {
-	// 节点身份只接受 12 位小写 hex：旧式可读名、大写、长度不符与非法字符都拒绝。
-	for name, badName := range map[string]string{
+func TestJoinRejectsInvalidStateID(t *testing.T) {
+	// 身份状态文件只接受 12 位小写 hex：旧式可读名、大写、长度不符与非法字符都拒绝。
+	for name, badID := range map[string]string{
 		"legacy readable": "storage-01",
 		"uppercase hex":   "3F2A9C1D8B7E",
 		"short hex":       "3f2a9c1d8b",
@@ -595,13 +638,10 @@ func TestJoinRejectsNonHexName(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, storager, _ := newFakeRepo(t)
-			bad := strings.Replace(nodeYAML, "name: "+nodeAgentID, `name: "`+badName+`"`, 1)
-			if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(bad), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeStateID(t, storager, badID)
 			err := joinRun(joinOpts{dir: storager, configFile: filepath.Join(storager, "kurrent.yaml"), cpURL: "https://192.168.1.10", token: "t"})
-			if err == nil || !strings.Contains(err.Error(), "12 lowercase hex characters") {
-				t.Fatalf("err = %v, want 12 位小写十六进制报错", err)
+			if err == nil || !strings.Contains(err.Error(), "invalid node identity") {
+				t.Fatalf("err = %v, want invalid node identity", err)
 			}
 		})
 	}
@@ -621,6 +661,7 @@ func TestJoinNvmetHostPreflightRejects(t *testing.T) {
 	// 报错列出缺失项并指路 host-prepare.sh；compose 不启动（无 docker 调用）
 	_, _, storager, logFile := newFakeRepo(t)
 	breakHost(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -658,6 +699,7 @@ func TestJoinNvmetHostPreflightTlshd(t *testing.T) {
 			old := hostEnvPaths.tlshdVersion
 			hostEnvPaths.tlshdVersion = tc.version
 			t.Cleanup(func() { hostEnvPaths.tlshdVersion = old })
+			writeStateID(t, storager, nodeAgentID)
 			if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -727,6 +769,7 @@ func TestJoinHostPreflightSkippedForStgt(t *testing.T) {
 	// stgt/lio 后端无 nvmet 宿主前置要求：前置未就绪也照常收敛启动（iscsi compose）
 	_, _, storager, logFile := newFakeRepo(t)
 	breakHost(t)
+	writeStateID(t, storager, nodeAgentID)
 	cfg := strings.Replace(nodeYAML, "backend: nvmet", "backend: stgt", 1)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -798,6 +841,7 @@ func TestResolveStoragerDir(t *testing.T) {
 
 func TestJoinWaitsForNvmetTokenAndRestartsHost(t *testing.T) {
 	_, _, storager, logFile := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -824,13 +868,14 @@ func TestJoinWaitsForNvmetTokenAndRestartsHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "compose --env-file ../.env restart nvmet-host") {
+	if !strings.Contains(string(logData), "compose --project-name kurrent-storage restart nvmet-host") {
 		t.Errorf("docker 调用缺 restart nvmet-host: %s", logData)
 	}
 }
 
 func TestJoinFailsWhenNvmetTokenNeverAppears(t *testing.T) {
 	_, _, storager, _ := newFakeRepo(t)
+	writeStateID(t, storager, nodeAgentID)
 	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -882,8 +927,11 @@ func TestJoinRejectsInvalidDeclarationBeforeWrite(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(storager, "kurrent.yaml")); !os.IsNotExist(statErr) {
 		t.Error("校验失败却写入了 kurrent.yaml")
 	}
-	if _, statErr := os.Stat(filepath.Join(storager, "bootstrap", "agent.token")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(nodeBootstrapDir(t, storager), "agent.token")); !os.IsNotExist(statErr) {
 		t.Error("校验失败却写入了 bootstrap token")
+	}
+	if _, statErr := os.Stat(filepath.Join(storager, "state", "agent.id")); !os.IsNotExist(statErr) {
+		t.Error("校验失败却写入了身份状态")
 	}
 }
 
@@ -909,7 +957,7 @@ func TestJoinIPv6CPURLAndAdvertise(t *testing.T) {
 // TestNewNodeDeclarationQuotesPaths：生成模板经 yaml.Marshal，路径里的 #/: 不破坏结构。
 func TestNewNodeDeclarationQuotesPaths(t *testing.T) {
 	diskDir := "/tmp/a # b: c"
-	data, err := newNodeDeclaration("112233aabbcc", "https://cp.example.com/proxy", diskDir)
+	data, err := newNodeDeclaration("https://cp.example.com/proxy", diskDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,7 +968,7 @@ func TestNewNodeDeclarationQuotesPaths(t *testing.T) {
 	if got := nodeValue(&root, "spec", "agent", "diskDir"); got != diskDir {
 		t.Fatalf("diskDir = %q, want %q", got, diskDir)
 	}
-	if got := nodeValue(&root, "metadata", "name"); got != "112233aabbcc" {
-		t.Fatalf("metadata.name = %q", got)
+	if got := nodeValue(&root, "metadata"); got != "" {
+		t.Fatalf("generated declaration must not carry metadata, got %q", got)
 	}
 }

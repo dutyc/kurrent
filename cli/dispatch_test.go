@@ -1,3 +1,4 @@
+// 跨命令的解析、分发与“用法错误零副作用”回归。
 package main
 
 import (
@@ -243,6 +244,35 @@ func TestTokenCreateBootstrap(t *testing.T) {
 	}
 	if strings.Contains(stdout, "/api/cp") {
 		t.Fatalf("join 命令不应带 /api/cp:\n%s", stdout)
+	}
+}
+
+func TestTokenCreateBootstrapOmitsAgentID(t *testing.T) {
+	isolateCLI(t)
+	stub := newAPIStub(t, 201, `{"token":"abcdef.0123456789abcdef","expires_at":"2026-11-01T12:00:00Z","agent_id":"0a1b2c3d4e5f","uses":0,"max_uses":1}`)
+	code, stdout, stderr := captureCLI(t, func() {
+		tokenCreate([]string{"--cp-url", "https://cp.example.com"})
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	body := decodeBody(t, stub.Calls()[0])
+	if _, ok := body["agent_id"]; ok {
+		t.Fatalf("未指定 --agent-id 时不应自行生成身份：%v", body)
+	}
+	if !strings.Contains(stdout, "--agent-id 0a1b2c3d4e5f") {
+		t.Fatalf("join 命令应使用控制面返回的身份:\n%s", stdout)
+	}
+}
+
+func TestTokenCreateBootstrapRejectsAgentIDMismatch(t *testing.T) {
+	isolateCLI(t)
+	newAPIStub(t, 201, `{"token":"abcdef.0123456789abcdef","expires_at":"2026-11-01T12:00:00Z","agent_id":"0a1b2c3d4e5f","uses":0,"max_uses":1}`)
+	code, _, stderr := captureCLI(t, func() {
+		tokenCreate([]string{"--agent-id", "0123456789ab", "--cp-url", "https://cp.example.com"})
+	})
+	if code != 1 || !strings.Contains(stderr, "server returned agent_id") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 }
 

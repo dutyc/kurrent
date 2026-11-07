@@ -18,8 +18,9 @@ Usage:
 Global options (must precede the command group; defaults come from
 KURRENT_CREDENTIALS / KURRENT_CP_URL / KURRENT_CP_TOKEN):
   --credentials  Management credential file (admin client certificate over 443 mTLS;
-                 auto-discovered: control_plane/state/admin.conf, then next to the
-                 executable, then ~/.kurrent/admin.conf)
+                 auto-discovered from the deployment record, then
+                 control_plane/state/admin.conf, then next to the executable, then
+                 ~/.kurrent/admin.conf)
   --server       Control-plane API root (overrides the server in the credential file;
                  required with --token when no management credential is found)
   --token        Management token (from kurrent token create --usage admin)
@@ -38,10 +39,6 @@ Commands:
                [--uses N] [--scope admin,readonly,enroll] [--ttl 24h]
                                               Issue a credential.
                                               bootstrap (default): --agent-id (12 lowercase hex
-                                              characters; generated when omitted), --cp-url,
-                                              --uses (1..1000, bounded by the control-plane
-                                              bootstrapTokenMaxUses setting); descriptive names
-                                              belong in metadata.remark.
                                               admin: --scope (admin/readonly/enroll), --ttl
                                               (default 24h; bounded by tokenMaxTtlHours,
                                               default 720h)
@@ -77,15 +74,24 @@ Commands:
                                               kind=NodeConfiguration selects the node declaration
   config status                               Runtime declaration, configHash, dnsmasq.conf and
                                               server-certificate drift (via the management API)
-  init [--config PATH] [--dir PATH]           Initialize the control plane: validate the
-                                              declaration and converge services; roll back the
-                                              previous declaration and exit non-zero when the
-                                              health check fails
+  init [--config PATH] [--dir PATH] [--state-dir PATH] [--adopt-state]
+                                              Initialize the control plane: preflight, validate
+                                              the declaration, converge services, install the
+                                              bootstrapped management credential and verify it
+                                              with mTLS; rolls back the previous declaration on
+                                              health failure
   join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]
+       [--state-dir PATH] [--cp-ca PATH] [--adopt-state]
                                               Join a node: generate the declaration when missing
                                               or merge into the existing one and sync the address;
                                               validate inside the agent image before writing, then
                                               converge and start the agent (idempotent)
+  deployment show [-o yaml|env]               Show the deployment record, repo/state roots and
+                                              the compose environment for manual runs
+  host check [--role control|storage|all] [--dir REPO] [-o text|json] [--strict]
+                                              Read-only host baseline (listeners, Docker exposure,
+                                              firewall, credential modes, nvmet prerequisites);
+                                              exit 1 on FAIL (or SKIP with --strict)
   workers list [-o table|json]                Worker ledger (read-only)
   workers get <id>                            Worker details (JSON)
   workers credential show <id> [-o table|json] Show the NVMe-oF authentication key and push status
@@ -179,8 +185,6 @@ const tokenGroupUsage = `Usage:
 const tokenCreateUsage = `Usage: kurrent token create [--usage bootstrap|admin] [flags]
 
   bootstrap (default):
-    --agent-id ID      Node identity to bind (12 lowercase hex characters;
-                       generated when omitted)
     --cp-url URL       Control-plane entry written into the join command
                        (http(s)://; a mistakenly pasted /api/cp suffix is removed)
     --uses N           Maximum uses, 1..1000 and not above the control-plane
@@ -325,24 +329,46 @@ const configStatusUsage = `Usage: kurrent config status
   server-certificate drift.
 `
 
-const initUsage = `Usage: kurrent init [--config PATH] [--dir PATH]
+const initUsage = `Usage: kurrent init [--config PATH] [--dir PATH] [--state-dir PATH] [--adopt-state]
 
-  --config   Control-plane declaration file (default <dir>/kurrent.yaml)
-  --dir      control_plane directory (default: discovered from the cwd)
+  --config       Control-plane declaration file (default <dir>/kurrent.yaml)
+  --dir          Checkout root or control_plane directory (default: deployment
+                 record, then discovered from the cwd)
+  --state-dir    State root outside the repository (default: KURRENT_STATE_DIR,
+                 then the deployment record, then ~/.local/state/kurrent)
+  --adopt-state  Migrate the legacy in-repository runtime state into the state root
 
-  Applies the declaration and converges services after full validation; rolls
-  back the previous declaration and exits non-zero when the health check fails.
+  First run is a transaction: it prepares the state root, starts the stack, waits
+  for the one-shot management credential exchange, installs ~/.kurrent/admin.conf
+  and verifies it with mTLS GET /whoami before reporting success.
 `
 
 const joinUsage = `Usage: kurrent join <cp-url> [--agent-id ID] [--config PATH] [--token T] [--dir PATH]
+                   [--state-dir PATH] [--cp-ca PATH] [--adopt-state]
 
   <cp-url>       Control-plane HTTPS entry (already carried by the command printed
                  by token create; a mistakenly pasted /api/cp suffix is removed)
-  --agent-id     Node identity (12 lowercase hex characters; the identity bound
-                 to the token)
+  --agent-id     Node identity (12 lowercase hex characters; required on the first
+                 run, must match <state>/storager/state/agent.id on reruns)
   --config       Node declaration file (default <dir>/kurrent.yaml)
-  --token        Bootstrap token (when omitted, bootstrap/agent.token must exist)
-  --dir          storager directory (required when running outside the repository)
+  --token        Bootstrap token (when omitted, the node bootstrap token file must exist)
+  --dir          Checkout root or storager directory (required when running outside
+                 the repository)
+  --state-dir    Node state root outside the repository (default: KURRENT_STATE_DIR,
+                 then the deployment record, then ~/.local/state/kurrent)
+  --cp-ca        Control-plane trust anchor (default: this host's control-plane
+                 state/certs/server.crt, then the existing node copy)
+  --adopt-state  Migrate the legacy in-repository node state into the state root
+`
+
+const deploymentGroupUsage = `Usage:
+  kurrent deployment show [-o yaml|env]    Show the deployment record and effective paths
+`
+
+const deploymentShowUsage = `Usage: kurrent deployment show [-o yaml|env]
+
+  -o yaml   Deployment record (default)
+  -o env    Shell exports for manual docker compose (state roots, CP CA, disk directory)
 `
 
 const workersGroupUsage = `Usage:
@@ -445,6 +471,10 @@ var helpTopics = map[string]string{
 	"config status":             configStatusUsage,
 	"init":                      initUsage,
 	"join":                      joinUsage,
+	"deployment":                deploymentGroupUsage,
+	"deployment show":           deploymentShowUsage,
+	"host":                      hostGroupUsage,
+	"host check":                hostCheckUsage,
 	"workers":                   workersGroupUsage,
 	"workers list":              workersListUsage,
 	"workers get":               workersGetUsage,
