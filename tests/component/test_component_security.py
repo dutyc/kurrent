@@ -152,6 +152,25 @@ def test_write_crls_validates_issuer_and_updates_store(tmp_path):
         }, store)
 
 
+def test_write_crls_aligns_owner_to_state_directory(tmp_path, monkeypatch):
+    """CRL 由 root 容器写入宿主挂载：每次落盘后都要把属主对齐状态目录。"""
+    nodes_key, nodes_ca = _ca("kurrent-ca-nodes")
+    control_key, control_ca = _ca("kurrent-ca-control")
+    (tmp_path / "ca-nodes.crt").write_bytes(nodes_ca.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "ca-control.crt").write_bytes(control_ca.public_bytes(serialization.Encoding.PEM))
+    calls = []
+    for mod in (agent_security, nvmet_security):
+        monkeypatch.setattr(mod, "_align_owner", lambda path, ref: calls.append((path.name, ref)))
+        mod.write_crls(tmp_path, {
+            "nodes_crl": _crl(nodes_key, nodes_ca),
+            "control_crl": _crl(control_key, control_ca),
+        }, mod.CrlStore())
+    assert sorted(calls) == [
+        ("control.crl", tmp_path), ("control.crl", tmp_path),
+        ("nodes.crl", tmp_path), ("nodes.crl", tmp_path),
+    ]
+
+
 def test_peer_hook_is_idempotent():
     from uvicorn.protocols.http import h11_impl
     agent_security.install_peer_cert_hook()

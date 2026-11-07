@@ -4,8 +4,10 @@
 """
 
 import datetime as _dt
+import os
 import re
 import secrets
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -21,6 +23,43 @@ OS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 OS_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 OS_TAG_RE = re.compile(r"^[0-9a-f]{12}$")
 HEX_MAC_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def align_owner(path: Path, ref: Path | None = None) -> None:
+    """把文件属主对齐参考目录（缺省为所在目录）。
+
+    容器以 root 写入宿主挂载的状态根时，目录属于操作员、新文件却归 root；
+    不对齐会让宿主侧的备份/迁移无法读取。bind mount 的单文件（agents.yml）父目录
+    是镜像内的 root 目录，必须显式传状态根作参考。同属主时不做任何事。
+    """
+    path = Path(path)
+    anchor = Path(ref) if ref is not None else path.parent
+    try:
+        st = anchor.stat()
+        current = path.stat()
+        if current.st_uid == st.st_uid and current.st_gid == st.st_gid:
+            return
+        os.chown(path, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+
+
+def align_tree(root: Path) -> None:
+    """递归把状态树内的属主对齐根目录（容器启动时修正历史 root 属主）。"""
+    root = Path(root)
+    try:
+        anchor = root.stat()
+    except OSError:
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            target = Path(dirpath) / name
+            try:
+                st = target.stat()
+                if st.st_uid != anchor.st_uid or st.st_gid != anchor.st_gid:
+                    os.chown(target, anchor.st_uid, anchor.st_gid)
+            except OSError:
+                pass
 
 
 def canonical_id(value: str) -> str:

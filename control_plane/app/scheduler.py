@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import yaml
 
 from .agent_client import AgentClient, AgentConfig
+from .utils import align_owner
 
 
 class AgentRegistry:
@@ -79,6 +80,7 @@ class AgentRegistry:
         }
         with self.agents_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        align_owner(self.agents_file)
 
     def update(
         self,
@@ -109,6 +111,7 @@ class AgentRegistry:
         }
         with self.agents_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        align_owner(self.agents_file)
 
     def refresh_from_declaration(
         self,
@@ -160,6 +163,7 @@ class AgentRegistry:
         del agents_data[agent_id]
         with self.agents_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        align_owner(self.agents_file)
 
     def client(self, agent: AgentConfig) -> AgentClient:
         return AgentClient(agent, self.timeout)

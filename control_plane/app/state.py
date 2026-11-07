@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from .utils import align_owner
+
 # 当前请求身份（app/auth.py 认证器链写入）：OperationLog.record 自动附加审计 actor，
 # 各业务调用点无需逐个传递（无认证上下文的内部调用记空）
 current_actor: contextvars.ContextVar[str] = contextvars.ContextVar("kurrent_actor", default="")
@@ -253,6 +255,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        align_owner(Path(tmp_name))
         os.replace(tmp_name, path)
     except Exception:
         try:

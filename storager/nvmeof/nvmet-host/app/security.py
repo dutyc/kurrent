@@ -24,6 +24,18 @@ from fastapi import HTTPException
 
 log = logging.getLogger("nvmet-host.security")
 
+
+def _align_owner(path: Path, ref: Path) -> None:
+    """把 CRL 属主对齐所在状态目录（容器写宿主挂载时文件会归 root）。"""
+    try:
+        st = ref.stat()
+        current = path.stat()
+        if current.st_uid == st.st_uid and current.st_gid == st.st_gid:
+            return
+        os.chown(path, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+
 CRL_CA_FILES = {"nodes": "ca-nodes.crt", "control": "ca-control.crt"}
 INSECURE_ENV = "KURRENT_COMPONENT_INSECURE"
 REFRESH_ENV = "KURRENT_COMPONENT_CRL_REFRESH_SECONDS"
@@ -177,6 +189,7 @@ def write_crls(pki_dir: Path, data: dict, store: CrlStore) -> None:
         tmp.write_text(pem, encoding="utf-8")
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
+        _align_owner(path, Path(pki_dir))
         store.update(kind, crl)
 
 

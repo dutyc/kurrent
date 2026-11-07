@@ -7,12 +7,13 @@ app/auth.py（认证器链/RBAC/会话）、app/trust.py（注册窗口/强制/�
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
 from . import (audit, audit_middleware, bootstrap_exchange, cert_bootstrap, config,
-               dnsmasq_conf, maintenance, nginx_reload, pki, runtime_status, users)
+               dnsmasq_conf, maintenance, nginx_reload, pki, runtime_status, users, utils)
 from .principal import enforce_principal
 from .routers import (agents, boot, boot_assets, certs, devices, enroll,
                       operations, session, settings, tokens, workers)
@@ -114,6 +115,13 @@ try:
     # clients.crl（users + nodes），即使尚无吊销条目。
     pki.write_nginx_crl(config.settings.pki_dir)
     pki.ensure_session_key(config.settings.session_key_file)
+    # 容器以 root 运行：把本轮新建的目录/文件属主对齐宿主状态根所有者（目录 0700 也要修，
+    # 否则宿主用户无法进入子目录做备份/迁移）。agents.yml 是单文件 bind mount，
+    # 容器内父目录属镜像 root，需显式以状态根为参考。
+    state_root = Path(config.settings.pki_dir).parent
+    for root in (state_root, Path(config.DEFAULT_DNSMASQ_CONF).parent, config.settings.bootstrap_dir):
+        utils.align_tree(root)
+    utils.align_owner(config.settings.agents_file, ref=state_root)
 except Exception as exc:
     log.exception("pki: failed to ensure component PKI")
     runtime_status.record_error("组件 PKI 初始化失败", exc)

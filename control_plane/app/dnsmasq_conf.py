@@ -11,6 +11,8 @@ import ipaddress
 import logging
 from pathlib import Path
 
+from .utils import align_owner
+
 log = logging.getLogger("control-plane")
 
 # 固定部分模板（dnsmasq 容器视角路径）：TFTP/架构识别/引导文件分发/hosts 台账/日志
@@ -72,5 +74,6 @@ def ensure_dnsmasq_conf(path: str | Path) -> bool:
     if conf_path.is_file() and conf_path.read_text(encoding="utf-8") == rendered:
         return False
     conf_path.write_text(rendered, encoding="utf-8")
+    align_owner(conf_path)
     log.info("dnsmasq: rendered %s from spec.networking", conf_path)
     return True

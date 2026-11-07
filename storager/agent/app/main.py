@@ -55,7 +55,10 @@ LOG_FILE = DEFAULT_LOG_FILE  # 容器内路径（compose 挂载目标，部署�
 
 # 组件 PKI 引导/轮换：证书未就绪则抛错阻断启动（uvicorn 起服务前）
 from .pki_client import ensure_pki  # noqa: E402
+from .ownership import align_tree  # noqa: E402
 ensure_pki()
+for _mount in (DEFAULT_PKI_DIR, Path(DEFAULT_BOOTSTRAP_TOKEN_FILE).parent, Path(DEFAULT_LOG_FILE).parent):
+    align_tree(_mount)
 
 
 # ============================ 框架层：文件操作 ============================

@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from .config import settings
+from .utils import align_owner
 
 # last_seen 节流：每个会话最多每分钟回写一次（滑动续期独立处理）
 _TOUCH_INTERVAL_SECONDS = 60
@@ -59,6 +60,7 @@ def _save(doc: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=True), encoding="utf-8")
     os.chmod(tmp, 0o600)
+    align_owner(tmp)
     os.replace(tmp, path)
 
 

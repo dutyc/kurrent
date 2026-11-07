@@ -45,12 +45,15 @@ from .config import (  # noqa: E402
     DEFAULT_HOST_SOCKET, DEFAULT_PKI_DIR,
 )
 from .pki_client import build_client, ensure_pki
+from .ownership import align_tree
 from . import security
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # 组件 PKI 引导/轮换：证书未就绪抛错阻断启动（与 storager-agent 同语义）
 ensure_pki()
+for _mount in (DEFAULT_PKI_DIR, Path(DEFAULT_BOOTSTRAP_TOKEN_FILE).parent):
+    align_tree(_mount)
 
 log = logging.getLogger("nvmet-host")
 

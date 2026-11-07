@@ -162,7 +162,9 @@ def ensure_ca(pki_dir: Path, kind: str = "nodes") -> tuple:
         )
     )
     os.chmod(key_path, 0o600)
+    _align_owner(key_path)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    _align_owner(cert_path)
     log.info("pki: generated %s CA (cn=%s, %d days)", kind, cn, CA_DAYS)
     from . import audit
     audit.alarm("ca_generated", detail=f"{kind} CA {cn}", route="pki")
@@ -181,6 +183,7 @@ def write_nginx_trust_bundle(pki_dir: Path) -> Path:
     tmp = target.with_suffix(".pem.tmp")
     tmp.write_bytes(data)
     os.chmod(tmp, 0o644)
+    _align_owner(tmp)
     os.replace(tmp, target)
     return target
 
@@ -227,6 +230,7 @@ def _save_user_registry(pki_dir: Path, registry: dict) -> None:
     tmp = path.with_suffix(".yml.tmp")
     tmp.write_text(yaml.safe_dump(registry, allow_unicode=True, sort_keys=True), encoding="utf-8")
     os.chmod(tmp, 0o600)
+    _align_owner(tmp)
     os.replace(tmp, path)
 
 
@@ -317,6 +321,7 @@ def issue_user_cert(pki_dir: Path, cn: str, csr_pem: bytes, days: int | None = N
     cert_path = cert_dir / f"{serial}.crt"
     cert_path.write_bytes(cert_pem)
     os.chmod(cert_path, 0o644)
+    _align_owner(cert_path)
     register_user_cert(pki_dir, cert_path)
     from . import audit
     audit.alarm("user_cert_issued", detail=f"cn={cn}, serial={serial}, days={days}",
@@ -401,6 +406,7 @@ def _save_component_registry(pki_dir: Path, registry: dict) -> None:
     tmp = path.with_suffix(".yml.tmp")
     tmp.write_text(yaml.safe_dump(registry, allow_unicode=True, sort_keys=True), encoding="utf-8")
     os.chmod(tmp, 0o600)
+    _align_owner(tmp)
     os.replace(tmp, path)
 
 
@@ -535,6 +541,7 @@ def _save_control_registry(pki_dir: Path, registry: dict) -> None:
     tmp = path.with_suffix(".yml.tmp")
     tmp.write_text(yaml.safe_dump(registry, allow_unicode=True, sort_keys=True), encoding="utf-8")
     os.chmod(tmp, 0o600)
+    _align_owner(tmp)
     os.replace(tmp, path)
 
 
@@ -728,6 +735,7 @@ def write_nginx_crl(pki_dir: Path) -> Path:
             tmp = path.with_suffix(".crl.tmp")
             tmp.write_bytes(data)
             os.chmod(tmp, 0o644)
+            _align_owner(tmp)
             os.replace(tmp, path)
         return target_dir / "clients.crl"
 
@@ -784,7 +792,9 @@ def ensure_control_plane_client_cert(pki_dir: Path, ca_cert, ca_key,
         encryption_algorithm=serialization.NoEncryption(),
     ))
     os.chmod(key_path, 0o600)
+    _align_owner(key_path)
     cert_path.write_bytes(cert)
+    _align_owner(cert_path)
     register_control_cert(pki_dir, cert)
     log.info("pki: control-plane client cert ready: %s", cert_path)
     return cert_path, key_path
@@ -825,7 +835,9 @@ def ensure_admin_credentials(pki_dir: Path, ca_cert, ca_key, admin_conf_path: Pa
             encryption_algorithm=serialization.NoEncryption(),
         ))
         os.chmod(key_path, 0o600)
+        _align_owner(key_path)
         cert_path.write_bytes(cert)
+        _align_owner(cert_path)
         log.info("pki: admin client cert issued (cn=%s, %d days)", cn, days)
         from . import audit
         audit.alarm("admin_cert_issued", detail=f"cn={cn}, days={days}", route="pki",
@@ -855,6 +867,11 @@ def _chown_like(path: Path, ref: Path) -> None:
         os.chown(path, st.st_uid, st.st_gid)
     except OSError:
         pass
+
+
+def _align_owner(path: Path) -> None:
+    """把文件属主对齐所在目录（容器内 root 写入宿主状态根时归操作员）。"""
+    _chown_like(path, path.parent)
 
 
 def _write_admin_conf(admin_conf_path: Path, cert_path: Path, key_path: Path,
@@ -922,6 +939,7 @@ def ensure_session_key(path: Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(key)
     os.chmod(path, 0o600)
+    _align_owner(path)
     log.info("pki: session signing key generated: %s", path)
     return key
 
@@ -1068,7 +1086,7 @@ def parse_dn_cn(dn: str) -> str:
 #   自动签发随响应下发（能力上报驱动，签发不预知后端）
 
 # 节点身份 = 12 位小写 hex（与盘 os_tag / Docker 容器短 ID 同构）：机器身份不承载
-# 人类语义，描述性名称写入节点声明 metadata.remark。
+# 人类语义，描述性名称归控制面台账（agents.yml 的 remark）。
 
 
 def _token_file(pki_dir: Path) -> Path:
@@ -1093,6 +1111,7 @@ def _save_tokens(pki_dir: Path, tokens: dict) -> None:
     pki_dir.mkdir(parents=True, exist_ok=True)
     tmp = _token_file(pki_dir).with_suffix(".yml.tmp")
     tmp.write_text(yaml.safe_dump(tokens, allow_unicode=True, sort_keys=True), encoding="utf-8")
+    _align_owner(tmp)
     os.replace(tmp, _token_file(pki_dir))
     os.chmod(_token_file(pki_dir), 0o600)
 
@@ -1133,6 +1152,14 @@ def groups_for_scopes(scopes: list[str]) -> list[str]:
     if "readonly" in scopes:
         return [config.VIEWER_GROUP]
     return ["enroll"]
+
+
+def generate_agent_id() -> str:
+    """控制面生成节点身份：12 位小写 hex（与盘 os_tag、短容器 ID 同构）。
+
+    节点身份属于控制面分配的资源；CLI/WebUI 只是 API 客户端，不自行生成。
+    """
+    return secrets.token_hex(6)
 
 
 def issue_bootstrap_token(pki_dir: Path, agent_id: str = "", component: str = "agent",
