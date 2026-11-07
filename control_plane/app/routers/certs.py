@@ -36,6 +36,19 @@ class IssueUserCertRequest(BaseModel):
     days: int | None = None
 
 
+def _serial_value(raw: str) -> int | None:
+    """把 serial（hex，可带 0x、任意大小写）解析为整数；非法返回 None。"""
+    text = str(raw or "").strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not text:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
 @router.post("/pki/users/{cn}", status_code=201)
 def issue_user_cert(cn: str, request: Request, req: IssueUserCertRequest | None = None) -> dict:
     """按 CSR 为已登记用户签发证书（私钥不经过控制面）。
@@ -84,13 +97,17 @@ def revoke_user_cert(cn: str, request: Request, reason: str = "unspecified",
     """吊销某用户的证书：标记吊销 + 重签 CRL + reload nginx + 踢掉相关会话。
 
     serial 省略 = 吊销该 CN 的全部未吊销证书；给出时只吊销该序列号（只踢绑定
-    该证书指纹的会话）。不能吊销当前请求身份自己的证书（避免把自己锁在门外）；
+    该证书指纹的会话）。不能吊销当前请求身份正在使用的那张证书（避免把自己锁在
+    门外）；同名主体的其他序列号允许显式按 serial 吊销（轮换后作废旧证书）。
     不存在未吊销证书返回 404；CRL 已写入但 nginx reload 失败返回 500（吊销尚未生效）。
     """
     ident: Identity = request.state.identity
     cn = cn.strip()
     if ident.name == cn:
-        raise HTTPException(status_code=400, detail="refusing to revoke the current principal's certificate")
+        current = _serial_value(ident.serial)
+        target = _serial_value(serial) if serial else None
+        if current is None or target is None or target == current:
+            raise HTTPException(status_code=400, detail="refusing to revoke the current principal's certificate")
     try:
         revoked = pki.revoke_user_cert(settings.pki_dir, cn, reason, serial=serial)
     except ValueError as exc:

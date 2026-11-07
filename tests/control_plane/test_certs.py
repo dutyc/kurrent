@@ -186,6 +186,33 @@ def test_cannot_revoke_own_certificate():
     assert exc.value.status_code == 400
 
 
+def test_cannot_revoke_current_certificate_serial():
+    """只保护当前请求正在使用的那张证书：同名但不同序列号不算锁死自己。"""
+    request = SimpleNamespace(state=SimpleNamespace(
+        identity=Identity("alice", ["admin"], "cert", serial="0xFF")))
+    for serial in (None, "ff", "0x00ff"):
+        with pytest.raises(HTTPException) as exc:
+            certs_mod.revoke_user_cert("alice", request, serial=serial)
+        assert exc.value.status_code == 400
+
+
+def test_revoke_own_superseded_serial_allowed(monkeypatch):
+    """轮换后可以用同一管理员身份作废旧序列号（serial 显式指向别的证书）。"""
+    calls = []
+    monkeypatch.setattr(certs_mod.pki, "revoke_user_cert",
+                        lambda pki_dir, cn, reason, serial=None:
+                        calls.append((cn, reason, serial)) or [{"serial": "ab", "fingerprint": "f"}])
+    monkeypatch.setattr(certs_mod, "reload_nginx", lambda: None)
+    monkeypatch.setattr(certs_mod, "record", lambda *a, **k: None)
+    monkeypatch.setattr(certs_mod.sessions, "revoke_by_cert_fp", lambda fp: 0)
+    request = SimpleNamespace(state=SimpleNamespace(
+        identity=Identity("alice", ["admin"], "cert", serial="ff")),
+        headers={}, client=None)
+    body = certs_mod.revoke_user_cert("alice", request, reason="superseded", serial="AB")
+    assert body["serials"] == ["ab"]
+    assert calls == [("alice", "superseded", "AB")]
+
+
 def test_reload_failure_reports_500_but_crl_kept(client, monkeypatch):
     cert_path = _issue_user("erin-crl")
     cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
