@@ -1477,7 +1477,7 @@ def _derive_tls_psk(secret: str) -> str:
     HMAC-SHA256 域分离派生（RFC 2104 PRF）——与 DHHC 认证共用同一把源密钥，**轮换认证
     密钥即同时轮换 TLS-PSK**，因此推送台账的期望指纹不必扩展（PSK 是密钥的纯函数，
     `_push_one` 每次现算）。目标端（nvmet-host keyring）与发起端（initramfs /boot-vars）
-    用同一串，identity 见 blueprint/nvme-tcp-tls-in-kernel.md §5。"""
+    用同一串，identity 见 .local/blueprint/nvme-tcp-tls-in-kernel.md §5。"""
     raw = base64.b64decode(secret.split(":", 2)[2], validate=True)[:32]
     return hmac.new(raw, b"kurrent-nvme-tls-psk-v1", hashlib.sha256).hexdigest()
 

@@ -104,7 +104,7 @@ class CredentialStore:
     """NVMe-oF 认证凭据库（credentials.yml）：键 = worker_id（按 Worker 跟盘裁定，2026-08-22）。
     原子写 + 线程锁，模式同 FileStateStore/DeviceStore。DHHC-1 明文（启动注入必需）与
     secret_hash（审计比对）并存——与控制面「只存哈希」原则的差异及理由见
-    blueprint/nvmeof-credential-design.md 4.1 秘密分类。"""
+    .local/blueprint/nvmeof-credential-design.md 4.1 秘密分类。"""
 
     def __init__(self, credentials_file: Path):
         self.credentials_file = credentials_file

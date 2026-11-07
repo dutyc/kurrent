@@ -12,7 +12,7 @@
 → 宿主服务直写 configfs（全局 hosts/<hostnqn>/dhchap_key 写密钥即启用认证，
   再 symlink 挂到子系统 allowed_hosts/ 完成准入）。
 reconcile() 幂等重放：Agent 启动（scan 后）+ 周期后台线程，覆盖宿主服务不可达窗口。
-契约：blueprint/nvmeof-credential-design.md 第 6 节。
+契约：.local/blueprint/nvmeof-credential-design.md 第 6 节。
 """
 
 import datetime as _dt
@@ -435,7 +435,7 @@ class NvmetBackend:
             caps = self.host.capabilities()
         except NvmetHostError as exc:
             raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
-        # 宿主服务不知道 KURRENT_NQN_BASE：本地补 base_nqn（控制面建盘生成盘 NQN 依赖此键）
+        # 宿主服务不知道节点 NQN 命名空间（spec.agent.nqnBase）：本地补 base_nqn（控制面建盘依赖此键）
         caps["base_nqn"] = self.nqn_base
         return caps
 

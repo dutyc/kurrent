@@ -13,6 +13,65 @@
 
 ---
 
+## 2026-11-07
+
+### 新增
+
+- **CLI 首次部署自举**：`kurrent init` 成为完整首次部署事务：预检 Docker/Compose、WebUI 构建产物与状态根属主后，启动控制面并等待其把管理凭据（入口地址、admin 客户端证书与信任锚）发布到一次性交换目录；CLI 校验文件哈希后安装到 `~/.kurrent/admin.conf`，再用安装副本完成 mTLS `GET /whoami` 自检，全部通过才报告成功。交换包消费后删除；凭据交换或自检失败时保留交换包与 `bootstrapping` 记录，重跑从该步继续。
+- **部署记录与状态根**：新增 `~/.kurrent/deployment.yaml`（0600）记录固定 compose 项目名（`kurrent` / `kurrent-storage`）、仓库根、状态根、角色与状态；`KURRENT_DEPLOYMENT_FILE` 可覆盖记录路径。状态根默认 `$XDG_STATE_HOME/kurrent`（未设置时为 `~/.local/state/kurrent`），`KURRENT_STATE_DIR`、`--state-dir` 可覆盖。新增只读命令 `kurrent deployment show [-o yaml|env]`，`env` 输出手工 compose 所需的插值变量（含仓库根下的节点盘目录）。
+- **旧布局迁移与分机信任锚**：`kurrent init` / `kurrent join` 新增 `--adopt-state`：停止旧编排，把仓库内 `control_plane/state`、`control_plane/config/agents.yml`、`dnsmasq` 运行文件、`storager/{state,bootstrap,agent/logs}` 与节点组件 PKI 逐文件做 SHA-256 校验复制到状态根，验证成功后才删除旧副本。停栈前预检同时覆盖控制面与同机存储节点的旧状态属主，任一文件不属当前用户即停止，并用**一条** `sudo chown` 命令列出全部需修复的根（不会复制一半再失败）。`kurrent join` 新增 `--cp-ca`，按 `--cp-ca` ＞ 同机控制面状态根中的 `certs/server.crt` ＞ 节点已有副本解析控制面信任锚，缺失时给出复制命令。
+- **`kurrent host check` 状态根检查**：`control` 角色新增状态根位置（须在仓库外）、0700 权限、属主与部署记录一致性检查；新增 `--state-dir` 指定待检状态根。
+
+### 变更
+
+- **运行时状态移出仓库（破坏性路径变更）**：控制面台账、PKI、证书、`admin.conf`、dnsmasq 渲染配置与租约，以及节点身份、引导凭据、组件 PKI 与日志不再写入 checkout，改由状态根承载（`control-plane/{state,config/agents.yml,dnsmasq,bootstrap}`、`storager/{state,bootstrap,pki,logs,certs}`）。两份 compose 的挂载源改为 `${KURRENT_STATE_DIR:?}` / `${KURRENT_NODE_STATE_DIR:?}` / `${KURRENT_CP_CA_FILE:?}` 插值，控制面新增 `/app/bootstrap` 挂载。仓库内旧状态的部署需执行一次 `kurrent init --adopt-state`（存储节点用 `kurrent join --adopt-state`）。
+- **compose 项目名固定**：根编排 `name: kurrent`，存储编排 `name: kurrent-storage`；CLI 显式传入 `--project-name`，不再按 checkout 目录 basename 推导。移动或改名仓库后在新位置重跑 init/join，按记录复用状态根并以 `--force-recreate` 重建容器、更新记录中的仓库根。同一主机只支持一个部署（容器名固定）。
+- **管理凭据发现顺序**：新增部署记录指向的 `<state>/control-plane/state/admin.conf`，位于 `--credentials`、`KURRENT_CREDENTIALS` 之后，旧布局 `control_plane/state/admin.conf` 上溯与 `~/.kurrent/admin.conf` 之前。
+- **`init` / `join` / `host check` 参数**：`init` 新增 `--state-dir`、`--adopt-state`；`join` 新增 `--state-dir`、`--cp-ca`、`--adopt-state`，`--dir` 同时接受仓库根与 `storager` 目录；`host check` 新增 `--state-dir`。节点声明默认 `diskDir` 位于 checkout 内时 join 给出移动仓库会连带移动盘镜像的告警。
+- **`admin.conf` 入口端口**：控制面按 `KURRENT_HTTPS_PORT` 生成 `admin.conf` 的 server 地址（非 443 时显式带端口），CLI 自检使用同一地址。
+- **控制面空状态根保护**：部署记录存在而状态根缺失时 `kurrent init` 拒绝新建空部署，要求先从备份恢复状态根或删除记录后重新部署。
+
+### 修复
+
+- **首次部署无法使用管理凭据**：旧流程在控制面尚未就绪时即报告成功，且 `admin.conf` 可能由 Docker 以 root 创建，普通用户 CLI 读取报 `permission denied`；现在凭据经一次性交换安装到用户目录并通过 mTLS 自检，构建产物属主也在启动前预检。
+- **移动/改名仓库导致部署错位**：状态挂载源改为绝对路径、项目名固定，容器不再引用旧 checkout 路径，也不会因目录 basename 变化产生新项目与容器名冲突。
+- **状态根文件属主归操作员**：控制面与两个节点组件以 root 写宿主挂载的状态根，新写入的台账、PKI、CRL、dnsmasq 配置、会话与日志在落盘后把属主对齐目录属主，启动时再递归修正历史 root 属主（含按 `KURRENT_AGENT_ID` 挂载的组件 PKI）；一次性交换包的 `pki/` 目录同样对齐。否则普通用户在宿主侧备份、迁移或续跑首次部署时会遇到 `permission denied`。
+- **首次部署失败后可续跑**：交换或自检失败会保留 `bootstrapping` 记录与交换包；重跑不再被「状态根必须为空」拒绝，并允许覆盖此前由 root 写入的目标文件，从失败步骤继续。已完成部署仍受空状态根保护。
+- **管理员证书轮换无法作废旧证书**：吊销接口原先按 CN 一律拒绝吊销自身证书，管理员重签后无法让旧序列号失效。现在只保护当前请求正在使用的那张证书，同名主体的其他序列号可显式按 `serial` 吊销（`kurrent cert revoke admin --serial <旧序列号>`），旧证书在下一次 TLS 握手即被 nginx 拒绝。
+
+---
+
+## 2026-11-05
+
+### 新增
+
+- **`kurrent host check` 宿主基线**：新增只读本地检查命令，`--role control|storage|all` 区分控制面与存储节点检查项（缺省按运行中的 compose 服务标签推断），`--dir` 指定仓库根，`-o json` 输出结构化报告，`--strict` 把 SKIP 计为失败。状态为 `ok` / `warn` / `fail` / `skip`；退出码 0 通过、1 有 FAIL、2 用法错误。公共 TCP 监听（角色各自的端口白名单）、Docker 守护进程 TCP 与 `DOCKER-USER`/ufw 对两种角色都检查；`control` 另查控制面发布端口、`docker.sock` 挂载、nginx 私钥挂载与凭据权限，`storage` 另查 nvmet / nvmet-tcp 模块、configfs 与 `tlshd >= 1.5.0`。`kurrent join` 的存储节点预检复用同一检查引擎。
+
+### 变更
+
+- **移除宿主基线脚本**：删除 `control_plane/host-baseline.sh`（只读检查由 `kurrent host check` 取代）；`storager/nvmeof/host-prepare.sh` 只保留需 root 的就位职责，删除 `--check` 只读模式，只读诊断改用 `kurrent host check --role storage`。部署指南、日常运维、故障排查、部署前置、安全模型与 CLI 参考同步更新。
+
+- **节点身份移出声明**：节点声明 `storager/kurrent.yaml` 删除 `metadata` 块（`name` / `remark`），身份改由节点状态文件 `storager/state/agent.id` 承载（join 写入、agent 与 nvmet-host 只读挂载，`KURRENT_NODE_ID_FILE` 可覆盖）。身份由控制面在签发 bootstrap token 时分配：`POST /pki/tokens` 省略 `agent_id` 即生成 12 位小写 hex 并随响应返回，显式指定则绑定已有身份（恢复）；`kurrent token create` 与 WebUI「加入节点」只是调用该端点并消费返回的 `agent_id`，不再自行生成，`kurrent join` 也不生成。首次执行必须提供 `--agent-id`，之后重跑可省略，但已存在状态文件时 `--agent-id` 必须与之一致。声明只保留人能选择的参数，`kurrent config validate --node` 在 join 前即可通过。
+- **昵称只归控制面台账**：enroll 请求不再携带 `remark`，自动登记与 renew 不再写入或刷新昵称；`agents.yml` 为唯一权威，用 WebUI 或 `kurrent agents edit <id> --remark <text>` 设置。
+- **移除派生的 `storager/.env`**：compose 的三个宿主挂载源（`KURRENT_DISK_DIR` / `KURRENT_AGENT_PKI_HOST` / `KURRENT_NVMET_PKI_HOST`）改由 `kurrent join` 在调用 compose 时以进程环境注入；缺少变量时 compose 直接报错并提示运行 join。`storager/.env.example` 删除，`storager/state/` 加入忽略清单。
+- **compose 挂载节点状态**：nvmeof 的 agent / nvmet-host 与 iscsi 的 agent 新增 `../state:/etc/kurrent/state:ro`，组件从状态文件读取身份。
+- **引导菜单移除安装器入口**：`menu.ipxe` 删除 Installers 子菜单及其安装项（含硬编码的 Ubuntu 22.04 / CentOS 7 / ESXi 7、清华镜像与 `ipv6.disable=1`），`menu-install` 不再可作为 `menu_default`；同步删除 `tftp/preseed.cfg` 与 `webui/deploy/public/install/` 下的安装器预置文件。`/boot-vars` 的 `base_iqn` / `iscsi_sep` 暂保留。
+- **引导链移除公开资产分发**：删除 `webui/deploy/public` 目录、nginx `/file/` 路由、compose 的 `/data` 挂载与 `boot.ipxe.cfg` 的 `chain-url`；菜单不再提供 System tools 子菜单（其 Memtest/WinPE 资产从未随仓库提供）。`boot.menu_default` 只接受当前菜单可手工选择的 `config` / `shell` / `reboot` / `exit`；`boot-os` 由默认盘推导，不再接受 `windows` / `ubuntu` / `debian` / `centos` / `esxi` / `menu-diag` 等旧值。
+
+### 修复
+
+- **引导变量不再把后端查询失败当作 stgt**：`/boot-vars` 的 `iscsi_sep` 仅在后端确定为 `stgt` / `lio` 时下发；Agent 未登记、`/capabilities` 查询异常或 `backend` 取值非法时按未知处理并记录 warning，不再拼出 stgt 连接符，也不注入 nvmet TLS 字段。
+
+---
+
+## 2026-11-03
+
+### 变更
+
+- **移除 Worker 安装期路径**：`POST /workers` 的 `windows_iso` 字段移除，注册不再创建 CD target，也不会返回 `state=installing`；Worker 注册只建立身份与设备绑定，系统盘由 `POST /workers/{worker_id}/luns/disk` 单独创建。WebUI 创建表单同步移除 Windows ISO 输入；Agent 级 CD LUN 管理端点保留。
+
+---
+
 ## 2026-11-01
 
 ### 变更

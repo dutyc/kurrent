@@ -71,8 +71,8 @@ services:
       retries: 5
       start_period: 10s
 
-  # ── Web 管理界面 + 文件浏览（nginx）──
-  # 静态资源由 webui/app 构建产物挂载；public/ 为 iPXE 公开文件（ISO/kernel/initrd）
+  # ── Web 管理界面（nginx）──
+  # 静态资源由 webui/app 构建产物挂载
   kurrent-nginx:
     build:
       context: ./webui/deploy
@@ -87,8 +87,6 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # ── Web UI 静态文件 (cd app && npm run build) ──
       - ./webui/app/dist:/usr/share/nginx/html:ro
-      # ── iPXE 公开文件目录: ISO, kernel, initrd (被浏览和下载的数据) ──
-      - ./webui/deploy/public:/data:ro
       # ── TOFU 自签证书（控制面启动时自动生成到 state/certs，私钥不入库；nginx 只读挂载）──
       - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/state/certs:/etc/nginx/certs:ro
       # ── 客户端证书信任包（ca-users + ca-nodes）：只挂信任包目录 ──

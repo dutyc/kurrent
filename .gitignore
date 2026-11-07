@@ -4,8 +4,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 app/node_modules
-.tmp-pkidemo/
 .npm-cache/
+
+# 本地资料（设计蓝图、审计报告、个人交付物、旧文档快照、上游参考源码）
+# 不属于产品源码树，统一放这里，不入库
+.local/
 # Python 虚拟环境
 .venv/
 .venv*/
@@ -14,11 +17,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# 第三方参考源码（如 open-iscsi）
-thirdparty/
-
-# 旧文档站副本（已由 docs/ 重写取代，不入库）
-docs_copy/
 # VitePress 构建产物
 docs/.vitepress/cache/
 docs/.vitepress/dist/
@@ -27,17 +25,13 @@ webui/app/node_modules
 # WebUI 构建产物（vite build 生成，不入库）
 webui/app/dist/
 
-# CLI 构建产物（go build 生成，不入库）
-cli/kurrent
-cli/cli
+# CLI 构建产物（go build -o ../bin/kurrent .，不入库）
+/bin/
 
 # iPXE 引导二进制（部署时从固件仓构建产物放入 tftp 根目录，不入库）
 tftp/*.efi
 tftp/*.kpxe
 tftp/*.bak
-
-# 固件仓库对接测试指南（归属 kurrent-firmware 仓库侧，待搬迁后删除）
-firmware-connectivity-test-guide.zh.md
 
 .DS_Store
 Thumbs.db
@@ -48,12 +42,9 @@ Thumbs.db
 .stignore
 .idea/
 .vscode/
-user_report/
 *.sublime-project
 *.sublime-workspace
-webui/deploy/public/install/debian/12/netboot
-webui/deploy/public/install/windows/24h2/boot
-webui/deploy/public/install/windows/24h2/sources
+# 运行数据（盘镜像），不入库；建议放到仓库外的数据盘
 storager_img/
 
 
@@ -62,22 +53,18 @@ storager_img/
 webui/app/.env
 .qoderignore
 
-# 本地运行时配置（含真实 token），仓库只保留 *.example 模板
-storager/.env
-# 节点声明式配置（kurrent join 生成，含 bootstrap token，不入库；模板见 kurrent.yaml.example）
+# 以下为旧布局（运行时状态在仓库内）的忽略项，保留用于 --adopt-state 迁移前后的仓库；
+# 新部署的运行时状态位于 ~/.local/state/kurrent（KURRENT_STATE_DIR），不在本仓库内。
+# 节点声明式配置（kurrent join 生成，不入库；模板见 kurrent.yaml.example）
 storager/kurrent.yaml
+# 节点身份状态（join 写入，不入库；备份时需保留）
+storager/state/
 # 一次性引导凭据文件（kurrent join 写入，不入库）
 storager/bootstrap/
 control_plane/config/agents.yml
 # 控制面声明式配置（运行时文件不入库；模板见 kurrent.yaml.example）
 control_plane/kurrent.yaml
 control_plane/state/settings.json
-
-# 内部架构规划（不入版本库）
-blueprint/
-
-# 设计稿与视觉原型（不入版本库）
-design/
 
 # 运行时状态、日志与租约（容器/Agent 运行生成，不入库）
 control_plane/state/operations.jsonl
@@ -113,6 +100,3 @@ storager/agent/logs/nvmet-credentials.json
 dnsmasq/dnsmasq.leases
 dnsmasq/dhcp-hosts.conf
 dnsmasq/dnsmasq.conf
-
-# 本地攻击演练报告（仅保留在工作区，不入库）
-reports/

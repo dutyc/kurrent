@@ -13,7 +13,7 @@ Agent 是唯一调用方（持有 nodes CA 签发的 client cert，经共享卷 
 盘文件的创建/管理归 Agent（本服务不建盘、不删盘），但**必须能看见同一份盘目录**——
 configfs 的 device_path 由写入进程（本容器）所在挂载命名空间解析，故 compose 把宿主盘目录
 挂到 `/srv/nvmet-disks`，device_path 按该前缀重拼（`config.DEFAULT_HOST_DISK_DIR`）。
-契约：blueprint/nvmeof-credential-design.md 第 6 节。
+契约：.local/blueprint/nvmeof-credential-design.md 第 6 节。
 
 configfs 语义要点（Linux v7.x nvmet）：
 - host 条目是全局的：mkdir 顶层 hosts/<HOSTNQN>（默认 SHA256）；DH-HMAC-CHAP 认证 =
@@ -131,7 +131,7 @@ def _gpt_layout(path: str) -> str:
 class NvmePskKeyring:
     """把 TLS-PSK 注入内核全局 `.nvme` keyring（目标端供给）。
 
-    机制（v7.0 内核 + ktls-utils >= 1.5.0 实测，见 blueprint/nvme-tcp-tls-in-kernel.md §5）：
+    机制（v7.0 内核 + ktls-utils >= 1.5.0 实测，见 .local/blueprint/nvme-tcp-tls-in-kernel.md §5）：
     - nvmet 建 port 时即取该 keyring（`port->keyring`），所以目标端**无需任何 configfs 配置**，
       只要把 psk key 放进去；tlshd 握手时用 ClientHello 里的 identity 在 keyring 里搜同名 key。
     - 一条 psk key：**description == PSK identity**，**payload == PSK 字节**（两端共用同一条）。

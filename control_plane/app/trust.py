@@ -1,7 +1,7 @@
 """信任根域（T3/T4，2026-08-21）：注册窗口、强制验签开关、挑战 nonce、设备公钥/签名验证。
 
 被 boot（引导链验签）与 settings（窗口/开关管理端点）两个域共用，独立成域。
-契约见 blueprint/ipxe-stateless-handoff.md（§5.2 变量与接口契约）。
+契约见 .local/blueprint/ipxe-stateless-handoff.md（§5.2 变量与接口契约）。
 """
 
 import base64
