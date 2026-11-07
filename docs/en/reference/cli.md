@@ -5,21 +5,24 @@
 ## Install and credentials
 
 ```bash
+mkdir -p bin
 cd cli
-go build -o kurrent .
-sudo install -m 0755 kurrent /usr/local/bin/kurrent
-kurrent credentials install    # snapshot management credentials into ~/.kurrent
+go build -o ../bin/kurrent .
+sudo install -m 0755 ../bin/kurrent /usr/local/bin/kurrent
+kurrent init                   # first deployment: also installs management credentials into ~/.kurrent
+kurrent credentials install    # refresh the snapshot after rotation
 ```
 
-`credentials install` copies `control_plane/state/admin.conf` and certificate copies into `~/.kurrent` (directory 0700, files 0600), so a PATH-installed binary works outside the repository over 443 mTLS. Re-run `install` after credential rotation.
+`kurrent init` installs `~/.kurrent/admin.conf` and certificate copies through the one-shot exchange (directory 0700, files 0600), so a PATH-installed binary works outside the repository over 443 mTLS. Re-run `kurrent init` or `kurrent credentials install` after credential rotation.
 
 Credential discovery order:
 
 1. The file given by `--credentials`
 2. The `KURRENT_CREDENTIALS` environment variable
-3. Walking up from the current directory for `control_plane/state/admin.conf`
-4. `<exe>/../control_plane/state/admin.conf` next to the binary
-5. The user-level snapshot `~/.kurrent/admin.conf`
+3. The record's `<state>/control-plane/state/admin.conf`
+4. Walking up from the current directory for the legacy `control_plane/state/admin.conf`
+5. `<exe>/../control_plane/state/admin.conf` next to the binary
+6. The user-level snapshot `~/.kurrent/admin.conf`
 
 Without management credentials, `--server` and `--token` must be given explicitly for the Bearer channel.
 
@@ -35,8 +38,10 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
 | | `validate [--node] [--config PATH]` | Validate against the runtime schema inside the component image |
 | | `show [--node] [--config PATH]` | Print the effective declaration with defaults injected |
 | | `status` | Runtime declaration, configHash, dnsmasq and certificate drift |
-| `init` | — | Control-plane initialization: validate, apply, start, health-check, roll back on failure |
+| `init` | — | First-deployment transaction: validate, prepare state, start, exchange credentials, self-test; roll back or resume |
 | `join` | — | Node join: generate or merge the declaration, converge the Agent |
+| `deployment` | `show [-o yaml\|env]` | Read-only deployment record, repository root, state root, and manual compose variables |
+| `host` | `check` | Read-only host baseline: listeners, Docker exposure, firewall, credentials, state root, storage kernel prerequisites |
 | `token` | `create` / `list` / `revoke` | Issue, list, and revoke bootstrap and management tokens |
 | `sessions` | `list` / `revoke` / `revoke-all` | Management session ledger and one/all revocation |
 | `cert` | `keygen` / `issue` / `list` / `revoke` | User certificates: local CSR, issuance, listing, revocation |
@@ -60,14 +65,15 @@ kurrent config status
 
 `init` does the following:
 
-- builds the validation image and fully validates the declaration;
-- writes nothing on validation failure and exits non-zero;
-- applies the declaration, restarts the control plane, and waits for `/healthz`;
-- rolls back to the previous declaration and restores service on startup failure;
-- restarts dnsmasq and confirms it stays up;
-- is idempotent, so rerunning after an edit applies the change.
+- preflights Docker/Compose v2, the WebUI build output, and ownership/writability of the state root and `~/.kurrent`;
+- builds the validation image and fully validates the declaration, writing nothing on failure;
+- creates the state root (default `~/.local/state/kurrent`), seeds the compose mount points, and writes the deployment record as `bootstrapping`;
+- starts the stack under the pinned project `kurrent`, restarts the control plane, and waits for `/healthz`; rolls back to the previous declaration and restores service on startup failure;
+- waits for the one-shot credential exchange, verifies it, installs it into `~/.kurrent`, and runs an mTLS `GET /whoami` self-test with the installed copy;
+- consumes the bundle, restarts dnsmasq, confirms it stays up, and moves the record to `ready`;
+- is idempotent: rerunning after an edit applies the change; after moving the checkout it reuses the recorded state root and recreates the containers.
 
-`--config` can point at another declaration file and apply it as the control-plane configuration.
+`--config` can point at another declaration file and apply it as the control-plane configuration. `--state-dir` selects the state root; `--adopt-state` migrates legacy in-repository state (stops the old stack, copies and verifies every file, then removes the old copies after success).
 
 ## Node join
 
@@ -79,18 +85,30 @@ kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.80.1
 kurrent join https://192.168.80.1 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-`--agent-id` is the node identity and accepts only 12 lowercase hex characters; omit it to have the command generate one. Descriptive names go in the node declaration `metadata.remark`, never in the identity field. The control-plane address is an origin (a reverse-proxy path prefix is allowed); a mistakenly pasted `/api/cp` suffix is removed before the declaration is written.
+`--agent-id` is the node identity and accepts only 12 lowercase hex characters; when omitted, the control plane allocates it at bootstrap-token issuance (an explicit value binds an existing identity for recovery), and both `kurrent token create` and the WebUI only consume the returned `agent_id`. The first join writes it to `storager/state/agent.id` under the node state root; reruns must match the state file. Nicknames belong to the control-plane ledger and are set with `kurrent agents edit <id> --remark <text>`. The control-plane address is an origin (a reverse-proxy path prefix is allowed); a mistakenly pasted `/api/cp` suffix is removed before the declaration is written.
 
 `join` does the following:
 
 - generates `storager/kurrent.yaml` from the template when missing, or reads it and syncs the control-plane address when present;
-- writes `bootstrap/agent.token` (0600) and the `.env` interpolation keys;
-- converges and starts the Agent with compose;
+- creates `storager/{state,bootstrap,pki,logs,certs}` under the node state root (default `~/.local/state/kurrent`) and writes the identity `state/agent.id` and `bootstrap/agent.token` (0600);
+- resolves the controller trust anchor into `certs/cp-ca.crt`: `--cp-ca` > the co-located controller's `control-plane/state/certs/server.crt` > an existing node copy;
+- injects `diskDir`, the node state root and the trust anchor as compose variables and converges the Agent under the pinned project `kurrent-storage`;
 - on the nvmet backend, checks kernel modules, configfs, and `tlshd >= 1.5.0`, and points to `storager/nvmeof/host-prepare.sh` when not ready;
 - waits for the derived `nvmet-host` credential to be written, then restarts that component;
 - is idempotent and safe to rerun.
 
-Outside the repository root, pass `--dir` to point at the `storager` directory.
+`--dir` may point at the repository root or the `storager` directory; `--state-dir` selects the node state root; `--cp-ca` supplies the controller trust anchor on split hosts; `--adopt-state` migrates legacy in-repository node state. When the default `diskDir` sits inside the checkout, join warns that moving the repository moves the disk images; a fixed location needs an absolute path outside the repository.
+
+## Host check
+
+```bash
+sudo kurrent host check                        # role inferred from running compose services
+sudo kurrent host check --role all             # co-located hosts, or before containers start
+kurrent host check --role storage              # kernel nvmet prerequisites / configfs / tlshd
+sudo kurrent host check --role control -o json --strict
+```
+
+A read-only local check that does not call the management API and works before the control plane starts. Public TCP listeners, Docker daemon TCP exposure, and `DOCKER-USER`/ufw are checked for both roles, with role-specific port allowlists (control: 22/53/67/69/80/443; storage: 22/4840/4421). `control` additionally checks control-plane container exposure, credential permissions and the state root (outside the repository, 0700, correct owner, matching the deployment record); `storage` additionally checks the nvmet / nvmet-tcp modules, configfs, and `tlshd`; `all` is the union. Containers are identified by compose service labels, not fixed names. Statuses are `ok` / `warn` / `fail` / `skip`; exit codes are `0` pass, `1` FAIL, `2` usage error, and `--strict` also counts SKIP as failure. Fixing system state still uses `sudo bash storager/nvmeof/host-prepare.sh`.
 
 ## Credential issuance
 
@@ -131,7 +149,7 @@ kurrent cert components
 kurrent cert revoke-component 3f2a9c1d8b7e
 ```
 
-The private key is generated locally and never uploaded; only the CSR is submitted. `issue` requires the CN to be registered in `control_plane/state/users.yml`. Revocation re-signs the CRL, reloads nginx, and invalidates sessions bound to that certificate. Revoking a component also deletes that node's bootstrap tokens; recovery means issuing a new token and rerunning `join`.
+The private key is generated locally and never uploaded; only the CSR is submitted. `issue` requires the CN to be registered in `<state>/control-plane/state/users.yml`. Revocation re-signs the CRL, reloads nginx, and invalidates sessions bound to that certificate. Revoking a component also deletes that node's bootstrap tokens; recovery means issuing a new token and rerunning `join`.
 
 ## NVMe-oF credentials
 
@@ -163,11 +181,14 @@ Positional arguments can be mixed freely with `--key value`, `--key=value`, and 
 
 | Symptom | Triage |
 | --- | --- |
-| `No management credentials found` | Run inside the repository, run `credentials install`, or pass `--server` + `--token` |
-| mTLS certificate error | Credential file does not match the server; rerun `credentials install` |
+| `No management credentials found` | Run `kurrent init` first; or run `credentials install` to refresh the snapshot; or pass `--server` + `--token` |
+| mTLS certificate error | Credential file does not match the server; rerun `kurrent init` or `credentials install` |
 | `config validate` fails | Fix the declaration per the error; unknown fields are rejected |
-| `join` stops at host preflight | Run `host-prepare.sh` as instructed and confirm kernel modules, configfs, and `tlshd` |
-| Token invalid or expired | Run `token create` again; confirm `--agent-id` matches the node declaration |
+| `init` reports a foreign state-root owner | Run the suggested `sudo chown -R "$(id -u):$(id -g)" <path>`; do not rerun as root |
+| `init` reports legacy state | Confirm the migration, then rerun with `--adopt-state` |
+| `join` stops at host preflight | Run `kurrent host check --role storage` first, then `host-prepare.sh` as instructed |
+| `join` reports a missing controller trust anchor | Supply the controller `server.crt` with `--cp-ca` (see the split-host step in deployment) |
+| Token invalid or expired | Run `token create` again; confirm `--agent-id` matches `<state>/storager/state/agent.id` |
 
 ## Related pages
 

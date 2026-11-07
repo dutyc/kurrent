@@ -1,20 +1,25 @@
 # Declarative Configuration
 
-Kurrent's runtime parameters are described by two YAML declarations: one for the control plane and one for each node. The declaration is the only input; the CLI validates and converges, and container orchestration is an implementation detail.
+Kurrent's runtime parameters are described by two YAML declarations: one for the control plane and one for each node. The declaration is the only input; the CLI validates and converges, and container orchestration is an implementation detail. The control plane allocates the node identity when a bootstrap token is issued; it is kept in a separate state file, not in the declaration.
 
 ```text
 control_plane/kurrent.yaml   → control plane, derived dnsmasq configuration, PKI and policy
-storager/kurrent.yaml        → node identity, data directory, backend and NQN namespace
+storager/kurrent.yaml        → data directory, backend and NQN namespace
+<state>/storager/state/agent.id → node identity (written by join, mounted read-only)
 ```
+
+`<state>` is the state root outside the repository (default `~/.local/state/kurrent`), pinned by the deployment record `~/.kurrent/deployment.yaml`; declarations move with the repository, runtime state does not.
 
 ## Layering
 
 | Layer | Content | Location |
 | --- | --- | --- |
-| Declaration | Business policy, networking, paths, identity, NQN namespace | `kurrent.yaml` |
+| Declaration | Policy, networking, paths, namespace — parameters a human chooses | `kurrent.yaml` |
+| Node state | Machine identity (agent_id) | `<state>/storager/state/agent.id` |
 | Orchestration | Container names, images, mount targets, port mappings, internal addresses | `docker-compose.yml` |
-| Runtime state | Registration window, sessions, devices, Workers, disks, credentials, audit | `control_plane/state/` |
-| One-time credentials | Bootstrap token, derived tokens | `storager/bootstrap/` |
+| Runtime state | Registration window, sessions, devices, Workers, disks, credentials, audit | `<state>/control-plane/state/` |
+| One-time credentials | Bootstrap token, derived tokens | `<state>/storager/bootstrap/` |
+| First-run handoff | Management credential exchange (`request` → `ready` → `consumed`) | `<state>/control-plane/bootstrap/` |
 
 In-container paths, listen addresses and internal endpoints belong to orchestration and are not part of the declaration; putting them in YAML is rejected as unknown fields. Keys and tokens never enter YAML.
 
@@ -52,16 +57,13 @@ Apart from `spec.networking` and `metadata.name`, every block has defaults. The 
 - `dhcpRange` becomes the address pool;
 - `gateway` / `dns` become DHCP options 3/6.
 
-The control plane renders `dnsmasq/dnsmasq.conf` from the declaration at startup. **Do not edit the generated file**: the next startup overwrites it. `kurrent config status` reports whether the generated file still matches the declaration.
+The control plane renders `<state>/control-plane/dnsmasq/dnsmasq.conf` from the declaration at startup. **Do not edit the generated file**: the next startup overwrites it. `kurrent config status` reports whether the generated file still matches the declaration.
 
 ## Node Declaration
 
 ```yaml
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 3f2a9c1d8b7e      # node identity (agent_id): 12 lowercase hex, written by join
-  remark: Production storage node
 spec:
   agent:
     backend: nvmet
@@ -72,9 +74,8 @@ spec:
     url: https://192.168.1.10
 ```
 
-- `metadata.name` is the machine identity, the component certificate CN and the control-plane registry key; only 12 lowercase hex characters are accepted.
-- `metadata.remark` is the only place for a descriptive name; it is recorded in the control-plane ledger on first enroll.
-- `diskDir` must be an absolute host path; it is also synchronized as the compose mount source.
+- The node identity (12 lowercase hex) is allocated by the control plane at bootstrap-token issuance (the CLI and WebUI only consume the returned `agent_id`) and written by join to `storager/state/agent.id` under the node state root; it is the component certificate CN and the control-plane registry key. The declaration has no identity field, and nicknames live in the control-plane ledger.
+- `diskDir` must be an absolute host path; join injects it as the compose mount source when starting the containers — no second copy is written to disk.
 - `nqnBase` is the namespace for Host NQNs and disk NQNs; the control plane does not declare a separate NQN domain.
 
 ## Validation
@@ -94,7 +95,7 @@ Semantics:
 | `extra="forbid"` | Unknown fields, typos and obsolete keys are rejected |
 | Default injection | Missing policy blocks use schema defaults |
 | Cross-field validation | Subnet/gateway/pool consistency, token TTL caps, certificate day caps |
-| Identity/path/NQN | Node name, absolute path and NQN namespace are validated at declaration time |
+| Path/NQN | Absolute paths, NQN namespace and addresses are validated at declaration time; join validates the identity state file |
 | Version lock | `apiVersion` and `kind` must match |
 
 Validation completes before anything is written. On failure, no file is modified and no container starts.
@@ -131,8 +132,8 @@ Steps:
 
 1. Read or generate the node declaration.
 2. Merge defaults and validate with the same schema used by the agent image.
-3. Write the declaration, bootstrap credential and `.env` interpolation keys.
-4. Start the agent and confirm it stays running.
+3. Write `storager/state/agent.id` and the bootstrap credential under the node state root (the first run requires `--agent-id`).
+4. Inject `diskDir`, the node state root and the trust anchor as compose variables, start the agent, and confirm it stays running.
 5. On nvmet, preflight host prerequisites (kernel modules, configfs, `tlshd >= 1.5.0`), wait for the derived credential, then restart nvmet-host.
 
 A validation failure writes nothing.

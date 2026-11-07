@@ -275,11 +275,12 @@ Tab 切换：Identity / Disks / Boot / CD（条件展示）/ NVMe-oF Credential�
   - **控制面**（control CA）：只读，吊销仅经 CLI/API
   - **自动化**：管理 token 台账（用途、权限、到期、最近使用）与令牌会话（`cert_fp` 为空），
     均可逐行吊销
-- 节点名称显示：`metadata.remark` 为主，未设置时以机器身份（12 位 hex）为主并改用等宽字体；
-  机器身份不重复显示。备注是唯一的人类标签，页面不要求也不允许手填节点标识
-- 接入弹窗：控制面地址一个输入项；节点标识由前端 `crypto.getRandomValues` 生成 12 位 hex
-  并直接写入 join 命令，接入后可在 Agent 台账设置备注；签发的一次性引导 token 明文只显示
-  本次
+- 节点名称显示：控制面台账的 `remark` 为主，未设置时以机器身份（12 位 hex）为主并改用等宽字体；
+  机器身份不重复显示。备注是控制面侧的唯一人类标签，不来自节点声明，页面不要求也不允许手填节点标识
+- 接入弹窗：控制面地址一个输入项；节点标识由控制面在 `POST /pki/tokens` 签发时分配
+  （12 位 hex）并随响应返回，前端只把返回的 `agent_id` 写进 join 命令（`kurrent token create`
+  省略 `--agent-id` 时同理由控制面分配，join 落盘到节点状态文件），接入后可在 Agent 台账
+  设置备注；签发的一次性引导 token 明文只显示本次
 - 吊销弹窗：目标身份、信任域、待吊销序列号、生效后果、原因
   （`unspecified` / `key_compromise` / `superseded` / `cessation_of_operation`）；写 CRL 后
   节点 ≤60 秒生效，用户证书即时生效并踢掉关联会话
@@ -368,15 +369,14 @@ async function request(path, options) {
 WebUI 不再独立编排：`deploy/` 只提供 nginx 镜像，服务定义在**仓库根 `docker-compose.yml`** 的
 `kurrent-nginx` 服务中（与 dnsmasq / control-plane 同一 compose 网络与入口）。
 
-### 引导链与安装介质
+### 引导链
 
-同一 nginx 容器还提供引导链的数据面：
+同一 nginx 容器还提供引导链入口：
 
 | 端点 | 用途 |
 |---|---|
 | `/` | WebUI SPA（`try_files → index.html`） |
 | `/api/cp/*` | Control Plane API 代理（含 `GET /boot-assets` 引导链状态） |
-| `/file/*` | iPXE 文件下载（ISO、kernel、initrd） |
 | `/tftp/*` | 引导脚本与固件（HTTPS 取回，映射 tftp 根） |
 
 引导链状态由控制面解析 `dnsmasq.conf` 与 iPXE 脚本生成，nginx 只做代理与静态文件服务。
@@ -392,9 +392,8 @@ services:
       - "${KURRENT_HTTPS_PORT:-443}:443"          # 唯一对外入口（WebUI + API + 引导链 + 文件）
     volumes:
       - ./webui/app/dist:/usr/share/nginx/html:ro                 # WebUI 静态文件
-      - ./webui/deploy/public:/data:ro                            # iPXE 公开文件（ISO/kernel/initrd）
-      - ./control_plane/state/certs:/etc/nginx/certs:ro            # TOFU 自签证书
-      - ./control_plane/state/pki/nginx:/etc/nginx/pki:ro          # 信任包（users+nodes 公钥，无私钥）
+      - ${KURRENT_STATE_DIR}/control-plane/state/certs:/etc/nginx/certs:ro    # TOFU 自签证书
+      - ${KURRENT_STATE_DIR}/control-plane/state/pki/nginx:/etc/nginx/pki:ro  # 信任包（users+nodes 公钥，无私钥）
       - ./tftp:/tftp:ro                                          # iPXE 菜单/覆盖脚本（HTTPS 同源）
 ```
 
@@ -402,8 +401,8 @@ services:
 
 ```bash
 cd webui/app
-npm install
-npm run build              # 输出到 dist/（由仓库根 compose 只读挂载进 nginx）
+npm ci                     # 按 package-lock 安装
+npm run build              # 输出到 dist/（不入库，由仓库根 compose 只读挂载进 nginx）
 ```
 
 ---

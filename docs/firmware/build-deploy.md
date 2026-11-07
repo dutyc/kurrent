@@ -15,7 +15,7 @@
 
 - Linux x86_64 构建机，具备 `git`、`make`、`gcc`；
 - 能访问上游 iPXE 仓库，首次构建会缓存源码；
-- 目标设备为 x86_64 UEFI，部署时关闭 Secure Boot；主线产物未签名；
+- 目标设备为 x86_64 UEFI，部署时关闭 Secure Boot；主线产物未签名；传统 BIOS（Legacy/CSM）引导不再支持；
 - 已按[部署](../guide/deployment.md)完成控制面、dnsmasq 与 PXE 网段。
 
 ## 1. 构建
@@ -89,6 +89,7 @@ sha256sum -c SHA256SUMS
    ```bash
    sudo install -m 0644 dist/pxe-uefi/snponly.efi /path/to/kurrent/tftp/snponly.efi
    cd /path/to/kurrent
+   eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
@@ -152,6 +153,19 @@ NVRAM 清理应通过固件可交互环境或受控预置流程完成；不得�
 
 `/boot-assets` 中 `status=ok` 且六项能力齐全（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定）才满足引导链要求。`incomplete` 通常表示 TFTP 根里放的是 stock iPXE。
 
+### QEMU 验证
+
+QEMU/OVMF 验证需要 KVM、OVMF 固件与可用的 nvmet target。固件仓库提供脚本：
+
+```bash
+sudo AUTH=1 bash test/nvmet-setup.sh
+python3 test/cred-server.py &
+# 测试脚本：test/nvmeof-auth-test.ipxe
+bash test/run-qemu-auth.sh
+```
+
+判据：串口出现认证成功、Property Set、I/O 队列与 GRUB 输出；target 端出现固件段与内核段两条控制器记录；抓包中各客户端 TCP 流首字节为 `0x16`，明文端口包数为 0，载荷中无 PSK 或 DH-HMAC-CHAP 密钥明文。`test/cred-server.py` 仅用于验证，不可作为生产凭据端点。
+
 ## 更新与回滚
 
 - 替换 `tftp/snponly.efi` 并重启 dnsmasq 后，PXE 首跳固件即完成更新。
@@ -172,6 +186,7 @@ NVRAM 清理应通过固件可交互环境或受控预置流程完成；不得�
 ## 相关页面
 
 - [固件概述](./index.md)
+- [固件平台参考](../reference/firmware-platform.md)
 - [固件契约](../reference/firmware-contract.md)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../architecture/security.md)

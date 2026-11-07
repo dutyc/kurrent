@@ -10,7 +10,7 @@
 - **Bound** — A device bound to a Worker and able to enter that Worker's boot chain.
 - **Revoked** — A device that is no longer updated, admitted, or re-registrable.
 - **Binding** — The one-to-one authorization from a device to a Worker. Binding is authentication; rebinding is cold migration.
-- **Readiness** — Whether a Worker can boot: a bound device, a system disk, and a usable data plane.
+- **Readiness** — Whether a Worker can boot: a bound device and a system disk.
 - **Cold migration** — Power off device A, switch the binding to B, and boot the same Worker's system disk on B.
 - **Drain** — Setting a node's `enabled` to false: no new disks, existing disks keep serving.
 - **Registration window** — A time window in which unknown devices may register into the pool, bounded by TTL and device quota.

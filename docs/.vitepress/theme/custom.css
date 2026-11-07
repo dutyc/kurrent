@@ -126,3 +126,48 @@
   white-space: normal;
   overflow-wrap: break-word;
 }
+
+/* 图在正文列内按比例缩放，点击后可查看原尺寸 */
+.vp-doc img {
+  cursor: zoom-in;
+}
+
+.diagram-zoom {
+  max-width: 96vw;
+  max-height: 94vh;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.diagram-zoom:focus {
+  outline: none;
+}
+
+.diagram-zoom::backdrop {
+  background: rgba(21, 20, 18, 0.82);
+}
+
+.diagram-zoom img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 96vw;
+  max-height: 92vh;
+  background: #faf9f6;
+  border-radius: 4px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  cursor: zoom-out;
+}
+
+@media (max-width: 900px) {
+  .diagram-zoom {
+    overflow: auto;
+  }
+
+  .diagram-zoom img {
+    max-width: none;
+    max-height: none;
+  }
+}

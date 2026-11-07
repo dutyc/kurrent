@@ -158,11 +158,9 @@ spec:
 | --- | --- | --- | --- |
 | `apiVersion` | string | 是 | 固定 `kurrent.io/v1` |
 | `kind` | string | 是 | 固定 `NodeConfiguration` |
-| `metadata.name` | string | 是 | 节点身份（agent_id）：12 位小写十六进制，与盘 `os_tag` 同构 |
-| `metadata.remark` | string | 否 | 人类备注（描述性名称的唯一归属），默认空 |
 | `spec` | object | 是 | 见下 |
 
-`metadata.name` 同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定。`kurrent join` 写入后不应手工改写；描述性名称写 `metadata.remark`，不得占用身份字段。
+节点声明没有 `metadata` 块：节点身份（12 位小写十六进制，与盘 `os_tag` 同构）由控制面在签发 bootstrap token 时分配，join 写入 `storager/state/agent.id`，两个组件容器只读挂载。它同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定，不应手工改写；昵称属于控制面台账，用 WebUI 或 `kurrent agents edit` 设置。
 
 ### `spec.agent`
 
@@ -170,7 +168,7 @@ spec:
 | --- | --- | --- | --- | --- |
 | `backend` | string | 否 | `nvmet` / `stgt` / `lio`，默认 `nvmet` | 数据面后端 |
 | `advertiseUrl` | string | 否 | http(s) URL，可空 | 控制面可达的 Agent 地址，用于登记与续签 |
-| `diskDir` | string | 是 | 宿主绝对路径 | 盘镜像目录；也是 compose 挂载源 |
+| `diskDir` | string | 是 | 宿主绝对路径 | 盘镜像目录；join 以 `KURRENT_DISK_DIR` 注入 compose 挂载源 |
 | `nqnBase` | string | 是 | `nqn.<yyyy-mm>.<reverse-domain>` | Host NQN 与盘 NQN 的命名域 |
 
 ### `spec.controlPlane`
@@ -184,9 +182,6 @@ spec:
 ```yaml
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 3f2a9c1d8b7e
-  remark: 生产存储
 spec:
   agent:
     backend: nvmet
@@ -221,7 +216,7 @@ kurrent config validate --node
 kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 ```
 
-`join` 在声明缺失时按模板生成，已存在时读入并同步控制面地址。节点声明错误在写盘前失败，不会等到容器启动才暴露。
+`join` 在声明缺失时按模板生成，已存在时读入并同步控制面地址；首次执行写入节点身份 `storager/state/agent.id`（`--agent-id` 必须提供，之后重跑须与状态文件一致）。节点声明错误在写盘前失败，不会等到容器启动才暴露。
 
 ## configHash 与漂移
 

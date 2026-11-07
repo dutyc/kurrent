@@ -8,6 +8,8 @@ Kurrent 把计算侧拆成三个独立实体。它们各自有标识与权威归
 | Worker | `worker_id`（主机名） | Worker 台账 `state/workers.yml` | 以谁的身份运行 |
 | 系统盘（System Disk） | NQN | 存储节点上的盘文件 + Worker 台账 | 启动哪一块系统 |
 
+![三实体模型：设备、Worker 与系统盘的标识、权威与绑定关系](/diagrams/entities.svg)
+
 ## 设备
 
 设备代表一台物理机器。首次网络启动时，固件上报 11 项指纹（MAC、UUID、SMBIOS、CPU、内存、网卡等）与设备公钥；控制面以 MAC 为唯一键登记。
@@ -64,7 +66,7 @@ Worker 记录包含：
 
 ```text
 NQN  = <nqnBase>:<worker_id>.<os>.<os_tag>
-IQN  = 由 NQN 派生（iSCSI 后端与安装器消费）
+IQN  = 由 NQN 派生（iSCSI 兼容后端使用）
 os_tag = 12 位随机 hex（盘级标识）
 file = <worker_id>.<os>.<os_tag>.img
 ```

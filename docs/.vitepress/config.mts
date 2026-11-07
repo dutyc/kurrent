@@ -24,7 +24,6 @@ const zhSidebar = [
       { text: '架构总览', link: '/architecture/' },
       { text: '设备、Worker 与系统盘', link: '/concepts/entities' },
       { text: '引导链', link: '/concepts/boot-chain' },
-      { text: '固件概述', link: '/firmware/' },
       { text: '存储与数据面', link: '/concepts/storage' },
       { text: '身份与访问', link: '/concepts/identity' },
       { text: '安全模型', link: '/architecture/security' },
@@ -32,11 +31,18 @@ const zhSidebar = [
     ],
   },
   {
+    text: '固件',
+    collapsed: true,
+    items: [
+      { text: '固件概述', link: '/firmware/' },
+      { text: '固件构建与部署', link: '/firmware/build-deploy' },
+    ],
+  },
+  {
     text: '任务',
     collapsed: true,
     items: [
       { text: '系统盘定制', link: '/guide/system-disk' },
-      { text: '固件构建与部署', link: '/firmware/build-deploy' },
       { text: '日常运维', link: '/guide/operations' },
       { text: '故障排查', link: '/guide/troubleshooting' },
     ],
@@ -45,9 +51,11 @@ const zhSidebar = [
     text: '参考',
     collapsed: true,
     items: [
+      { text: '部署前置', link: '/reference/host-prerequisites' },
       { text: '配置参考', link: '/reference/configuration' },
       { text: 'CLI 参考', link: '/reference/cli' },
       { text: 'API 参考', link: '/reference/api' },
+      { text: '固件平台参考', link: '/reference/firmware-platform' },
       { text: '固件契约', link: '/reference/firmware-contract' },
       { text: '发行版矩阵', link: '/reference/distributions' },
       { text: '术语表', link: '/reference/glossary' },
@@ -80,7 +88,6 @@ const enSidebar = [
       { text: 'Architecture', link: '/en/architecture/' },
       { text: 'Devices, Workers and Disks', link: '/en/concepts/entities' },
       { text: 'Boot Chain', link: '/en/concepts/boot-chain' },
-      { text: 'Firmware', link: '/en/firmware/' },
       { text: 'Storage and Data Plane', link: '/en/concepts/storage' },
       { text: 'Identity and Access', link: '/en/concepts/identity' },
       { text: 'Security Model', link: '/en/architecture/security' },
@@ -88,11 +95,18 @@ const enSidebar = [
     ],
   },
   {
+    text: 'Firmware',
+    collapsed: true,
+    items: [
+      { text: 'Firmware Overview', link: '/en/firmware/' },
+      { text: 'Firmware Build and Deployment', link: '/en/firmware/build-deploy' },
+    ],
+  },
+  {
     text: 'Tasks',
     collapsed: true,
     items: [
       { text: 'System Disk Customization', link: '/en/guide/system-disk' },
-      { text: 'Firmware Build and Deployment', link: '/en/firmware/build-deploy' },
       { text: 'Operations', link: '/en/guide/operations' },
       { text: 'Troubleshooting', link: '/en/guide/troubleshooting' },
     ],
@@ -101,9 +115,11 @@ const enSidebar = [
     text: 'Reference',
     collapsed: true,
     items: [
+      { text: 'Deployment Prerequisites', link: '/en/reference/host-prerequisites' },
       { text: 'Configuration', link: '/en/reference/configuration' },
       { text: 'CLI', link: '/en/reference/cli' },
-      { text: 'API', link: '/en/reference/api' },
+      { text: 'API Reference', link: '/en/reference/api' },
+      { text: 'Firmware Platform Reference', link: '/en/reference/firmware-platform' },
       { text: 'Firmware Contract', link: '/en/reference/firmware-contract' },
       { text: 'Distribution Matrix', link: '/en/reference/distributions' },
       { text: 'Glossary', link: '/en/reference/glossary' },
@@ -125,8 +141,12 @@ export default defineConfig({
   description: 'Make bare metal flow — 云原生无状态裸金属交付',
   base,
   cleanUrls: process.env.VITEPRESS_NO_CLEAN !== '1',
+  // Shiki 无 iPXE 语法，按 bash 着色以保留变量与命令高亮
+  markdown: { languageAlias: { ipxe: 'bash' } },
   // 首页自绘组件需要自行拼文档页链接；与 cleanUrls 同源，避免 Pages 构建下漏 .html
   vite: {
+    // 完整 API 参考页本身体积超过默认 500 kB 告警阈值，属预期
+    build: { chunkSizeWarningLimit: 800 },
     define: {
       __KURRENT_DOCS_CLEAN__: JSON.stringify(process.env.VITEPRESS_NO_CLEAN !== '1'),
     },

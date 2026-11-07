@@ -1,6 +1,6 @@
 # 架构
 
-![架构设计](../../assets/architecture.svg)
+![架构设计](../../docs/public/architecture.svg)
 
 ## 控制面 / 数据面分离
 
@@ -13,12 +13,12 @@
 集群大脑。容器化节点，运行：
 
 - **控制面 HTTP 服务**（容器内经 unix socket `/run/kurrent/cp.sock` 供 nginx 访问，不监听 TCP）——设备台账与设备池、设备↔Worker 绑定、Worker 生命周期编排、存储调度（系统盘创建 / 删除）、启动变量投影、审计日志
-- **nginx**（`:443`，唯一对外入口）——WebUI SPA、管理面 API（`/api/cp/`）、引导链裸路径（`/devices/…`、`/boot-vars`）、iPXE 资产（`/file/`）与菜单（`/tftp/`）；`:80` 仅 301 升级
+- **nginx**（`:443`，唯一对外入口）——WebUI SPA、管理面 API（`/api/cp/`）、引导链裸路径（`/devices/…`、`/boot-vars`）与 iPXE 菜单（`/tftp/`）；`:80` 仅 301 升级
 - **dnsmasq**（host 网络）——DHCP / TFTP 与引导文件分发
 - **Web UI**——REST API 的一个客户端，不是独立系统；鉴权走会话 Cookie
 - **CLI**（`kurrent`）——`config print` 生成声明 → `init` 收敛控制面 → `token create` 签发引导凭据 → `join` 节点接入
 
-状态以纯文件（YAML / JSONL）持久化在 `control_plane/state/` 与 `control_plane/config/`，当前未引入数据库；声明式配置 `control_plane/kurrent.yaml` 为权威，派生物（如 `dnsmasq.conf`）由控制面启动时按它渲染。全部能力经 REST 开放——Web UI 与 CLI 都只是它的客户端。
+状态以纯文件（YAML / JSONL）持久化在仓库外状态根下的 `control-plane/state/` 与 `control-plane/config/`（默认 `~/.local/state/kurrent`，`KURRENT_STATE_DIR` 可覆盖，部署记录 `~/.kurrent/deployment.yaml` 固定位置），当前未引入数据库；声明式配置 `control_plane/kurrent.yaml` 为权威，派生物（如 `dnsmasq.conf`）由控制面启动时按它渲染。状态位置与仓库解耦，移动或改名 checkout 不改变部署。全部能力经 REST 开放——Web UI 与 CLI 都只是它的客户端。
 
 ### Storager（存储节点）
 
@@ -43,7 +43,7 @@
 | **Worker** | `worker_id`（即 hostname） | 计算身份；设备绑定到 Worker 后成为该 Worker 的引导节点 |
 | **系统盘（System Disk）** | **NQN**（`<base>:<hostname>.<os>.<os_tag>`） | 存储卷（母盘克隆或空白盘）；每 Worker 可挂多块 |
 
-盘标识以 **NQN 为权威**，IQN 由 NQN 派生（iSCSI 后端与安装器消费）；`os_tag` 是 12 位随机 hex，同时充当盘文件名后缀与 NQN 末段。
+盘标识以 **NQN 为权威**，IQN 由 NQN 派生（iSCSI 兼容后端使用）；`os_tag` 是 12 位随机 hex，同时充当盘文件名后缀与 NQN 末段。
 
 绑定关系权威在**设备侧**（`bound_worker_id`），Worker 侧只是投影。盘机分离：解绑或换绑时设备回池，系统盘保留在 Worker 上。
 

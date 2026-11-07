@@ -1,6 +1,6 @@
 # 日常运维
 
-本页面向已完成部署并进入系统交付阶段的环境，覆盖声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署参见[部署](./deployment.md)。
+本页面向已完成部署并进入系统交付阶段的环境，覆盖声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署参见[部署](./deployment.md)；跨组件的故障定位见[故障排查](./troubleshooting.md)。
 
 ## 配置修改
 
@@ -26,7 +26,7 @@ kurrent config status       # 生效声明、configHash、dnsmasq.conf 一致性
 | `spec.serverCert.rotateOnChange: true` | `kurrent init` | 重签证书；已入池设备需要重新信任 |
 | `spec.boot` | `kurrent init` | 影响菜单超时与 `/boot-vars` 默认行为 |
 
-`dnsmasq/dnsmasq.conf` 不得手工编辑：它是 `spec.networking` 的派生物，控制面启动时会重新生成。
+`$STATE/control-plane/dnsmasq/dnsmasq.conf` 不得手工编辑：它是 `spec.networking` 的派生物，控制面启动时会重新生成。`$STATE` 指部署记录中的状态根（默认 `~/.local/state/kurrent`），可用 `kurrent deployment show` 查看。
 
 ### 存储节点
 
@@ -36,7 +36,9 @@ kurrent config validate --node
 kurrent join https://<控制面地址>    # 已有 bootstrap/agent.token 时可省略 --token
 ```
 
-`kurrent join` 会重新校验声明、同步 `.env` 并重启 agent。修改 `spec.agent.diskDir` 会改变盘文件目录；修改 `spec.agent.advertiseUrl` 会改变控制面访问 Agent 的地址；修改 `spec.agent.backend` 会切换编排目录（nvmet / iscsi）。变更目录前先确认旧目录中的盘文件如何迁移。
+`kurrent join` 会重新校验声明、按 `diskDir`、节点状态根与信任锚注入 compose 变量并重启 agent（nvmet 后端同时重启 nvmet-host）。修改 `spec.agent.diskDir` 会改变盘文件目录；修改 `spec.agent.advertiseUrl` 会改变控制面访问 Agent 的地址；修改 `spec.agent.backend` 会切换编排目录（nvmet / iscsi）。变更目录前先确认旧目录中的盘文件如何迁移。
+
+节点身份保存在 `<state>/storager/state/agent.id`，组件证书、引导凭据与日志同在 `<state>/storager/` 下，备份需覆盖整个节点状态根。身份丢失后无法从声明恢复：删除 `agent.id`，用 `kurrent token create` 签发新 token，再以新身份重跑 join。控制面信任锚是 `<state>/storager/certs/cp-ca.crt`；服务器证书轮换后更新该文件（或 join 时用 `--cp-ca`）并重启节点组件。
 
 ### 服务器证书漂移
 
@@ -61,7 +63,7 @@ kurrent sessions revoke <session_id>               # 逐个下线
 kurrent sessions revoke-all                        # 全部下线
 ```
 
-管理证书：`kurrent credentials show` 查看当前使用的 `admin.conf`；轮换后重新执行 `kurrent credentials install` 刷新用户级快照。
+管理证书轮换：记录当前序列号（`kurrent cert list`）→ 停控制面后删除 `<state>/control-plane/state/pki/users/admin/client.crt` 与 `client.key` → 启动控制面（自动重签并重写 `admin.conf`）→ 用新凭据吊销旧序列号 `kurrent cert revoke admin --serial <旧序列号> --reason superseded`（握手立即生效）→ `kurrent credentials install` 刷新 `~/.kurrent` 快照。`kurrent credentials show` 可查看当前使用的 `admin.conf`。
 
 ### 人员证书
 
@@ -136,13 +138,24 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 
 ## 升级与回滚
 
-1. 备份声明、`state/`、`pki/` 与 `certs/`（见下节）。
+1. 备份声明、状态根（`$STATE`）与 `~/.kurrent/`（见下节）。
 2. 更新代码后先升级控制面：重建镜像、`kurrent init`，确认 `/healthz` 与 `config status`。
-3. 再重建存储节点组件（`kurrent join` 或 `docker compose up -d`），确认 `agents list` 为 `ok`。
-4. 最后更新 WebUI 静态资源与固件（如有变更）。
+3. 再重建存储节点组件（`kurrent join`），确认 `agents list` 为 `ok`。
+4. 最后更新 WebUI 静态资源：`(cd webui/app && npm ci && npm run build)`（`dist` 不入库）；固件有变更时同步更新。
 5. 执行部署探针：`bash tests/deploy/probe_edge.sh`。
 
-控制面服务端迁移是启动时执行的幂等操作，但升级前仍应备份。回滚使用上一版本的代码重建镜像并重跑 `kurrent init`；声明文件与状态目录保留。若新版本已写入旧版本不认识的字段，回滚前先恢复备份。
+控制面服务端迁移是启动时执行的幂等操作，但升级前仍应备份。回滚使用上一版本的代码重建镜像并重跑 `kurrent init`；声明文件与状态根保留。若新版本已写入旧版本不认识的字段，回滚前先恢复备份。
+
+### 仓库移动
+
+状态根与仓库解耦，移动或改名 checkout 不需要迁移状态：
+
+1. 停止在新旧路径上都可能触发编排的进程；确认没有正在执行的 `kurrent init` / `kurrent join`。
+2. 移动或重命名仓库目录。
+3. 在新位置执行 `kurrent init --dir <新仓库根>`；命令按部署记录复用状态根与固定项目名，以 `--force-recreate` 重建容器并更新记录中的 `repoRoot`。
+4. 执行 `kurrent config status` 与 `kurrent host check`，确认服务与挂载源正常。
+
+存储节点按同样步骤用 `kurrent join <cp-url> --dir <新仓库根>` 收敛。不要手工编辑 `~/.kurrent/deployment.yaml`：仓库根、状态根与项目名三者必须一致，写错会让下一次 init 认错部署。
 
 ## 备份与恢复
 
@@ -150,20 +163,22 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 
 | 路径 | 内容 | 权限 |
 | --- | --- | --- |
-| `control_plane/kurrent.yaml` | 控制面声明 | 644 |
-| `storager/kurrent.yaml` | 节点声明 | 644 |
-| `control_plane/state/` | 台账、凭据、审计、会话、证书台账 | 目录 700，文件 600 |
-| `control_plane/state/pki/` | 三类 CA、组件证书、admin 凭据 | 目录 700，私钥 600 |
-| `control_plane/state/certs/` | TOFU 服务器证书与指纹 | 目录 700，私钥 600 |
-| `storager/bootstrap/` | 节点引导凭据 | 目录 700，文件 600 |
+| `control_plane/kurrent.yaml` | 控制面声明（随仓库） | 644 |
+| `storager/kurrent.yaml` | 节点声明（随仓库） | 644 |
+| `$STATE/control-plane/state/` | 台账、凭据、审计、会话、证书台账、PKI 与 TOFU 证书 | 目录 700，文件 600 |
+| `$STATE/control-plane/config/agents.yml` | Agent 台账 | 644 |
+| `$STATE/control-plane/dnsmasq/` | 渲染配置与租约（可再生） | 644 |
+| `$STATE/storager/` | 节点身份、引导凭据、组件 PKI、日志与信任锚 | 目录 700，私钥 600 |
+| `~/.kurrent/deployment.yaml` | 部署记录（仓库根、状态根、项目名） | 600 |
+| `~/.kurrent/admin.conf` 与 `pki/` | 管理凭据快照（可由 `kurrent init` 重建） | 600 |
 
-`state/` 含私钥与凭据明文，备份必须加密并限制访问。恢复流程：
+状态根含私钥与凭据明文，备份必须加密并限制访问。`control-plane/dnsmasq/` 与 `~/.kurrent/` 中的凭据可以再生产，完整备份以 `control-plane/state/` 与节点状态根为主。恢复流程：
 
 1. 停止控制面与存储节点组件。
-2. 恢复声明与状态目录，保持原有权限。
+2. 恢复声明与状态根到部署记录中的原路径，保持原有权限；部署记录一并恢复。
 3. `kurrent init`，确认 `configHash` 与备份时一致。
 4. 存储节点按需重跑 `kurrent join`，确认 `agents list`。
-5. 若丢失 `pki/` 或 `certs/`，所有组件需要重新 enroll，设备需要重新信任服务器证书；这不是无损恢复。
+5. 若丢失 `state/` 下的 PKI 或 `certs/`，所有组件需要重新 enroll，设备需要重新信任服务器证书；这不是无损恢复。
 
 ## 可观测性
 
@@ -172,7 +187,7 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 - **Agent 健康**：`kurrent agents list` / WebUI Agents；控制面到 Agent 的连通性。
 - **引导链状态**：WebUI「引导链」/ `GET /boot-assets`；固件能力、脚本链与菜单完整性。
 - **操作审计**：WebUI Operations / `kurrent ops list`；注册、绑定、建盘、凭据等操作轨迹。
-- **请求审计**：`control_plane/state/audit.jsonl`；主体、issuer、serial、路由、决策与告警。
+- **请求审计**：`$STATE/control-plane/state/audit.jsonl`；主体、issuer、serial、路由、决策与告警。
 - **告警外投**：`KURRENT_CP_ALARM_WEBHOOK`；`event=alarm` 事件 POST 到外部地址。
 
 审计写入失败时请求返回 503（fail-closed）。告警外投走后台队列，不进入请求路径。
@@ -180,16 +195,13 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 ## 安全基线
 
 ```bash
-bash control_plane/host-baseline.sh
+sudo kurrent host check --role all    # 同机部署；分机时分别用 control / storage
 ```
 
 - 控制面宿主只暴露 22、53/67/69、80/443；存储节点另有 4840/4421。
+- 输出为 `ok` / `warn` / `fail` / `skip`；exit 0 通过、1 有 FAIL、2 用法错误。非 root 时防火墙类检查为 `skip`，`--strict` 将 `skip` 也计为失败。
 - nvmet-host 管理面走共享卷 UDS，不产生 TCP 监听。
 - 控制面容器不挂载 `docker.sock`。
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600。
 - Docker 发布端口不受 ufw 过滤；需要入站限制时在 `DOCKER-USER` 链收口。
 - PXE 网段按[部署](./deployment.md)页所述的边界隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。
-
-## 故障排查
-
-跨组件的现象定位、证据采集与恢复路径见[故障排查](./troubleshooting.md)。

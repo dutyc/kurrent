@@ -10,7 +10,7 @@
 - **Bound**：设备已绑定 Worker，可以进入该 Worker 的引导链。
 - **Revoked**：设备被吊销，不再更新、不再入池，也不能被重新登记。
 - **Binding（绑定）**：设备到 Worker 的一对一授权。绑定即认证；换绑即冷迁移。
-- **Readiness**：Worker 是否具备可引导条件：已绑定设备、有系统盘、数据面可用。
+- **Readiness**：Worker 是否具备可引导条件：已绑定设备且有系统盘。
 - **Cold migration（冷迁移）**：关闭设备 A，把设备绑定切换到 B，由 B 启动同一 Worker 的系统盘。
 - **Drain（排空）**：将节点 `enabled` 置为否：不再接受新建盘，已有盘继续服务。
 - **Registration window（注册窗口）**：允许未知设备登记入池的时间窗口，受 TTL 与设备额度约束。

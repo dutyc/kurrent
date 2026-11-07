@@ -1,10 +1,10 @@
 # 首次交付
 
-> 本页把一台已接入 PXE 网段的设备交付为可网络启动的系统：确认母盘 → 入池 → 绑定 Worker → 创建系统盘 → 设置默认盘 → 冷启动验收 → 管理凭据。前提是[部署](./deployment.md)已完成，控制面与存储节点 `health=ok`。
+> 本页把一台已接入 PXE 网段的设备交付为可网络启动的系统：确认母盘 → 入池 → 绑定 Worker → 创建系统盘 → 设置默认盘 → 冷启动验收。前提是[部署](./deployment.md)已完成，控制面与存储节点 `health=ok`。
 
 ## 交付路径
 
-按顺序完成七步，完成标志分别是：
+按顺序完成六步，完成标志分别是：
 
 1. 确认母盘：`diskDir` 中有 4K 原生 GPT 母盘，`GET /masters` 可见。
 2. 设备入池：Devices 页显示 `pooled`，并完成密钥认领。
@@ -12,19 +12,19 @@
 4. 创建系统盘：母盘克隆完成，`os_tag` 已生成；nvmet 后端同时签发凭据。
 5. 设置默认盘：Worker 的默认启动盘指向目标系统。
 6. 冷启动验收：设备经 GRUB、内核、initramfs 到 rootfs，出现登录提示符。
-7. 管理凭据：轮换/吊销可用，推送状态正常。
 
 ## WebUI 与 API
 
 以下步骤均可通过 WebUI 完成，也可用控制面 REST API 自动化。**CLI 目前只提供 `workers list/get` 与凭据操作**，Worker 创建、设备绑定、建盘与默认盘请走 API 或 WebUI。
 
-在控制面服务器、仓库根目录准备 API 调用（admin 证书即 `kurrent init` 自举的管理凭据）：
+在控制面服务器准备 API 调用（admin 证书即 `kurrent init` 安装的管理凭据，位于状态根）：
 
 ```bash
+STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
 BASE_URL=https://192.168.1.10/api/cp
-CERT=control_plane/state/pki/users/admin/client.crt
-KEY=control_plane/state/pki/users/admin/client.key
-CA=control_plane/state/certs/server.crt
+CERT="$STATE/control-plane/state/pki/users/admin/client.crt"
+KEY="$STATE/control-plane/state/pki/users/admin/client.key"
+CA="$STATE/control-plane/state/certs/server.crt"
 api() {
   curl -sS --cert "$CERT" --key "$KEY" --cacert "$CA" \
     "$BASE_URL$1" "${@:2}"
@@ -133,7 +133,7 @@ api /workers/worker-01/luns/disk -X POST \
 ```
 
 - 省略 `disk_agent` 时由放置策略选节点；传 `disk_agent` 可把盘固定到某台存储节点。
-- 响应包含 12 位 hex 的 `os_tag` 与完整盘 NQN。nvmet 后端在建盘时**自动签发 DHHC-1 认证密钥**并推送到持有该盘的 Agent。
+- 响应包含 12 位 hex 的 `os_tag` 与完整盘 NQN。nvmet 后端在建盘时**自动签发 DHHC-1 认证密钥**并推送到持有该盘的 Agent；轮换、吊销与推送状态见[日常运维](./operations.md#nvme-of-凭据)。
 - Worker 的第一块系统盘会自动设为默认盘；第二块及以后不会自动改写默认盘。
 
 批量创建使用 `POST /workers/luns/disk/batch`，`dry_run=true` 只返回计划。完整字段与返回结构见 [API 参考](../reference/api.md)。
@@ -182,22 +182,6 @@ DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 连接 4421
 | 引导错误 `0x7f22208e` | 母盘/系统盘 GPT 是否为 4K 原生；`GET /masters` 的 `gpt` 是否为 `4k` |
 
 其余现象见[故障排查](./troubleshooting.md)。
-
-## 7. 管理凭据
-
-凭据按 Worker 跟盘，轮换/吊销即时生效：
-
-```bash
-kurrent workers credential show worker-01
-kurrent workers credential set worker-01 --generate
-kurrent workers credential revoke worker-01
-```
-
-`show` 显示密钥哈希前缀与逐 Agent 推送状态；`set --generate` 就地轮换且不打印明文；`revoke` 使下一次启动被拒绝。
-
-TLS PSK 由认证密钥派生，因此轮换/吊销认证密钥即原子地轮换/吊销 PSK。推送失败由控制面周期对账自动重试，状态在 Worker 详情「NVMe-oF 凭据」页可见。管理面也提供对应 REST 端点，自动化场景见 [API 参考](../reference/api.md)；CLI 是交互操作的首选。
-
-密钥明文只出现在链路必要范围（控制面与 Agent 的 0600 状态文件、存储节点 configfs 与内核 `.nvme` keyring），不引入应用层加密；磁盘与宿主访问边界由部署方负责。
 
 ## 相关页面
 

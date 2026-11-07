@@ -12,9 +12,11 @@ Kurrent 由少量维护者与大量 AI 辅助共同开发。贡献的评价标�
 - **`tftp/`、`dnsmasq/`**：引导脚本、固件首跳与 DHCP 配置。
 - **`docs/`**：双语文档站（VitePress）。
 - **`tests/`**：Python 测试、部署探针与测试工具。
+- **`scripts/`**：构建期脚本（如 API 文档同步）。
 - **`api/`**：控制面 API 双语文档。
 - **`about/`**：架构、路线图与项目说明。
-- **`thirdparty/`**：固定版本的上游参考实现与补丁。
+
+仓库只跟踪产品、验证与公开文档。上游参考源码、审计证据、设计蓝图、个人交付物与旧文档快照统一放在本地 `.local/`；盘镜像等运行数据由 `spec.agent.diskDir` / `KURRENT_DISK_DIR` 指向仓库外目录。两者都不入库。
 
 固件位于独立仓库 `dutyc/kurrent-firmware`，只维护 iPXE 差异补丁与构建资产。
 
@@ -24,12 +26,12 @@ Kurrent 由少量维护者与大量 AI 辅助共同开发。贡献的评价标�
 | --- | --- |
 | 文档 | `npm ci && npm run docs:build` |
 | 文档（Pages 形态） | `VITEPRESS_BASE=/kurrent/ VITEPRESS_NO_CLEAN=1 npm run docs:build` |
-| CLI | `cd cli && go vet ./... && go test ./... && go build -o kurrent .` |
+| CLI | `mkdir -p bin && cd cli && go vet ./... && go test ./... && go build -o ../bin/kurrent .` |
 | 控制面与节点 | `.venv-linux/bin/python -m pytest tests/ -q` |
 | WebUI | `cd webui/app && npm ci && npm test && npm run build` |
 | 部署探针 | 运行中的部署上执行 `bash tests/deploy/probe_edge.sh` |
 
-Python 测试必须限定在 `tests/` 目录；直接在仓库根运行会误收集 `thirdparty/` 中的上游测试。
+Python 测试必须限定在 `tests/` 目录。
 
 涉及引导链、凭据或数据面的改动，除单元测试外还需要在真实设备或 QEMU 上完成一次端到端验证，并在 PR 中给出证据。
 

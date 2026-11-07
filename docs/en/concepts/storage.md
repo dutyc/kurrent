@@ -8,6 +8,8 @@ Storage nodes host master images and system disks and export block devices to de
 | nvmet-host | Shared-volume UDS (mTLS) | Kernel configfs operations: subsystem / namespace / port / allowed_hosts / DHHC-1; injects TLS PSKs |
 | Host kernel nvmet | Storage-node host | NVMe/TCP target on data-plane port `4421` |
 
+![Storage path: cloning a system disk from a master and exporting it to the device data plane](/diagrams/storage-data-plane.svg)
+
 nvmet is the primary backend. iSCSI (stgt / lio) is retained as a compatibility backend, but the main branch has no live boot path; the historical implementation lives in `iscsi-classic`. Backend differences are encapsulated in the Agent — the control plane only speaks HTTP.
 
 ## Master Images
@@ -54,11 +56,7 @@ Deleting a disk can optionally delete the backing file. Removing only the target
 
 ## Data Plane
 
-There is exactly one data-plane path between a device and a storage node:
-
-```text
-device firmware / kernel ── NVMe/TCP :4421 (TLS 1.3) ──► nvmet target
-```
+There is exactly one data-plane path between a device and a storage node; the control plane never handles block I/O:
 
 - **One port**. The firmware and kernel segments share `4421`; there is no second plaintext port to fall back to.
 - **Encrypted by default**. TLS 1.3 is performed by firmware for the first segment; the kernel and initramfs reconnect on the same port with `--tls`.

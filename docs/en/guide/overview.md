@@ -54,16 +54,9 @@ The two operate at different layers and can be combined: Kurrent converts bare m
 | Storage node | Hosts master images and system disks, exports block devices | Agent, nvmet-host, host kernel nvmet |
 | Device | Stateless compute; becomes a Worker's booting node after network boot | Device firmware (iPXE), operating system inside the system disk |
 
-```text
-                Management plane 443 (the only external entry)
-  browser / CLI ───────────────► control-plane server
-                                   │  dnsmasq: DHCP / TFTP
-                                   │  control plane: identity / ledger / scheduling
-                                   ▼
-  bare-metal device ── PXE / HTTPS boot ──► boot variables (disk NQN, host NQN, credentials)
-      │
-      └──── NVMe/TCP 4421 (TLS 1.3) ────► storage node (Agent + nvmet-host)
-```
+![Deployment topology: the management and data planes between control plane, storage nodes and devices](/diagrams/topology.svg)
+
+The control plane and storage nodes may be separate or co-located, but the roles stay separate; master image customization is one-time preparation rather than a per-deployment step.
 
 ## Three Entities
 
@@ -74,12 +67,6 @@ The two operate at different layers and can be combined: Kurrent converts bare m
 | System disk | NQN | Disk file on a storage node; ownership recorded by the control plane |
 
 The device lifecycle is `pooled → bound → revoked`; a Worker's `readiness` is derived from "has a bound device" and "has a system disk". One Worker may carry multiple system disks, and the default disk determines the boot entry after the menu timeout.
-
-## Delivery Roles
-
-The control plane owns identity, ledgers and connection information; the storage node clones the system disk from a master and exports the block device; the device obtains the boot script over DHCP/TFTP, completes the identity exchange over HTTPS, and boots the system disk of its Worker from the network. Migrating to another machine only requires rebinding the device to the same Worker; the system disk and identity remain unchanged.
-
-Deployment follows a single standard procedure: the control plane and storage nodes may be separate or co-located, and deployment leads into the delivery workflow. Master image customization is one-time preparation and is not repeated for every deployment.
 
 ## Capabilities
 
@@ -96,14 +83,9 @@ Deployment follows a single standard procedure: the control plane and storage no
 
 ## Current Boundaries
 
-Kurrent currently focuses on the minimal closed loop of the control plane and data plane. It does not assume that every operational scenario is already covered.
+Kurrent currently focuses on the minimal closed loop of the control plane and data plane. The complete implementation boundaries, verified distributions, and unavailable capabilities are listed in the [Roadmap](../about/roadmap.md).
 
-- **Verified distributions**: Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0 have completed whole-machine cold boot; the verification set does not limit which distributions can boot.
-- **Deployment prerequisites**: a dedicated PXE network and storage-host prerequisites (kernel NVMe/TCP TLS support, `tlshd >= 1.5.0`, a reflink-capable filesystem).
-- **Not yet provided**: post-boot application orchestration, control-plane high availability, IPv6, ARM, data disks, live migration; Windows and ESXi are on the roadmap.
-- **State storage**: the control plane is a single node with plain-file ledgers; there is no database or multi-node consistency mechanism.
-- **Boot trust boundary**: the first DHCP/TFTP hop has no cryptographic protection; deployments must treat the PXE network as an independent trust boundary. Mainline firmware is unsigned.
-- **Firmware status**: device firmware is built from a separate repository; mainline has no operational Secure Boot path, and iPXE-side NBFT generation is still pending.
+Before deployment, confirm that the PXE network is an independent trust boundary and that storage hosts meet the kernel NVMe/TCP TLS and `tlshd >= 1.5.0` prerequisites. See [Deployment](./deployment.md) for checks and the [Security Model](../architecture/security.md) for the first-hop trust assumptions.
 
 ## Related Pages
 

@@ -31,7 +31,7 @@ These are boot-chain contracts rather than optional tuning. The firmware reposit
 
 ## Verified distributions
 
-Distributions currently verified through a full cold boot: Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, and openSUSE Leap 16.0. Installation media, constraints, initramfs consumers, customization scripts, and default repositories are listed under [Script acquisition](#_3-script-acquisition); versions, sources, and family differences are in the [distribution matrix](../reference/distributions.md), and the research notes on native NBFT consumption live in the firmware repository's [distribution research](https://github.com/dutyc/kurrent-firmware/blob/main/docs/nvmeof-research.md).
+Verified distributions and their versions are listed in the [distribution matrix](../reference/distributions.md). Installation media, constraints, initramfs consumers, customization scripts, and default repositories are covered under [Script acquisition](#_3-script-acquisition); the research notes on native NBFT consumption live in the firmware repository's [distribution research](https://github.com/dutyc/kurrent-firmware/blob/main/docs/nvmeof-research.md).
 
 Versions outside this set are not verified; RHEL 9.x has not been tested. Native NBFT consumption is not native authentication: the RHEL/SUSE `95nvmf` module only runs a credential-less `nvme connect-all --nbft`, whereas this project's `95nbft` consumes the credential-bearing NBCT and is built with `--omit nvmf`.
 
@@ -44,7 +44,7 @@ Versions outside this set are not verified; RHEL 9.x has not been tested. Native
 - A UEFI VM or physical machine; use a raw/qcow2 disk or a passed-through disk.
 - Install the target distribution minimally. The ESP must be at least 256 MiB; the script does not resize partitions, so a small default ESP must be expanded before execution.
 - For XFS (Fedora, AlmaLinux, openSUSE Leap): install onto a **4K logical-block** virtual disk. XFS fixes its sector size at `mkfs` time, and a 512-sector XFS cannot be mounted on nvmet's 4096-byte export.
-- The master requires `python3`, `lsblk` / `findmnt` / `blkid` (util-linux) and a usable package repository; `nvme-cli`, `jq`, `keyutils`, `ktls-utils`, `initramfs-tools` and similar packages are installed by phase A.
+- The master requires `python3`, `lsblk` / `findmnt` / `blkid` (util-linux) and a usable package repository; `nvme-cli`, `jq`, `keyutils`, `ktls-utils`, `initramfs-tools` (mkinitcpio on Arch) and similar packages are installed by phase A.
 - The script is executed **inside the installed system as root**, not on the host.
 
 After installation, complete customization of business software, drivers, services and users; this content is cloned into every system disk. Machine identity, target/NQN, authentication keys and the control-plane address must not be written to the disk; a separate `_tpl_` master is required for each role.
@@ -62,7 +62,7 @@ dpkg-query -W ktls-utils 2>/dev/null || rpm -q ktls-utils
 systemctl status tlshd
 ```
 
-Debian 12's 6.1 kernel does not meet the authentication requirement; the other variants use their current `uname -r`. A version whose kernel lacks NVMe/TCP TLS support must not serve as a production master, and the data plane must not fall back to plaintext.
+Debian 12's 6.1 kernel does not meet the authentication requirement; the other variants use their current `uname -r`. On Arch Linux, the kernel config is at `/boot/config-linux` (or `zcat /proc/config.gz`); check `ktls-utils` with `tlshd -v` because it is not in the official repositories. A version whose kernel lacks NVMe/TCP TLS support must not serve as a production master, and the data plane must not fall back to plaintext.
 
 ### 3. Script acquisition
 
@@ -83,6 +83,7 @@ Scripts live at `test/<directory>/golden-image-setup-*.sh` in the firmware repos
 | Fedora 44<br>`fedora44` | Server DVD; XFS/LVM; install on a 4K-logical-block disk; dracut `95nbft` | `uname -r`<br>`mirrors.aliyun.com/fedora` |
 | AlmaLinux 10.2<br>`almalinux10` | minimal ISO; kickstart, XFS; install on a 4K-logical-block disk; dracut `95nbft` | `uname -r`<br>`repo.huaweicloud.com/almalinux` |
 | openSUSE Leap 16.0<br>`opensuse-leap16` | online installer (Agama); Agama profile, XFS; target disk must be empty; dracut `95nbft` | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/opensuse` |
+| Arch Linux (rolling)<br>`archlinux` | archiso ISO; archinstall JSON, ext4; embedded GRUB 2.14; mkinitcpio `nbft` hook | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/archlinux` |
 
 The scripts embed the `initramfs-nbft` components and the GRUB 2.14 artifact, so **a single `.sh` file can be copied into the master and executed**; cloning the whole repository is unnecessary. The following command is required only when components are modified and the embedded payload must be regenerated:
 
@@ -120,7 +121,7 @@ After a complete A–F run, shut down the VM; the resulting image is the master.
 - **`--yes`**: skip the phase E confirmation; used only in a disposable environment.
 - **`--grub-efi FILE`**: replace the embedded GRUB 2.14 with a locally built `BOOTX64.EFI`; Debian 12's stock GRUB 2.06 does not affect the default flow, which uses the embedded 2.14. This option is used only for a specific requirement.
 - **`--no-serial`**: omit `console=ttyS0,115200`; intended for physical machines without a serial port.
-- **`--mirror URL`**: switch the package repository; the default is a China-based mirror per distribution (Aliyun for Debian/Ubuntu/Fedora, Huawei Cloud for AlmaLinux, TUNA for openSUSE Leap).
+- **`--mirror URL`**: switch the package repository; the default is a China-based mirror per distribution (Aliyun for Debian/Ubuntu/Fedora, Huawei Cloud for AlmaLinux, TUNA for openSUSE Leap and Arch).
 - **`--keep-sources`**: keep the master's original package sources; `--mirror` has no effect when set.
 
 ### 6. Typical usage
@@ -148,16 +149,17 @@ The script executes the following six phases in order.
 
 Phase A installs runtime dependencies such as `nvme-cli`, `jq`, `keyutils` and `ktls-utils`, and confirms that the kernel provides NVMe authentication and NVMe/TCP TLS. The kernel phase requires both DH-HMAC-CHAP authentication and TLS.
 
-Debian 12 requires the 6.12 kernel from backports; the stock kernels in Debian 13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0 are sufficient. A kernel-phase `ret=401` or `authentication setup failed` means the authentication capability is missing.
+Debian 12 requires the 6.12 kernel from backports; the stock kernels in Debian 13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0 and Arch Linux (rolling) are sufficient. A kernel-phase `ret=401` or `authentication setup failed` means the authentication capability is missing.
 
 ### B. initramfs consumer
 
-The initramfs must reconnect the system disk after the kernel starts. There are two integration styles:
+The initramfs must reconnect the system disk after the kernel starts. There are three integration styles:
 
 | Framework | Integration | Key points |
 | --- | --- | --- |
 | initramfs-tools (Debian/Ubuntu) | `hooks/nbft` and `scripts/local-top/nbft` | `nbft_auto` kernel argument; dash/ash semantics; `tlshd` configuration |
 | dracut (Fedora/AlmaLinux/Leap) | `95nbft` module | `--omit nvmf`; Fedora uses `systemd-networkd`, AlmaLinux and Leap use NetworkManager; `--no-hostonly`; explicit LVM activation on Fedora |
+| mkinitcpio (Arch) | local `install/nbft` + `hooks/nbft` hook | `nbft_auto` argument; DHCP via dhcpcd inside the hook; `tlshd` configuration and `nvme_tcp` modules |
 
 RHEL and SUSE additionally require `/etc/crypto-policies/back-ends/gnutls.config` in the initramfs; without it, `tlshd` exits with `gnutls: The request is invalid. (-50)` and the kernel-phase TLS session cannot be established.
 
@@ -172,6 +174,9 @@ lsinitramfs /boot/initrd.img-$(uname -r) | grep -E 'nbft|tlshd|nvme'
 # dracut (Fedora / AlmaLinux / Leap)
 lsinitrd /boot/initramfs-$(uname -r).img | grep -E 'nbft|tlshd|nvme'
 lsinitrd /boot/initrd-$(uname -r) 2>/dev/null | grep -E 'nbft|tlshd|nvme'
+
+# mkinitcpio (Arch)
+lsinitcpio /boot/initramfs-linux.img | grep -E 'nbft|tlshd|nvme'
 ```
 
 ### C. System configuration

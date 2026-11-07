@@ -1,6 +1,6 @@
 # Architecture
 
-![Architecture](../../assets/architecture.svg)
+![Architecture](../../docs/public/architecture.svg)
 
 ## Control Plane / Data Plane Separation
 
@@ -13,12 +13,12 @@ The system is split along one clean line: the **control plane** handles identity
 The brain. A containerized node running:
 
 - the **Control Plane HTTP service** (in-container unix socket `/run/kurrent/cp.sock`, reached by nginx only; no TCP listener) — device ledger & pool, device↔Worker binding, worker lifecycle, storage scheduling (system disk create / delete), boot-variable projection, audit log
-- **nginx** (`:443`, the only external entry) — WebUI SPA, management API (`/api/cp/`), boot-chain bare paths (`/devices/…`, `/boot-vars`), iPXE assets (`/file/`) and menus (`/tftp/`); `:80` only redirects with 301
+- **nginx** (`:443`, the only external entry) — WebUI SPA, management API (`/api/cp/`), boot-chain bare paths (`/devices/…`, `/boot-vars`) and iPXE menus (`/tftp/`); `:80` only redirects with 301
 - **dnsmasq** (host network) — DHCP / TFTP and boot-file distribution
 - the **Web UI** — one client of the REST API, not a separate system; it authenticates with a session cookie
 - the **CLI** (`kurrent`) — `config print` emits the declaration → `init` converges the control plane → `token create` issues bootstrap credentials → `join` brings a node in
 
-State is persisted as plain files (YAML / JSONL) under `control_plane/state/` and `control_plane/config/`; no database has been introduced so far. The declarative configuration in `control_plane/kurrent.yaml` is authoritative and its artifacts (such as `dnsmasq.conf`) are rendered from it at control-plane startup. Every capability is exposed as REST — the Web UI and the CLI are just clients of it.
+State is persisted as plain files (YAML / JSONL) under `control-plane/state/` and `control-plane/config/` in a state root outside the repository (default `~/.local/state/kurrent`, overridable with `KURRENT_STATE_DIR`, pinned by the deployment record `~/.kurrent/deployment.yaml`); no database has been introduced so far. The declarative configuration in `control_plane/kurrent.yaml` is authoritative and its artifacts (such as `dnsmasq.conf`) are rendered from it at control-plane startup. State is decoupled from the repository, so moving or renaming the checkout does not change the deployment. Every capability is exposed as REST — the Web UI and the CLI are just clients of it.
 
 ### Storager
 
@@ -43,7 +43,7 @@ The role layer maps onto an entity layer of three objects:
 | **Worker** | `worker_id` (== hostname) | Compute identity; a Device bound to a Worker becomes that Worker's booting node |
 | **System Disk** | **NQN** (`<base>:<hostname>.<os>.<os_tag>`) | Storage volume (master-clone or empty); multiple disks per Worker |
 
-The disk is identified by its **NQN**; the IQN is derived from it (consumed by the iSCSI backend and installers). `os_tag` is 12 random hex digits — at once the disk-filename suffix and the last NQN segment.
+The disk is identified by its **NQN**; the IQN is derived from it (used by the iSCSI compatibility backend). `os_tag` is 12 random hex digits — at once the disk-filename suffix and the last NQN segment.
 
 The binding relationship is authoritative on the **device side** (`bound_worker_id`); the Worker only holds a projection. Disks are decoupled from machines: unbinding or rebinding returns the device to the pool while its system disks stay on the Worker.
 

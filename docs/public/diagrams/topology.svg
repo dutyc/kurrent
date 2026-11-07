@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" width="1200" height="660" role="img" aria-labelledby="topology-title topology-desc">
+  <title id="topology-title">Kurrent deployment topology</title>
+  <desc id="topology-desc">A control host provides the 443 management entry, control plane and dnsmasq boot services; a storage node runs the Agent, nvmet-host and the NVMe/TCP target on 4421; devices reach the control host for DHCP, TFTP and HTTPS, and the storage node for block I/O.</desc>
+  <rect width="1200" height="660" fill="#faf9f6"/>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#8a3f2b"/>
+    </marker>
+    <marker id="arrow-muted" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#6f6a61"/>
+    </marker>
+  </defs>
+
+  <g font-family="Inter, 'Noto Sans CJK SC', 'Segoe UI', sans-serif">
+    <text x="48" y="42" font-size="10" letter-spacing="2.4" fill="#8a3f2b">DEPLOYMENT TOPOLOGY</text>
+    <text x="48" y="72" font-family="Georgia, 'Noto Serif CJK SC', serif" font-size="24" fill="#151412">Control host, storage node, devices</text>
+    <line x1="48" y1="88" x2="1152" y2="88" stroke="#d8d1c5"/>
+
+    <!-- Control host -->
+    <rect x="48" y="112" width="520" height="250" rx="12" fill="#f4f1ea" stroke="#d8d1c5"/>
+    <text x="72" y="142" font-size="16" font-weight="600" fill="#151412">Control host</text>
+    <text x="72" y="160" font-size="11" fill="#6f6a61">management and boot entry</text>
+
+    <rect x="72" y="180" width="200" height="68" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="88" y="205" font-size="13" font-weight="600" fill="#151412">nginx · :443</text>
+    <text x="88" y="223" font-size="11" fill="#6f6a61">mTLS · token · session</text>
+    <text x="88" y="239" font-size="10" fill="#8d867b">boot scripts · WebUI · API</text>
+
+    <rect x="296" y="180" width="248" height="68" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="312" y="205" font-size="13" font-weight="600" fill="#151412">Control Plane</text>
+    <text x="312" y="223" font-size="11" fill="#6f6a61">unix socket · no TCP port</text>
+    <text x="312" y="239" font-size="10" fill="#8d867b">identity · ledger · scheduling</text>
+
+    <rect x="72" y="268" width="200" height="68" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="88" y="293" font-size="13" font-weight="600" fill="#151412">dnsmasq</text>
+    <text x="88" y="311" font-size="11" fill="#6f6a61">DHCP 67 · TFTP 69</text>
+    <text x="88" y="327" font-size="10" fill="#8d867b">generated from declaration</text>
+
+    <line x1="272" y1="214" x2="296" y2="214" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow-muted)"/>
+    <text x="284" y="206" font-size="9" text-anchor="middle" fill="#8d867b">unix</text>
+
+    <!-- Storage node -->
+    <rect x="632" y="112" width="520" height="250" rx="12" fill="#f4f1ea" stroke="#d8d1c5"/>
+    <text x="656" y="142" font-size="16" font-weight="600" fill="#151412">Storage node</text>
+    <text x="656" y="160" font-size="11" fill="#6f6a61">data plane</text>
+
+    <rect x="656" y="180" width="200" height="68" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="672" y="205" font-size="13" font-weight="600" fill="#151412">Agent · :4840</text>
+    <text x="672" y="223" font-size="11" fill="#6f6a61">mTLS · control plane only</text>
+    <text x="672" y="239" font-size="10" fill="#8d867b">disks · masters · push</text>
+
+    <rect x="880" y="180" width="248" height="68" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="896" y="205" font-size="13" font-weight="600" fill="#151412">nvmet-host</text>
+    <text x="896" y="223" font-size="11" fill="#6f6a61">shared-volume UDS</text>
+    <text x="896" y="239" font-size="10" fill="#8d867b">configfs · DHHC-1 · PSK</text>
+
+    <rect x="656" y="268" width="472" height="68" rx="8" fill="#f7efe9" stroke="#8a3f2b"/>
+    <text x="672" y="293" font-size="13" font-weight="600" fill="#151412">kernel nvmet · :4421</text>
+    <text x="672" y="311" font-size="11" fill="#6f6a61">NVMe/TCP target · TLS 1.3 required</text>
+    <text x="672" y="327" font-size="10" fill="#8d867b">no plaintext fallback port</text>
+
+    <line x1="856" y1="214" x2="880" y2="214" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow-muted)"/>
+    <line x1="1004" y1="248" x2="1004" y2="268" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow-muted)"/>
+    <text x="1012" y="263" font-size="9" fill="#8d867b">PSK → keyring</text>
+
+    <line x1="568" y1="214" x2="632" y2="214" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow-muted)"/>
+    <text x="600" y="206" font-size="9" text-anchor="middle" fill="#8d867b">4840 mTLS</text>
+
+    <!-- Devices -->
+    <rect x="48" y="404" width="1104" height="210" rx="12" fill="#f4f1ea" stroke="#d8d1c5"/>
+    <text x="72" y="434" font-size="16" font-weight="600" fill="#151412">Devices</text>
+    <text x="72" y="452" font-size="11" fill="#6f6a61">x86_64 UEFI · network boot</text>
+
+    <rect x="72" y="480" width="300" height="90" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="88" y="508" font-size="13" font-weight="600" fill="#151412">Device A</text>
+    <text x="88" y="528" font-size="11" fill="#6f6a61">bare metal · iPXE</text>
+    <text x="88" y="546" font-size="10" fill="#8d867b">device key in NVRAM</text>
+
+    <rect x="396" y="480" width="300" height="90" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="412" y="508" font-size="13" font-weight="600" fill="#151412">Device B</text>
+    <text x="412" y="528" font-size="11" fill="#6f6a61">bare metal · iPXE</text>
+    <text x="412" y="546" font-size="10" fill="#8d867b">same boot path</text>
+
+    <rect x="744" y="480" width="300" height="90" rx="8" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="760" y="508" font-size="13" font-weight="600" fill="#151412">Device C</text>
+    <text x="760" y="528" font-size="11" fill="#6f6a61">bare metal · iPXE</text>
+    <text x="760" y="546" font-size="10" fill="#8d867b">data-plane client</text>
+
+    <line x1="172" y1="480" x2="172" y2="336" stroke="#a8a197" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow-muted)"/>
+    <text x="180" y="430" font-size="10" fill="#6f6a61">DHCP / TFTP · first hop</text>
+    <line x1="330" y1="480" x2="330" y2="248" stroke="#6f6a61" stroke-width="1.3" marker-end="url(#arrow-muted)"/>
+    <text x="338" y="452" font-size="10" fill="#6f6a61">HTTPS 443</text>
+    <line x1="894" y1="480" x2="894" y2="336" stroke="#8a3f2b" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <text x="902" y="438" font-size="10" fill="#8a3f2b">NVMe/TCP 4421 · TLS 1.3</text>
+
+    <text x="72" y="596" font-size="10" fill="#8d867b">Management and boot variables stop at the control host. Block I/O goes directly from the device to the storage node.</text>
+  </g>
+</svg>

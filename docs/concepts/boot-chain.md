@@ -6,20 +6,7 @@
 
 ## 总览
 
-```text
-设备上电
-  → DHCP（dnsmasq）      地址、next-server
-  → TFTP                 snponly.efi + boot.ipxe 指针
-  → HTTPS + TOFU         boot.ipxe.cfg（后续脚本全部走 HTTPS）
-  → /devices/report      指纹 + 设备公钥
-  → /devices/challenge   一次性 nonce
-  → sign(nonce‖mac)      设备私钥签名
-  → /boot-vars           验签与准入后投影盘 NQN、Host NQN、凭据
-  → menu.ipxe            菜单超时选择默认盘
-  → sanboot nvme://...   NVMe/TCP 4421，DH-HMAC-CHAP + TLS 1.3
-  → NBFT / NBCT          固件向 initramfs 交接连接信息与密钥
-  → 内核重连 → rootfs → login
-```
+![引导链：首跳、设备身份与数据面三个阶段](/diagrams/boot-chain.svg)
 
 控制面与固件分工明确：固件提供协议驱动、设备密钥命令、NVRAM 与 TOFU 能力；引导脚本与准入判断由主仓库维护。
 
@@ -154,4 +141,4 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 | 引导脚本、注册窗口、`/boot-vars` 准入 | 主仓库控制面 |
 | 系统盘、凭据、菜单生成 | 主仓库控制面 |
 
-固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；设备密钥、签名格式与 TOFU 的完整语义见[设备身份与信任](../firmware/index.md)；NVMe/TCP 与 NBCT 的配置见[NVMe-oF 引导](../firmware/index.md)。
+固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；设备密钥、签名格式与 TOFU 的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。

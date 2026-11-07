@@ -15,7 +15,7 @@ Prerequisites:
 
 - a Linux x86_64 build host with `git`, `make`, and `gcc`;
 - access to the upstream iPXE repository; the first build caches the source;
-- x86_64 UEFI target devices with Secure Boot disabled; mainline artifacts are unsigned;
+- x86_64 UEFI target devices with Secure Boot disabled; mainline artifacts are unsigned; Legacy BIOS (CSM) boot is no longer supported;
 - a control plane, dnsmasq, and an isolated PXE segment as described in [Deployment](../guide/deployment.md).
 
 ## 1. Build
@@ -89,6 +89,7 @@ The main repository uses `tftp/snponly.efi` by default. Different machine types 
    ```bash
    sudo install -m 0644 dist/pxe-uefi/snponly.efi /path/to/kurrent/tftp/snponly.efi
    cd /path/to/kurrent
+   eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
@@ -152,6 +153,19 @@ NVRAM cleanup belongs in the firmware interactive environment or a controlled pr
 
 `/boot-assets` must report `status=ok` with all six capabilities (HTTPS boot, NVS persistence, device key generation, public-key export, challenge signing, TOFU pinning). `incomplete` usually means stock iPXE was placed in the TFTP root.
 
+### QEMU validation
+
+QEMU/OVMF validation requires KVM, OVMF firmware, and a working nvmet target. The firmware repository provides scripts:
+
+```bash
+sudo AUTH=1 bash test/nvmet-setup.sh
+python3 test/cred-server.py &
+# Test script: test/nvmeof-auth-test.ipxe
+bash test/run-qemu-auth.sh
+```
+
+Acceptance: the serial console shows successful authentication, Property Set, I/O queues, and GRUB output; the target shows two controller records, one for the firmware segment and one for the kernel segment; in the packet capture, the first byte of each client TCP stream is `0x16`, plaintext-port packets are zero, and the payload contains no PSK or DH-HMAC-CHAP key plaintext. `test/cred-server.py` is for validation only and must not be used as a production credential endpoint.
+
 ## Update and rollback
 
 - Replacing `tftp/snponly.efi` and restarting dnsmasq updates the PXE first hop.
@@ -172,6 +186,7 @@ NVRAM cleanup belongs in the firmware interactive environment or a controlled pr
 ## Related pages
 
 - [Firmware overview](./index.md)
+- [Firmware platform reference](../reference/firmware-platform.md)
 - [Firmware contract](../reference/firmware-contract.md)
 - [Boot chain](../concepts/boot-chain.md)
 - [Security model](../architecture/security.md)

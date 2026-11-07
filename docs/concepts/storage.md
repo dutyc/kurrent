@@ -8,6 +8,8 @@
 | nvmet-host | 共享卷 UDS（mTLS） | 操作内核 configfs：subsystem / namespace / port / allowed_hosts / DHHC-1；注入 TLS PSK |
 | 宿主内核 nvmet | 存储节点宿主 | NVMe/TCP target，数据面端口 `4421` |
 
+![存储路径：从母盘克隆系统盘，经 nvmet-host 导出到设备数据面](/diagrams/storage-data-plane.svg)
+
 后端以 nvmet 为主。iSCSI（stgt / lio）代码保留为兼容后端，但主分支没有存活的引导路径，历史实现见 `iscsi-classic` 分支。后端差异封装在 Agent 内部，控制面只发 HTTP。
 
 ## 母盘
@@ -54,11 +56,7 @@ filename = <worker_id>.<os>.<os_tag>.img
 
 ## 数据面
 
-设备与存储节点之间只有一条数据面路径：
-
-```text
-设备固件 / 内核 ── NVMe/TCP :4421（TLS 1.3）──► nvmet target
-```
+设备与存储节点之间只有一条数据面路径，控制面不参与块读写：
 
 - **单端口**。固件段和内核段共用 `4421`；没有第二个明文端口可退回。
 - **默认加密**。TLS 1.3 由固件完成首段握手；内核与 initramfs 在同一端口以 `--tls` 重连。

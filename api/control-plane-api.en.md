@@ -1,19 +1,19 @@
 # Control Plane API Reference
 
-This document describes the HTTP endpoints currently implemented by the Control Plane, including request parameters, response structures, and directly executable `curl` commands for testing.
+This document describes the HTTP endpoints currently implemented by the Control Plane, including request parameters and response structures, with `curl` examples.
 
 > **API-first design**: All Control Plane capabilities are exposed through the REST API as the primary interface. The Web administration interface (WebUI) itself is just one client of this API, equal to any third-party system or automation script. The guiding principle: **Everything faces the Control Plane**. Third-party integrations always call the Control Plane API and never bypass it to operate directly on an Agent or the data plane.
 
-The Control Plane is a persistent HTTP service running on the Controller node, responsible for:
+The Control Plane is a persistent HTTP service on the control-plane host, responsible for:
 
-- Adding Workers
-- Removing Workers
-- Querying Worker inventory
-- Querying Agent status
-- Maintaining `dnsmasq/dhcp-hosts.conf`
-- Calling Agents to create or delete iSCSI LUNs
+- Device inventory and the registration window: reporting, challenge-response, key rotation, and binding
+- Worker identity, system disks, and default boot disk inventory
+- Agent registration, probing, draining, and storage placement
+- Boot-chain projection (`/boot-vars`, `/boot-assets`)
+- Management identity and PKI: sessions, tokens, human/component certificates, and CRLs
+- Declaration status, dnsmasq-derived configuration, and operation auditing
 
-It does **not** generate iPXE menus, serve static files, or directly operate `tgtadm`/`targetcli`.
+It does **not** generate iPXE menus, serve static files, or directly operate `tgtadm`/`targetcli`/configfs — the TFTP scripts, nginx, and node Agents own those respectively.
 
 ---
 
@@ -28,9 +28,10 @@ The management plane listens on no TCP port at all: nginx forwards over a unix s
 socket. For local debugging, go through the 443 entry point or enter the control-plane
 container to reach that socket.
 
-> The entry point uses a TOFU self-signed certificate (`control_plane/state/certs/server.crt`,
-> generated automatically at startup), so curl needs `-k`, or
-> `--cacert control_plane/state/certs/server.crt` to pin that exact certificate.
+> The entry point uses a TOFU self-signed certificate (`control-plane/state/certs/server.crt`
+> under the state root, generated automatically at startup; the state root defaults to
+> `~/.local/state/kurrent` and `kurrent deployment show` prints it), so curl needs `-k`, or
+> `--cacert <state>/control-plane/state/certs/server.crt` to pin that exact certificate.
 
 Replace with the actual address if you expose it on a different port or domain.
 
@@ -53,7 +54,7 @@ are tried in order (serial short-circuit: first success wins; an invalid credent
 
 | Credential | Carrier | Notes |
 |---|---|---|
-| mTLS client certificate | 443 mutual TLS | admin certificate issued during setup (CN=admin, no O); the CLI auto-discovers `control_plane/state/admin.conf` (a binary outside the repo can install a self-contained snapshot into `~/.kurrent` with `kurrent credentials install`; it is the last link in the discovery chain). nginx validates the chain (users CA + nodes CA bundle) and, only on `SUCCESS`, injects DN / issuer / serial / fingerprint / class; the control plane resolves groups from `state/users.yml` by CN. Identity headers are empty by default on every other proxied location |
+| mTLS client certificate | 443 mutual TLS | admin certificate issued and installed by `kurrent init` (CN=admin, no O); the CLI resolves credentials in the order `--credentials` > `KURRENT_CREDENTIALS` > the deployment record's `<state>/control-plane/state/admin.conf` > legacy discovery > `~/.kurrent/admin.conf` (`kurrent init` installs that snapshot through the one-shot exchange and verifies it with mTLS). nginx validates the chain (users CA + nodes CA bundle) and, only on `SUCCESS`, injects DN / issuer / serial / fingerprint / class; the control plane resolves groups from `state/users.yml` by CN. Identity headers are empty by default on every other proxied location |
 | Management token | `Authorization: Bearer <token>` | issued by `kurrent token create --usage admin` (only a sha256 digest is stored); scopes are `admin` / `readonly` / `enroll`; TTL defaults to 24 hours, max 30 days; for scripts and WebUI sign-in |
 | Session cookie | `__Host-kurrent_session` | obtained via `POST /session` with a certificate or a management token; the cookie carries only `{jti, exp, epoch}`, and identity/groups come from the server-side `state/sessions.yml` registry (12-hour TTL, sliding renewal only in the second half); deleting the registry entry invalidates the next request |
 
@@ -79,12 +80,13 @@ also require `Origin` to match `Host`. Boot-chain endpoints (`/boot-vars`,
 `principal_class` / `principal` / `issuer` / `serial` / `fingerprint_sha256` / `route` /
 `decision` / `reason` / `request_id` / `client_ip`), and the response carries
 `X-Request-Id`; secrets, token plaintext, private keys and PSKs are never recorded. If the
-audit write fails, the request fails with `503` (fail-closed). Eight alarms are written as
-`event=alarm` entries: boot credential `injected && !verified`, component/control on a
-management route, unknown issuer / CRL hit (nginx rejects a CRL hit at the handshake
-layer; the app-side alarm covers unknown-issuer evidence that reaches it), an
-authentication-failure burst from one source, bootstrap identity/CSR CN mismatch, admin certificate issuance / CRL update / CA
-generation, `users.yml` change, and audit write failure.
+audit write fails, the request fails with `503` (fail-closed). Alarms are written as
+`event=alarm` entries in the same file and cover: boot credential `injected && !verified`,
+boot endpoint rate limiting, component/control on a management route, unknown issuer /
+CRL hit (nginx rejects a CRL hit at the handshake layer; the app-side alarm covers
+unknown-issuer evidence that reaches it), an authentication-failure burst from one
+source, bootstrap identity/CSR CN mismatch, user/admin certificate issuance / CRL update
+/ CRL refresh failure / CA generation, `users.yml` change, and audit write failure.
 
 **Alarm webhook (optional)**: with `KURRENT_CP_ALARM_WEBHOOK=<url>` set, every
 `event=alarm` audit entry is POSTed as JSON to that URL (same fields as the audit entry plus
@@ -119,7 +121,7 @@ curl -s "$BASE_URL/workers" \
 
 ## 2. State and Configuration Files
 
-The current Control Plane state and configuration are divided as follows (container paths; the host counterparts are `control_plane/state/` and `control_plane/config/`):
+The current Control Plane state and configuration are divided as follows (container paths; the host counterparts are `control-plane/{state,config,dnsmasq,bootstrap}/` under the state root, which defaults to `~/.local/state/kurrent` and can be overridden with `KURRENT_STATE_DIR`):
 
 | File | Meaning |
 |---|---|
@@ -142,9 +144,11 @@ The current Control Plane state and configuration are divided as follows (contai
 | `state/pki/nginx/nodes.crl` / `control.crl` | Component-face CRLs (signed by the nodes / control CA; distributed via `/enroll/crl`, `nextUpdate` 30 days) |
 | `state/operations.jsonl` | Control Plane operation audit trail (with actor) |
 | `dnsmasq/dhcp-hosts.conf` | `MAC -> hostname` bindings (**derived view**; the device ledger is authoritative) |
+| `bootstrap/` | One-shot management credential exchange for first deployment (`request` → `ready` → `consumed`; deleted after consumption) |
 
 Notes:
 
+- The deployment record `~/.kurrent/deployment.yaml` (0600) pins the project names, repository root and state root; it lives outside the container and is read-only through `kurrent deployment show`;
 - `workers.yml` does **not** store MAC addresses — MAC addresses and bindings live in the device ledger, and the Worker side only holds a projection.
 - The Compose file mounts the whole `dnsmasq/` directory into the control-plane container (which also writes `dnsmasq.conf` there).
 - `dhcp-hosts.conf` is written by **truncating in place** (preserving the inode) rather than via an atomic replace: the file is bind-mounted into the dnsmasq container at file level, so replacing the inode would leave the container reading the old file.
@@ -153,6 +157,12 @@ Notes:
 ```text
 00:0c:29:b9:8b:2d,worker-01
 ```
+
+This file only serves DHCP hostname/address assignment and does not participate in
+device↔Worker ownership decisions: ownership always follows the device ledger. The control
+plane writes this projection on bind/rebind (and repairs it when missing), and dnsmasq
+never writes back to the ledger. A missing or stale projection only means the derived
+artifact is out of sync; it does not change binding authority.
 
 ---
 
@@ -176,6 +186,10 @@ Notes:
 | `GET` | `/devices/{mac}` | Single device detail (see 16.2) |
 | `POST` | `/devices` | Manually register a device into the pool (see 16.3) |
 | `POST` | `/devices/import` | Bulk import device manifest (see 16.4) |
+| `POST` | `/devices/{mac}/bind` | Bind a device to a Worker (`force` performs an atomic rebind, see 16.7) |
+| `DELETE` | `/devices/{mac}/bind` | Unbind a device and return it to the pool (see 16.8) |
+| `POST` | `/devices/bind/batch/preview` | Batch-bind preview: pairing table and conflict classification (see 16.9) |
+| `POST` | `/devices/bind/batch` | Batch-bind execution (per-item independent, see 16.10) |
 | `DELETE` | `/devices/{mac}` | Revoke a device (see 16.5) |
 | `DELETE` | `/devices/revoked` | Purge all revoked devices (optional `dry_run` preview, see 16.5.1) |
 | `GET` | `/settings/registration-window` | Get registration window status (see 5.1) |
@@ -183,6 +197,7 @@ Notes:
 | `DELETE` | `/settings/registration-window` | Close the registration window early (see 5.1) |
 | `GET` | `/settings/enforcement` | Get the device signature enforcement switch (see 5.1) |
 | `PUT` | `/settings/enforcement` | Toggle the device signature enforcement switch (see 5.1) |
+| `GET` | `/config` | Runtime declaration configuration and derived-artifact consistency (see 5.4) |
 | `GET` | `/agents` | List Agents and their capabilities |
 | `POST` | `/agents` | Register a new Agent (writes agents.yml; 409 if id exists) |
 | `POST` | `/agents/probe` | Probe an Agent and auto-derive registration parameters (preview, no file writes) |
@@ -190,7 +205,7 @@ Notes:
 | `POST` | `/pki/tokens` | Issue a node-bound bootstrap token (default single-use, 60 minutes) or a management token (scope/TTL, see 6.5) |
 | `GET` | `/pki/tokens` | List the unexpired token ledger (see 6.5) |
 | `DELETE` | `/pki/tokens/{token_id}` | Revoke a token (deletion takes effect immediately, see 6.5) |
-| `POST` | `/pki/users/{cn}` | Issue a certificate for a registered user (private key only in this response, see 6.7) |
+| `POST` | `/pki/users/{cn}` | Issue a certificate for a registered user from a CSR (the private key never leaves the requester, see 6.7) |
 | `GET` | `/pki/users` | List certificates issued by the users CA (revoked/expired included, see 6.7) |
 | `DELETE` | `/pki/users/{cn}` | Revoke certificates (optional `serial` for a single one): re-sign CRL + reload nginx + kick sessions (see 6.7) |
 | `GET` | `/pki/components` | List nodes-domain component certificates (revoked/expired included, see 6.7) |
@@ -198,9 +213,11 @@ Notes:
 | `GET` | `/pki/control` | List control-domain certificates (control-plane clients, revoked/expired included, see 6.7) |
 | `DELETE` | `/pki/control/{cn}` | Revoke a control-domain certificate (optional `serial`): write the control CRL (see 6.7) |
 | `GET` | `/enroll/crl` | Fetch the nodes + control CRLs as a component (component mTLS, see 6.5.3) |
+| `POST` | `/enroll` | First-time component enrollment: exchange a bootstrap token for certificates and trust anchors (see 6.5.1) |
+| `POST` | `/enroll/renew` | Renew component certificates (`component` principal only, see 6.5.1) |
 | `GET` | `/crl/nodes.crl` | Public read-only nodes CRL (unauthenticated, GET/HEAD only, for revoked-component startup self-check; see 6.5.3) |
 | `DELETE` | `/agents/{agent_id}` | Remove an Agent’s registry entry (incl. master-tag cleanup, see 6.6) |
-| `GET` | `/agents/{agent_id}/luns` | List iSCSI targets/LUNs on a given Agent |
+| `GET` | `/agents/{agent_id}/luns` | List targets/LUNs on a given Agent (NVMe-oF primary path and iSCSI compatibility backends) |
 | `GET` | `/masters` | Aggregate master image inventory from all storage nodes (merged with registered tags, for clone selection) |
 | `PUT` | `/agents/{agent_id}/masters/{master_name}/tag` | Register a master tag (os / os_version annotations, see 6.4) |
 | `DELETE` | `/agents/{agent_id}/masters/{master_name}/tag` | Clear a master tag (see 6.4) |
@@ -214,6 +231,7 @@ Notes:
 | `POST` | `/workers/luns/disk/batch` | Batch create system disks for multiple Workers (per-item node naming, or `workers` placed by the Control Plane; `dry_run` returns a plan) |
 | `DELETE` | `/workers/{worker_id}/luns/disk/{os_tag}` | Delete a single system disk of a Worker (with option to keep/delete .img file) |
 | `PUT` | `/workers/{worker_id}/default-disk` | Set the Worker’s default boot configuration (default disk os_tag / menu item / timeout) |
+| `PUT` | `/workers/{worker_id}/mac` | Rebind the Worker’s MAC (device ledger is authoritative; missing dnsmasq projection is rewritten; old/new MAC audited, see 7.5) |
 | `GET` | `/workers` | List Workers |
 | `GET` | `/workers/{worker_id}` | Query a single Worker |
 | `GET` | `/workers/{worker_id}/status` | Query Worker inventory and real-time status |
@@ -250,7 +268,7 @@ curl -s "$BASE_URL/healthz"
 
 ### Description
 
-Boot-chain status (requires management authentication: `human` or `automation`). The control plane parses `dhcp-boot` in `dnsmasq.conf` and the `boot.ipxe → boot.ipxe.cfg → menu.ipxe` chain to answer three questions: whether the UEFI firmware is present with the capabilities the scripts require, whether the script chain is complete, and whether the menu is parsable. It reports status only: no menu entries are expanded and no directory browsing is performed. Tool menus (Memtest/WinPE) and iSCSI installers are outside the NVMe-oF main path and are not checked. The control plane must have `./tftp` mounted read-only (`404` when `dnsmasq.conf` is missing).
+Boot-chain status (requires management authentication: `human` or `automation`). The control plane parses `dhcp-boot` in `dnsmasq.conf` and the `boot.ipxe → boot.ipxe.cfg → menu.ipxe` chain to answer three questions: whether the UEFI firmware is present with the capabilities the scripts require, whether the script chain is complete, and whether the menu is parsable. It reports status only: no menu entries are expanded and no directory browsing is performed. The control plane must have `./tftp` mounted read-only (`404` when `dnsmasq.conf` is missing).
 
 ### Response Fields
 
@@ -296,17 +314,18 @@ The response of `/boot-vars` is a projection of the inventory:
 
 | Response Field | Origin |
 |---|---|
+| `worker_id` | The identified Worker (binding authority first; not returned for a pooled, unbound device or an empty script) |
 | `disk_nqn` | The full NQN of the default boot disk (same disk selection rule; disk record `nqn` — the data-plane unique identifier and the authoritative value from the control plane) — the firmware splices it verbatim into `sanboot nvme://<ip>:<data-port>/${disk-nqn}` and no longer reassembles it from hostname/os/os-tag. Not returned when the disk record lacks `nqn` or when the Worker has no system disk. |
 | `base_iqn` | The IQN of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk) with the last colon-and-following part stripped — the disk NQN is the authoritative identifier, the IQN is derived from it. **Not returned** if the Worker has no system disk (iPXE falls back to the static default in `boot.ipxe.cfg`). |
-| `storager_ip` | The `storager_ip` of the Agent that hosts the default boot disk (same disk selection rule as above) — the data-plane address shared by NVMe-oF boot and the iSCSI installers. Not returned when there is no system disk. |
-| `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`, consumed by the installer iSCSI assembly). The root-path assembly is done on the iPXE side. **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is resolved by **querying the Agent’s `/capabilities` `backend` field in real time** (the node reports its own capability — capability is truth); if the agent is unregistered / the query fails / the value is invalid, stgt format is assumed. It is **not derived from the Agent’s `tags`** in `agents.yml` (tags are human annotations only — otherwise a drifting tag would assemble a wrong separator). **Not sent for nvmet backends** (the menu installer items are guarded by `isset ${iscsi-sep}` and skipped). Not returned when there is no system disk. |
+| `storager_ip` | The `storager_ip` of the Agent that hosts the default boot disk (same disk selection rule as above) — the data-plane address used by NVMe-oF boot. Not returned when there is no system disk. |
+| `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`). **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is resolved by **querying the Agent’s `/capabilities` `backend` field in real time** (the node reports its own capability — capability is truth); if the agent is unregistered / the query fails / the value is invalid, the backend is treated as unknown, a warning is logged, and this field is omitted (it no longer falls back to stgt format). It is **not derived from the Agent’s `tags`** in `agents.yml` (tags are human annotations only — otherwise a drifting tag would assemble a wrong separator). **Not sent for nvmet backends**. Not returned when there is no system disk. The current boot scripts do not consume this field; it is retained for API clients of the iSCSI compatibility backend. |
 | `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected only when the Worker is bound, has a key entry, and the device identity is verified by signature**; not returned when there is no key / the Worker is unbound / the request is unverified / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (on nvmet backends a missing key withholds the whole `/boot-vars` payload and the menu refuses to boot) |
 | `nbft_tls_psk` | Pre-shared key for NVMe/TCP TLS: a **pure function of the authentication key** (`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex, see 7.7; no separate storage field — rotating or revoking the key rotates or revokes the PSK atomically). Returned **only when all four hold: the Worker is bound with a key, the device identity is verified by signature, the backend is nvmet, and the Agent reports a ready data-plane port**; otherwise the whole boot-variable payload is withheld (boot refused, audited) — encryption is the default and there is no plaintext fallback. The firmware uses it for its own handshake on that port and hands it to the initramfs via the NBCT table, which reconnects with `--tls` on the same port |
 | `nbft_tls_port` | Data-plane port (shared by the firmware and kernel boot segments; read live from the Agent’s `/capabilities.port.trsvcid` — capability is truth, same live-query rule as `iscsi_sep`/`backend`); returned under the same conditions as `nbft_tls_psk`. The menu appends `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` to the sanboot URI |
 | `hostnqn` | The Worker’s initiator Host NQN (disk NQN prefix + `:host.<worker_id>`, in the same namespace as the disk NQN and matching the host entry registered in nvmet-host); **injected when the default disk carries an NQN**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch `0005` supports the `hostnqn` setting) |
-| `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — 2026-08-30 MAIN MENU dynamicization: the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
+| `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
 | `os_version` | Version annotation of the default boot disk (disk record `os_version`; `''` = no version) — omitted when empty; the `os-label` assembly in menu.ipxe adapts (shows `os version` when present). Not returned when the Worker has no system disk. |
-| `menu_default` | Derived chain: `workers.yml` `default_disk` (the first disk is set as default automatically; use 7.3 for multi-disk, os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). 2026-08-30 dynamicization: since the menu OS item has converged to the single generic item `boot-os`, any OS-semantics default (`default_disk`, or legacy OS names in `boot.menu_default`) is normalized to `boot-os`; non-OS navigation values (`menu-diag` / `menu-install` / `config` / `shell` / `reboot` / `exit`) are returned as-is |
+| `menu_default` | Derived chain: `workers.yml` `default_disk` (the first disk is set as default automatically; use 7.3 for multi-disk, os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). With a default disk it is always `boot-os` (the only OS item); otherwise `boot.menu_default` (`config` / `shell` / `reboot` / `exit`) is used; when neither is set it is `reboot` |
 | `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutMs` (default 1). Units are milliseconds. |
 
 Worker lookup rules (**binding authority first**):
@@ -334,13 +353,13 @@ default_disk (the first disk is set as default automatically; use 7.3 for multi-
   ```text
   disk=<os_tag> -> menu_default=boot-os, os=<disk os>, os-version=<disk os_version if any>, disk_nqn=<disk nqn>
   ```
-  Since 2026-08-30, the MAIN MENU keeps a single generic OS item: `menu_default` is normalized to `boot-os` (legacy OS names in `boot.menu_default` are also normalized), while `os` / `os-version` are display-only and `disk_nqn` carries the boot identity consumed by the generic item.
-- Alternatively, you can explicitly clear `default_disk` (`PUT /workers/{worker_id}/default-disk`, `{"disk": null}`) and use `boot.menu_default` to specify a default item on the iPXE menu (e.g., `menu-install` during installation, or `exit`).
+  The MAIN MENU keeps a single generic OS item `boot-os`, derived from the default disk; `os` / `os-version` are display-only and `disk_nqn` carries the boot identity consumed by the generic item.
+- Alternatively, you can explicitly clear `default_disk` (`PUT /workers/{worker_id}/default-disk`, `{"disk": null}`) and use `boot.menu_default` to specify a default item on the iPXE menu (e.g., the configuration screen `config`, or `exit`).
 - When neither is configured, `menu_default` returns `reboot` (a short-timeout reboot loop waiting for the admin to create a disk / set a default disk; `exit` is only used when explicitly configured).
 
 ### Registration-Window Enrollment (Zero-touch Provisioning)
 
-When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11-field report plus optional `pubkey`, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window** (2026-08-21 ruling): only when the window is open, the admission quota is not used up, and the report carries a valid ECDSA P-256 public key does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level).
+When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11-field report plus optional `pubkey`, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window**: only when the window is open, the admission quota is not used up, and the report carries a valid ECDSA P-256 public key does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level).
 
 1. `GET /devices/report`: unknown MAC + window open + quota left + `pubkey` present → written to `state/devices.yml` (`state=pooled`, fingerprint stored, `key_hash` filled, `source=ipxe`)
 2. `GET /boot-vars`: MAC in the pool and unbound → returns `menu-default=reboot` + short timeout, rebooting in a loop until the admin binds it
@@ -430,6 +449,7 @@ Example success response:
 
 ```json
 {
+  "worker_id": "worker-01",
   "disk_nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
   "base_iqn": "iqn.2026-07.com.kurrent",
   "storager_ip": "192.168.80.3",
@@ -444,6 +464,16 @@ Example success response:
 ```
 
 Registered but no default boot configured:
+
+```json
+{
+  "worker_id": "worker-01",
+  "menu_default": "reboot",
+  "menu_timeout": 1
+}
+```
+
+A device in the pool but unbound to a Worker receives menu variables only (no `worker_id`):
 
 ```json
 {
@@ -463,7 +493,7 @@ Unrecognized and not enrolled (window closed / no public key):
 In `tftp/boot.ipxe.cfg`, the trust chain fetches this endpoint over HTTPS (nginx 443, TOFU anchor) after the challenge-respond handshake (see 5.2):
 
 ```ipxe
-# Stage 3: challenge-respond (R7) — signed request carries nonce+sig
+# Stage 3: challenge-respond — signed request carries nonce+sig
 :challenge
 chain --autofree ${https-url}devices/challenge?mac=${mac} && goto signed || goto bootvars
 
@@ -482,13 +512,13 @@ isset ${iscsi-sep} || set iscsi-sep :::1:
 isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-iqn ${base-iqn}:${mac}
 ```
 
-On success, the returned `disk-nqn` / `storager-ip` may override the static defaults; derived variables are re-built at `:vars-done`. The `isset` guard keeps the backend-specific separator (`stgt` `:::1:` / LIO `::::`) projected by `/boot-vars`.
+On success, the returned `disk-nqn` / `storager-ip` may override the static defaults; derived variables are re-built at `:vars-done`. `base-iqn` is used to derive `initiator-iqn`; the default `iscsi-sep` does not participate in menu assembly.
 
-In `menu.ipxe`, the main boot entry assembles the NVMe-oF root-path (`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`, with `?secret=` appended when `nbft-secret` is injected and `&tls_psk=…&tls_trsvcid=…` appended from the injected TLS variables; `nbft-tls-port` / `nbft-tls-psk` are required — their absence means the target is not encryption-ready, and the entry drops to `failed` instead of assembling a plaintext URI); the installer entries keep the iSCSI assembly (`set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.<os>`). The protocol prefixes and assembly structure remain static; only the separator is projected from the backend.
+In `menu.ipxe`, the main boot entry assembles the NVMe-oF root-path (`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`, with `?secret=` appended when `nbft-secret` is injected and `&tls_psk=…&tls_trsvcid=…` appended from the injected TLS variables; `nbft-tls-port` / `nbft-tls-psk` are required — their absence means the target is not encryption-ready, and the entry drops to `failed` instead of assembling a plaintext URI).
 
 ### Agent Data-Plane Address
 
-`/boot-vars` returns the **data-plane address** that Workers use to connect to storage (shared by NVMe-oF boot and the iSCSI installers), not the Agent’s HTTP API address. It is recommended to explicitly configure it in `config/agents.yml`:
+`/boot-vars` returns the **data-plane address** that Workers use to connect to storage (used by NVMe-oF boot), not the Agent’s HTTP API address. It is recommended to explicitly configure it in `config/agents.yml`:
 
 ```yaml
 agents:
@@ -503,7 +533,7 @@ If `storager_ip` is not configured, the Control Plane falls back to the host por
 
 #### Description
 
-The registration window is the controlled enrollment channel for the deployment phase (2026-08-21 ruling; it replaces the former `auto-register` permanent switch, whose endpoint has been removed): only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL and quota caps come from the `spec.registration` declaration (`windowMaxTtlMinutes` defaults to 60, `windowMaxDevices` to 1000; a permanent window cannot be configured), and the window auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
+The registration window is the controlled enrollment channel for the deployment phase: only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL and quota caps come from the `spec.registration` declaration (`windowMaxTtlMinutes` defaults to 60, `windowMaxDevices` to 1000; a permanent window cannot be configured), and the window auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
 
 The signature enforcement switch (transition-period compatibility): when off, keyless devices may still receive menu variables but **credentials are never injected** (credentials require a verified signature); when on, `/boot-vars` applies the 4th injection condition to bound devices — missing `mac` → rejected as `missing_mac`; no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
 
@@ -660,7 +690,7 @@ Lists Agents configured in `config/agents.yml`. By default, it also probes each 
 
 `health` has three states: `ok` (healthy); `degraded` (the agent is up but the data plane is not ready — for the nvmet backend this means the host service is unreachable or configfs is not ready; the reason is in `error`); `error` (agent unreachable or capability probing failed). With `live=false` no probing is done and `health` is absent.
 
-Identity layering: `id` is the machine identity and accepts only 12 lowercase hex characters (same form as the disk `os_tag`; normally auto-generated by `kurrent join` and auto-registered at enroll; manual registration is 6.1); `remark` is a human label and the only place for a descriptive name (from the node declaration `metadata.remark`, shown on the WebUI card and editable in the edit form or via 6.3).
+Identity layering: `id` is the machine identity and accepts only 12 lowercase hex characters (same form as the disk `os_tag`; allocated by the control plane at bootstrap-token issuance and written by join to `storager/state/agent.id` under the node state root, auto-registered at enroll; manual registration is 6.1); `remark` is a human label owned by the control-plane ledger, shown on the WebUI card and editable in the edit form or via 6.3.
 
 ### Query Parameters
 
@@ -700,12 +730,20 @@ curl -s "$BASE_URL/agents?live=false" \
     "remark": "primary storage node",
     "health": "ok",
     "capabilities": {
-      "backend": "lio",
-      "fs_type": "btrfs",
+      "backend": "nvmet",
       "cd": false,
-      "persistent": "saveconfig (auto-load on start)",
-      "base_nqn": "nqn.2026-07.com.controller",
-      "clone": "reflink (FICLONE) -> shutil.copy fallback",
+      "persistent": "host-native configfs (nvmet-host service)",
+      "configfs": "/sys/kernel/config/nvmet",
+      "port": {
+        "port_id": 1,
+        "trtype": "tcp",
+        "trsvcid": "4421",
+        "tsas": "tls1.3",
+        "ready": true
+      },
+      "base_nqn": "nqn.2026-07.com.kurrent",
+      "fs_type": "btrfs",
+      "clone": "reflink (FICLONE; xfs requires the reflink feature enabled) -> shutil.copy fallback",
       "empty_disk": "truncate (sparse)"
     }
   }
@@ -732,7 +770,7 @@ Registers a new Agent: writes to `config/agents.yml` and takes effect immediatel
 | `role` | No | Roles: `disk` = can create system disks (storage node), `cd` = can mount ISOs (optical drive node). Default `{disk: false, cd: false}`. |
 | `tags` | No | Free-form tag array (e.g., `storage` / `rack-a3`), for **human annotation / display only**. It does not participate in `/boot-vars` separator derivation (the backend type is resolved by `/boot-vars` querying the Agent’s `/capabilities` in real time, see 5.1). |
 | `enabled` | No | Whether the Agent is enabled. `false` = **drain**: no new disks accepted (always 409), existing disks keep serving and booted devices are unaffected. Default `true`. |
-| `remark` | No | Human label (display-only), empty string by default. Normally no need to set it by hand — it is auto-registered from the node declaration `metadata.remark` at enroll (see 6.5.1). |
+| `remark` | No | Human label (display-only), empty string by default. Nicknames belong to the control-plane ledger: enroll does not write it, so set it after registration by hand or via 6.3. |
 
 ### curl
 
@@ -812,12 +850,12 @@ curl -s -X POST "$BASE_URL/agents/probe" \
   "tags": ["storage"],
   "storager_ip": "host.docker.internal",
   "enabled": true,
-  "backend": "stgt",
+  "backend": "nvmet",
   "fs_type": "btrfs",
-  "base_iqn": "iqn.2026-07.com.controller",
-  "clone": "reflink (FICLONE) -> shutil.copy fallback",
+  "base_nqn": "nqn.2026-07.com.kurrent",
+  "clone": "reflink (FICLONE; xfs requires the reflink feature enabled) -> shutil.copy fallback",
   "empty_disk": "truncate (sparse)",
-  "persistent": "auto-scan on startup"
+  "persistent": "host-native configfs (nvmet-host service)"
 }
 ```
 
@@ -897,7 +935,7 @@ curl -s -X PUT "$BASE_URL/agents/c3d4e5f60123" \
 
 Master tags are control-plane annotations (`state/masters.yml`) — `os` / `os_version` are **annotation-only** (for human understanding, no whitelist validation):
 
-- Since 2026-08-30 there is no valid OS set anymore (OS_ITEMS retired): disk creation `os` is a free string, and multiple versions of the same OS are distinguished by the disk-level `os_tag` (a 12-hex random identifier, the data-plane unique key). Master tags only associate a master name with an OS/version.
+- There is no valid OS set: disk creation `os` is a free string, and multiple versions of the same OS are distinguished by the disk-level `os_tag` (a 12-hex random identifier, the data-plane unique key). Master tags only associate a master name with an OS/version.
 - **Tagging does not verify that the master exists** (an Agent may be offline; the ledger is authoritative); `/masters` attaches `os` / `os_version` to tagged entries only.
 - When creating a disk from a master, the WebUI auto-fills the tag (annotation, editable); clearing a tag only affects future disk creation.
 
@@ -947,16 +985,16 @@ Returns `{ "agent": ..., "name": ..., "removed": true|false }` (`removed=false` 
 
 ### Description
 
-The control plane issues a **node-bound bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to **60 minutes**, max 24 hours): issuance specifies `agent_id` (= the node declaration `metadata.name`, only 12 lowercase hex characters), and enroll only accepts that identity. Tokens are **single-use by default**: an allowance is reserved atomically before issuance and released if issuance fails; bulk onboarding uses `max_uses` (`--uses N`, 1..1000 and no higher than `spec.pki.bootstrapTokenMaxUses`, default 100) explicitly instead of unlimited reuse. Every issuance is a new token (plaintext unrecoverable); **revocation is supported** (`DELETE /pki/tokens/{token_id}`, deletion takes effect immediately); unrevoked tokens expire naturally.
+The control plane issues a **node-bound bootstrap token** (`<6-hex>.<16-hex>`, only the sha256 hash is stored, TTL defaults to **60 minutes**, max 24 hours): issuance may specify `agent_id` (only 12 lowercase hex characters); when omitted the control plane allocates a new identity, and enroll only accepts that identity. Tokens are **single-use by default**: an allowance is reserved atomically before issuance and released if issuance fails; bulk onboarding uses `max_uses` (`--uses N`, 1..1000 and no higher than `spec.pki.bootstrapTokenMaxUses`, default 100) explicitly instead of unlimited reuse. Every issuance is a new token (plaintext unrecoverable); **revocation is supported** (`DELETE /pki/tokens/{token_id}`, deletion takes effect immediately); unrevoked tokens expire naturally.
 
-The node identity is a machine identity and accepts only 12 lowercase hex characters. `kurrent token create` generates one when `--agent-id` is omitted and bakes it into the printed join command; human labels go into `metadata.remark`.
+The node identity is a machine identity and accepts only 12 lowercase hex characters. The control plane allocates it when a bootstrap token is issued (a new identity when `agent_id` is omitted, or the supplied existing identity for recovery) and returns it in the response and the printed join command; `kurrent token create` and the WebUI only call this endpoint and consume the returned `agent_id`. Join writes it to `storager/state/agent.id` under the node state root, which is not part of the node declaration. Nicknames belong to the control-plane ledger.
 
-The `nvmet-host` component credential is **not issued here**: when an agent enrolls with `backend=nvmet`, the control plane derives one (bound to agent_id) and returns it in the enroll/renew response; the agent persists it to `storager/bootstrap/nvmet-host.token` for the nvmet-host container (capability-driven derivation — issuance does not foresee the backend).
+The `nvmet-host` component credential is **not issued here**: when an agent enrolls with `backend=nvmet`, the control plane derives one (bound to agent_id) and returns it in the enroll/renew response; the agent persists it to `storager/bootstrap/nvmet-host.token` under the node state root for the nvmet-host container (capability-driven derivation — issuance does not foresee the backend).
 
 ### POST /pki/tokens
 
-Request body: `{"usage": "bootstrap", "agent_id": "<node id>", "component": "agent", "max_uses": 1}`
-(bootstrap is the default; `component` is `agent` | `nvmet-host`; `max_uses` is 1..1000,
+Request body: `{"usage": "bootstrap", "agent_id": "<existing node id, optional>", "component": "agent", "max_uses": 1}`
+(bootstrap is the default; omitting `agent_id` makes the control plane allocate a new identity; `component` is `agent` | `nvmet-host`; `max_uses` is 1..1000,
 default 1, and no higher than `spec.pki.bootstrapTokenMaxUses`), or
 `{"usage": "admin", "scopes": ["readonly"], "ttl_hours": 24}`
 (management token for the authenticator chain Bearer path; scope is `admin` | `readonly` |
@@ -1057,28 +1095,29 @@ Returns `{"revoked": "a1b2c3"}` on success; `404` when the token does not exist.
 
 ### 6.5.1 enroll auto-registration (POST /enroll, nginx entry /api/cp/enroll)
 
-First-report auto-registration: when an `agent` component enrolls (`POST /enroll`, Bearer = bootstrap token bound to that node identity) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto", "storage")`; `("auto",)` only for legacy agents that report no capabilities — the **backend type is not written into tags**, it is resolved by `/boot-vars` querying `/capabilities` in real time) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) and `remark` field (agent side `metadata.remark`, human label) into the registry. The response carries two certificates (client / serving, issued by the nodes CA, subject = CN only) and **two trust anchors**: `ca_nodes_crt` (validate peer components) and `ca_control_crt` (validate control-plane clients). Rules:
+First-report auto-registration: when an `agent` component enrolls (`POST /enroll`, Bearer = bootstrap token bound to that node identity) and the id is absent from `agents.yml`, the control plane **auto-creates the entry** (role_disk=True, role_cd=False, enabled=True, tags=`("auto", "storage")`; `("auto",)` only for legacy agents that report no capabilities — the **backend type is not written into tags**, it is resolved by `/boot-vars` querying `/capabilities` in real time) and persists the request’s `base_url` field (agent side `spec.agent.advertiseUrl`, control-plane-reachable address) into the registry; the nickname is not written during bootstrap and is set by an administrator in the WebUI or via 6.3 after registration. The response carries two certificates (client / serving, issued by the nodes CA, subject = CN only) and **two trust anchors**: `ca_nodes_crt` (validate peer components) and `ca_control_crt` (validate control-plane clients). Rules:
 
 - Token validation: format / registry entry / component match / binding match (`agent_id` equals the ledger entry) / not expired; on success an allowance is **reserved atomically** and released if certificate issuance fails; single-use by default (`max_uses` can raise it)
 - `/enroll/renew` uses the component’s existing client cert (nginx forces mTLS on that path; the issuer must be the nodes CA → class=component; human certs get `403`), and re-signs only when CN == `<prefix>-<agent_id>`
 - The response includes `renew_threshold` (`spec.pki.renewThreshold`, default 0.2): components persist it as `policy.json` and renew when the certificate's remaining lifetime drops below it; legacy components ignore the field (keep the built-in default)
 - `nvmet-host` components are **not auto-registered** (they share the agent_id; the agent component must be registered first — otherwise 400, container restart retries; the allowance is not consumed)
 - A non-empty `base_url` must start with `http://` / `https://`, otherwise 400 (no auto-registration)
-- When an already-registered agent enrolls/renews again, `base_url` / `remark` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move or remark change, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` are **left untouched**, and fields the node does not report keep their current values
+- When an already-registered agent enrolls/renews again, `base_url` / `role.cd` are **refreshed from the node declaration** (declaration authority: the node’s file wins — after a node move, the next renewal aligns the registry, no reinstall needed); control-plane attributes `enabled` / `storager_ip` / `tags` / `remark` are **left untouched**, and fields the node does not report keep their current values
 - An agent reporting `backend=nvmet` gets an extra `nvmet_token` field in the response (derived nvmet-host credential); stgt/lio backends and legacy agents have no such field
 - The response also carries `nodes_crl` / `control_crl` (PEM) and `next_update`, which components persist for inbound/outbound revocation checks; if CRL generation fails these fields are omitted (best effort) and the component fetches them via `/enroll/crl` after startup
 
 ### 6.5.2 One-command join (node side)
 
-Declarative workflow (declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL and the node id**; pasting it on the storage node yields both the address and the identity — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (`metadata.name` = `--agent-id`, the address synced into `spec.controlPlane.url`) or read in and merged when present (a declared identity that differs from `--agent-id` is rejected), then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the storager directory from outside the repository root):
+Declarative workflow (declaration-driven config, CLI as tooling): the control plane issues the token and prints a **join command carrying the control-plane URL and the node id**; pasting it on the storage node yields both the address and the identity — the node declaration `storager/kurrent.yaml` is auto-generated from defaults when missing (the address synced into `spec.controlPlane.url`) or read in and merged when present, and the identity is written to `storager/state/agent.id` under the node state root (the first run must provide `--agent-id`; reruns must match the state file), then the agent is converged-started (idempotent, re-runnable; use `--dir` to point at the repository root or the `storager` directory from outside, and `--cp-ca` to supply the controller trust anchor on split hosts):
 
 ```bash
 # Control plane (issue a node-bound bootstrap token; --cp-url = control-plane HTTPS entry reachable
-# from the storage node, derived from --server otherwise; --agent-id is 12 lowercase hex and is generated when omitted):
-kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://<cp-host>
+# from the storage node, derived from --server otherwise; omitting --agent-id makes the control plane
+# allocate a new 12-lowercase-hex identity; an explicit id binds an existing identity for recovery):
+kurrent token create --cp-url https://<cp-host>
 
-# Storage node (the command already carries the URL and node id — paste and run; business keys can be pre-declared via kurrent config print node-defaults):
-kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id 3f2a9c1d8b7e
+# Storage node (paste the join command printed above; the node id was allocated by the control plane and is already included; business keys can be pre-declared via kurrent config print node-defaults):
+kurrent join https://<cp-host> --token a1b2c3.0123456789abcdef --agent-id <agent_id-from-response>
 ```
 
 ### 6.5.3 GET /enroll/crl (component CRL distribution)
@@ -1218,8 +1257,11 @@ authorization still re-reads `users.yml` on every request.
 - Omitting `serial` revokes every unrevoked certificate for the user and deletes all of
   their sessions; with `serial`, only sessions bound to that certificate fingerprint are
   kicked (count returned as `sessions`)
-- Cannot revoke the current principal's own certificate (`400`); no unrevoked certificate
-  → `404`; CRL written but reload failed → `500` (revocation is not in effect yet)
+- Cannot revoke the certificate the current request is using (`400`, compared by
+  `serial`); other serials of the same principal may be revoked explicitly by `serial`
+  (e.g. invalidating the old certificate after rotation). Omitting `serial` for the
+  caller's own CN is also refused; no unrevoked certificate → `404`; CRL written but
+  reload failed → `500` (revocation is not in effect yet)
 - Emits a `crl_updated` alarm
 
 The control plane re-signs the CRL and asks nginx to reload every 12 hours
@@ -1361,7 +1403,6 @@ The Control Plane will:
 1. Validate `worker_id`, `hostname`; validate `mac` if provided
 2. Write to `state/workers.yml` (`disks` as empty array, `state=registered`)
 3. If `mac` is provided: bind the device (write `state/devices.yml` `bound_worker_id` + write to `dnsmasq/dhcp-hosts.conf`; dnsmasq watches that file, no HUP needed)
-4. If `windows_iso` is specified, additionally call the Agent to create a CD target (installation optical drive, unrelated to system disks).
 
 ### Request Body Fields
 
@@ -1371,14 +1412,13 @@ The Control Plane will:
 | `mac` | No | Worker NIC MAC address, e.g., `00:0c:29:b9:8b:2d`. If provided, the device must already be in the pool (see 16); the device is bound to this Worker in the same call. |
 | `hostname` | No | Hostname. Defaults to `worker_id` if not provided. |
 | `arch` | No | Architecture. Defaults to `x86_64`. |
-| `windows_iso` | No | Windows installation ISO filename. When provided, an installation CD target is created during registration. |
 | `boot` | No | iPXE menu default item and timeout configuration. If omitted, `/boot-vars` derives them from the default boot disk and global defaults. Writes to the same ledger fields as the 7.3 `default-disk` endpoint; later calls override earlier ones. |
 
 ### `boot` Fields
 
 | Field | Required | Description |
 |---|---:|---|
-| `menu_default` | No | Default item on the iPXE main menu (auto-selected after the menu times out); valid values in the 7.3 table; case-insensitive, e.g., `ubuntu`, `debian`, `windows`, `exit`. |
+| `menu_default` | No | Default item on the iPXE main menu (auto-selected after the menu times out); valid values in the 7.3 table; case-insensitive, e.g., `config`, `reboot`, `exit`. |
 | `menu_timeout` | No | iPXE menu timeout in milliseconds, e.g., `5000`; `0` means the menu waits indefinitely and never auto-selects. |
 
 When `boot` is omitted:
@@ -1417,38 +1457,18 @@ Only pass `boot` when you want to override the menu behavior:
 }
 ```
 
-During Windows installation, if you want to default to the installation menu:
+To default to the iPXE configuration screen:
 
 ```json
 {
-  "worker_id": "worker-win-build",
-  "mac": "00:0c:29:b9:8b:11",
-  "windows_iso": "Win11_24H2.iso",
+  "worker_id": "worker-01",
+  "mac": "00:0c:29:b9:8b:2d",
   "boot": {
-    "menu_default": "menu-install",
+    "menu_default": "config",
     "menu_timeout": 3000
   }
 }
 ```
-
-### PUT /workers/{worker_id}/mac (Rebind Mapping)
-
-Changes the Worker’s MAC binding (hostname unchanged), mapped internally to a **device rebind**. Bindings are authoritative in the device inventory (`state/devices.yml`); `dnsmasq/dhcp-hosts.conf` is only a derived projection. The Control Plane:
-
-1. Verifies the Worker exists (`404`) and the new MAC format (`400`).
-2. Requires the new MAC to be in the pool, not revoked and not bound to another Worker (`409`).
-3. Looks up the Worker’s current device in the inventory (**not** in dnsmasq): the old device returns to the pool, the new one is bound to the Worker.
-4. Writes `dnsmasq/dhcp-hosts.conf`: replaces the hostname binding when present, appends it when missing (dnsmasq watches the file; no HUP needed); a projection write failure rolls the inventory back.
-5. Records `worker.mac.update` (`old_mac` / `new_mac` / `changed` / `client`); when the inventory had no binding change (e.g. the same MAC again) `changed=false` and only the projection is repaired.
-
-**Request body**: `{"mac": "00:0c:29:b9:8b:2d"}`
-
-**404**: Worker not found. **409**: device out-of-pool / revoked / bound to another Worker / dnsmasq projection conflict (MAC bound to another hostname). **500**: inventory or binding write failed (inventory rolled back).
-
-**Idempotent**: setting the same MAC again returns `changed=false` and repairs a missing dnsmasq binding.
-
-**Note**: the dnsmasq file is a derived view (`MAC -> hostname`), not the MAC authority; the endpoint works even when it is missing or inconsistent. The Worker must renew its DHCP lease (restart NIC / PXE boot again) to use the new MAC identity.
-
 
 ## 7.1 POST /workers/{worker_id}/luns/disk
 
@@ -1479,7 +1499,7 @@ This endpoint resides under the `/luns/` namespace to reserve space for future d
 | `type` | Yes | `master` or `empty`. |
 | `name` | Conditionally required | Required when `type=master`. The master image filename. |
 | `size` | Conditionally required | Required when `type=empty`. The empty disk size, e.g., `40G`. |
-| `os` | Yes | OS annotation (for human understanding; determines the os segment in the disk NQN/filename). Free string, lowercased, **no whitelist validation** (OS_ITEMS retired 2026-08-30). |
+| `os` | Yes | OS annotation (for human understanding; determines the os segment in the disk NQN/filename). Free string, lowercased, **no whitelist validation**. |
 | `os_version` | No | Version annotation (`''` = no version, the default). At most one disk per (os, os_version); different versions can coexist. |
 | `disk_agent` | No | Specify a storage Agent. If omitted, the Control Plane places it (candidates are checked for a ready data plane and local master availability). |
 
@@ -1504,7 +1524,7 @@ curl -s -X POST "$BASE_URL/workers/worker-01/luns/disk" \
 #### curl
 
 ```bash
-curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
+curl -s -X POST "$BASE_URL/workers/worker-01/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1524,13 +1544,14 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
   "disks": [
     {
       "agent": "a1b2c3d4e5f6",
-      "nqn": "nqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89",  # NVMe-oF data-plane identifier (authoritative; NQN is not defined via IQN; suffix carries os_tag)
-      "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89",  # iSCSI data-plane identifier (derived from the NQN)
+      "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",  # NVMe-oF data-plane identifier (authoritative; NQN is not defined via IQN; suffix carries os_tag)
+      "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",  # iSCSI data-plane identifier (derived from the NQN)
       "filename": "worker-01.ubuntu.0d26b6f33a89.img",
       "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img",
       "os": "ubuntu",
       "os_version": "22.04",
       "os_tag": "0d26b6f33a89",
+      "remark": "",
       "source": {
         "type": "master",
         "name": "_tpl_ubuntu_2204.img"
@@ -1538,8 +1559,11 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
     }
   ],
   "cd": null,
+  "default_disk": "0d26b6f33a89",
   "worker_id": "worker-01",
-  "mac": "00:0c:29:b9:8b:2d"
+  "mac": "00:0c:29:b9:8b:2d",
+  "bound_device": "00:0c:29:b9:8b:2d",
+  "readiness": "ready"
 }
 ```
 
@@ -1547,18 +1571,20 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
 
 ```json
 {
-  "hostname": "worker-00",
+  "hostname": "worker-01",
   "arch": "x86_64",
   "state": "ready",
   "disks": [
     {
       "agent": "a1b2c3d4e5f6",
-      "iqn": "iqn.2026-07.com.controller:worker-00.ubuntu.5f1c2a3b4d5e",
-      "filename": "worker-00.ubuntu.5f1c2a3b4d5e.img",
-      "backing": "/home/iscsi_img/worker-00.ubuntu.5f1c2a3b4d5e.img",
+      "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.5f1c2a3b4d5e",
+      "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.5f1c2a3b4d5e",
+      "filename": "worker-01.ubuntu.5f1c2a3b4d5e.img",
+      "backing": "/home/iscsi_img/worker-01.ubuntu.5f1c2a3b4d5e.img",
       "os": "ubuntu",
       "os_version": "",
       "os_tag": "5f1c2a3b4d5e",
+      "remark": "",
       "source": {
         "type": "empty",
         "size": "40G"
@@ -1566,8 +1592,11 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
     }
   ],
   "cd": null,
-  "worker_id": "worker-00",
-  "mac": "00:0c:29:b9:8b:00"
+  "default_disk": "5f1c2a3b4d5e",
+  "worker_id": "worker-01",
+  "mac": "00:0c:29:b9:8b:2d",
+  "bound_device": "00:0c:29:b9:8b:2d",
+  "readiness": "ready"
 }
 ```
 
@@ -1661,8 +1690,8 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 ```json
 {
   "succeeded": [
-    { "worker_id": "worker-01", "agent": "a1b2c3d4e5f6", "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu.0d26b6f33a89" },
-    { "worker_id": "worker-03", "agent": "e5f601234567", "iqn": "iqn.2026-07.com.controller:worker-03.ubuntu.a1b2c3d4e5f6" }
+    { "worker_id": "worker-01", "agent": "a1b2c3d4e5f6", "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89" },
+    { "worker_id": "worker-03", "agent": "e5f601234567", "iqn": "iqn.2026-07.com.kurrent:worker-03.ubuntu.a1b2c3d4e5f6" }
   ],
   "skipped": [
     { "worker_id": "worker-02", "reason": "already has a ubuntu 22.04 system disk" }
@@ -1675,74 +1704,9 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 
 ---
 
-## 7.2 Windows Installation: Identity Registration + ISO + System Disk
+## 7.2 Common Errors for Registration and Disk Creation
 
-Windows installation is a two-step process: first register the identity (optionally specifying the installation ISO), then create the system disk.
-
-### 7.2.1 Identity Registration (with ISO)
-
-```bash
-curl -s -X POST "$BASE_URL/workers" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "worker_id": "worker-win-build",
-    "mac": "00:0c:29:b9:8b:11",
-    "windows_iso": "Win11_24H2.iso"
-  }'
-```
-
-After registration, the response has `state=installing` (a CD target exists) and `disks` as an empty array.
-
-### 7.2.2 Create System Disk
-
-```bash
-curl -s -X POST "$BASE_URL/workers/worker-win-build/luns/disk" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "empty",
-    "os": "windows",
-    "size": "80G"
-  }'
-```
-
-Response after creation:
-
-```json
-{
-  "hostname": "worker-win-build",
-  "arch": "x86_64",
-  "state": "installing",
-  "disks": [
-    {
-      "agent": "a1b2c3d4e5f6",
-      "iqn": "iqn.2026-07.com.controller:worker-win-build.windows.9b8a7c6d5e4f",
-      "filename": "worker-win-build.windows.9b8a7c6d5e4f.img",
-      "backing": "/home/iscsi_img/worker-win-build.windows.9b8a7c6d5e4f.img",
-      "os": "windows",
-      "os_version": "",
-      "os_tag": "9b8a7c6d5e4f",
-      "source": {
-        "type": "empty",
-        "size": "80G"
-      }
-    }
-  ],
-  "cd": {
-    "agent": "f60123456789",
-    "iqn": "iqn.2026-07.com.controller:worker-win-build.windows.iso",
-    "iso": "Win11_24H2.iso",
-    "backing": "/home/iscsi_img/Win11_24H2.iso"
-  },
-  "worker_id": "worker-win-build",
-  "mac": "00:0c:29:b9:8b:11"
-}
-```
-
-After installation finishes, the CD target is cleaned up as part of the Worker deletion flow.
-
-### Common Errors
+This section lists common errors from Worker registration (section 7) and system disk creation (7.1, including the batch endpoint).
 
 | HTTP Status | Common Causes |
 |---:|---|
@@ -1769,12 +1733,12 @@ The `/boot-vars` `menu_default` derivation chain:
 default_disk (the `disk` field of this endpoint, highest priority) -> boot.menu_default (the `menu_default` field of this endpoint) -> reboot (not configured, loop reboot waiting)
 ```
 
-The three request body fields can be sent individually or in combination; at least one must be provided. Sending `null` (or an empty string) clears the corresponding item. This endpoint can be called repeatedly; later calls override earlier ones — they write the same ledger fields as the `boot` passed at registration (see 7.0).
+The three request body fields can be sent individually or in combination; at least one must be provided. Sending `null` (or an empty string) clears the corresponding item. This endpoint can be called repeatedly; later calls override earlier ones — they write the same ledger fields as the `boot` passed at registration (see section 7).
 
 Requirements:
 
 - When setting `disk`: The Worker must already have a system disk with that `os_tag` (created by `POST /workers/{worker_id}/luns/disk`), otherwise a `400` is returned listing the current system disks. In the multi-disk model, use `os_tag` to precisely match the disk to boot by default.
-- When setting `menu_default`: The value must be a valid item ID from the `menu.ipxe` main menu (strict validation to prevent an empty `choose --default` in iPXE); OS-semantics values (legacy OS names) are normalized to the generic OS item `boot-os`.
+- When setting `menu_default`: Only item IDs that can be selected manually in the current main menu are accepted: `config` / `shell` / `reboot` / `exit` (strict validation to prevent an empty `choose --default` in iPXE); `boot-os` is derived from the default disk and cannot be set manually.
 - When setting `menu_timeout`: Non-negative integer; `0` means the menu waits indefinitely (never auto-selects, waits for a human keypress); clearing restores the default `spec.boot.menuTimeoutMs` (currently `5000`).
 
 ### Path Parameters
@@ -1795,8 +1759,7 @@ Requirements:
 
 | Category | Valid Values |
 |---|---|
-| Generic OS item | `boot-os` (derived from the default disk configuration, not set manually here; legacy OS-semantics values normalize to it) |
-| Tools / Installation | `menu-diag` `menu-install` |
+| Generic OS item | `boot-os` is derived from the default disk configuration and **cannot be set manually** |
 | Advanced | `config` `shell` `reboot` `exit` |
 
 ### Example: Set Default Boot Disk
@@ -1813,11 +1776,11 @@ curl -s -X PUT "$BASE_URL/workers/worker-01/default-disk" \
 ### Example: Set Menu Default Item and Timeout
 
 ```bash
-curl -s -X PUT "$BASE_URL/workers/worker-win-build/default-disk" \
+curl -s -X PUT "$BASE_URL/workers/worker-01/default-disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "menu_default": "menu-install",
+    "menu_default": "config",
     "menu_timeout": 3000
   }'
 ```
@@ -1855,7 +1818,7 @@ Returns the full Worker inventory, including the set fields like `default_disk`,
 Deletes a single system disk of a given Worker (by the disk-level random identifier `os_tag`, 12 hex chars). The Control Plane will:
 
 1. Verify the Worker exists and has a disk with that `os_tag` (returns `404` if not).
-2. Call the hosting Agent to delete the iSCSI target.
+2. Call the hosting Agent to delete the target (nvmet subsystem / iSCSI target).
 3. Remove the disk entry from the Worker’s `disks` array in `state/workers.yml`.
 4. Cleanup linkage: if the deleted disk was the default boot disk (`default_disk` equals its `os_tag`), both `default_disk` and any matching (same-OS) `boot.menu_default` are cleared (to prevent iPXE from booting to a deleted disk); **if exactly one disk remains, it becomes the default boot disk**.
 5. When the last disk is deleted, `state` reverts from `ready` to `registered` (waiting for a new disk to be created).
@@ -1895,6 +1858,51 @@ Returns the full Worker inventory (with `disks` no longer containing the deleted
 
 ---
 
+## 7.5 PUT /workers/{worker_id}/mac (Rebind Mapping)
+
+### Description
+
+Changes the Worker’s MAC binding (hostname unchanged), mapped internally to a **device rebind**. Bindings are authoritative in the device inventory (`state/devices.yml`); `dnsmasq/dhcp-hosts.conf` is only a derived projection. The Control Plane:
+
+1. Verifies the Worker exists (`404`) and the new MAC format (`400`).
+2. Requires the new MAC to be in the pool, not revoked and not bound to another Worker (`409`).
+3. Looks up the Worker’s current device in the inventory (**not** in dnsmasq): the old device returns to the pool, the new one is bound to the Worker.
+4. Writes `dnsmasq/dhcp-hosts.conf`: replaces the hostname binding when present, appends it when missing (dnsmasq watches the file; no HUP needed); a projection write failure rolls the inventory back.
+5. Records `worker.mac.update` (`old_mac` / `new_mac` / `changed` / `client`); when the inventory had no binding change (e.g. the same MAC again) `changed=false` and only the projection is repaired.
+
+> **Note**: `dnsmasq/dhcp-hosts.conf` is a derived view of the device inventory (`MAC -> hostname`), not the MAC authority; the endpoint works even when it is missing or inconsistent. The Worker must renew its DHCP lease (restart NIC / PXE boot again) to use the new MAC identity.
+
+### Body Parameters
+
+| Parameter | Required | Description |
+|---|---:|---|
+| `mac` | Yes | New MAC address in `XX:XX:XX:XX:XX:XX` form (case-insensitive, normalized) |
+
+### Example
+
+```bash
+curl -s -X PUT "$BASE_URL/workers/worker-01/mac" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mac": "00:0c:29:b9:8b:01"}'
+```
+
+### Success Response
+
+Returns the full Worker record (`mac` comes from a reverse lookup in the device inventory).
+
+### Common Errors
+
+| HTTP Status | Common Causes |
+|---:|---|
+| `400` | Invalid `mac` format |
+| `401` | Missing or incorrect Token |
+| `404` | Worker not found |
+| `409` | New device out-of-pool / revoked / bound to another Worker / dnsmasq projection conflict (MAC bound to another hostname) |
+| `500` | Device inventory or dnsmasq binding write failed (inventory rolled back) |
+
+---
+
 ## 7.6 POST /workers/batch
 
 ### Description
@@ -1903,8 +1911,6 @@ Bulk-creates Workers (**per-item independent** — a failure of one item does no
 
 - Without `macs` → all Workers are **idle** (hostname binding only, no device authorized); bind them later via `POST /devices/{mac}/bind` (16.7)
 - With `macs` (must be the same length as `count`) → each MAC is validated against the device pool and bound directly (same semantics as passing `mac` in section 7: the device must be `state=pooled`; pool-miss / already bound → that item is `failed` and **not created**, retry after fixing)
-
-`windows_iso` is not supported (register installation ISOs one by one via section 7).
 
 ### Request Body Fields
 
@@ -1968,13 +1974,13 @@ curl -s -X POST "$BASE_URL/workers/batch" \
 
 ### Description
 
-The NVMe-oF connection authentication key store (key follows the Worker ruling, 2026-08-22):
+The NVMe-oF connection authentication key store (the key follows the Worker):
 keys are indexed by `worker_id`, and all devices bound to that Worker share the same key
-(a rebind rotates the key). Keys use the **DHHC-1** format (blueprint 2.1 contract):
+(a rebind rotates the key). Keys use the **DHHC-1** format:
 `DHHC-1:<two-digit type>:<base64(key + CRC32 little-endian 4 bytes)>`, with a 32-byte
 (SHA-256) or 64-byte (SHA-512) key body.
 
-**Issuance timing: issued on disk creation (2026-10-05)** — when a system disk is created on an
+**Issuance timing: issued on disk creation** — when a system disk is created on an
 nvmet-backed node (7.1 step 7, single and batch alike), the Control Plane generates a DHHC-1 key
 for any Worker that has none yet and pushes it (audited as `credential.issue`): the subsystem and
 its matching authentication key land together, so a batch of N disks yields N keys in one pass with
@@ -1997,7 +2003,7 @@ NQN prefix, i.e. the node's `spec.agent.nqnBase`) and is injected via `/boot-var
 the firmware's built-in default (the firmware derives it from the SMBIOS UUID by default; without
 the override authentication always fails).
 
-**Push reconciliation (2026-10-05, hardened 2026-10-30)**: the per-Agent outcome of every push is
+**Push reconciliation**: the per-Agent outcome of every push is
 recorded in `state/credential-push.yml` (key = `worker_id/agent_id`, storing the audit hash of the
 pushed key and a monotonic `generation`, never the plaintext). A control-plane reconciliation
 thread (default interval 60s, `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` seconds, 0 disables)
@@ -2039,7 +2045,7 @@ Operations that trigger a push: **issuance on disk creation** (nvmet backends, s
 setting/deleting credentials, device bind/unbind/rebind
 (`PUT /workers/{worker_id}/mac`), disk delete (including batch), and Worker deletion.
 
-**Periodic rotation (2026-10-23)**: each reconciliation cycle first checks the DHHC-1 key age
+**Periodic rotation**: each reconciliation cycle first checks the DHHC-1 key age
 (`rotated_at`, falling back to `updated_at` / `created_at`). Past
 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` (default 90 days, `<=0` disables it) the key is rotated:
 a new key is generated and pushed to every target Agent of that Worker, and the ledger
@@ -2049,15 +2055,14 @@ in effect), already-delivered targets get the old key pushed back and the ledger
 retrying next cycle; entries without an nvmet target are skipped. Until the switch, `/boot-vars` still projects the old key,
 so the window in which hosts hold the new key covers only the push itself.
 
-Static storage boundary (2026-10-05): the plaintext key lands in exactly four places along the
+Static storage boundary: the plaintext key lands in exactly four places along the
 chain — control-plane `state/credentials.yml`, the Agent container credential cache (which also
 holds the derived TLS PSK; both 0600), the storage node configfs (kernel hosts matrix `dhchap_key`),
 and the storage node's kernel global `.nvme` keyring (TLS PSK, at runtime). **No application-layer
 encryption is introduced**; the boundary is the deployer's responsibility (disk/host persistence
 encryption, root access boundary). The key travels over the mTLS component channel and never enters
-browser storage or server logs. Data-plane encryption (NVMe/TCP TLS 1.3, the firmware and kernel
-boot segments sharing port `4421`) is designed
-and verified per the local blueprint layer (`blueprint/nvme-tcp-tls-in-kernel.md`, not versioned).
+browser storage or server logs. The data-plane encryption projection (NVMe/TCP TLS 1.3, the firmware
+and kernel boot segments sharing port `4421`) is described in section 5.
 
 Credential boundary (who distributes, who self-holds): the stateless boot chain distributes exactly
 two credentials — the DHHC-1 authentication key and the TLS PSK derived from it — plus a non-secret
@@ -2169,16 +2174,20 @@ curl -s "$BASE_URL/workers" \
 ```json
 [
   {
-    "hostname": "worker-00",
+    "hostname": "worker-01",
     "arch": "x86_64",
     "state": "ready",
     "disks": [
       {
         "agent": "a1b2c3d4e5f6",
-        "iqn": "iqn.2026-07.com.controller:worker-00.ubuntu",
-        "filename": "worker-00.ubuntu.img",
-        "backing": "/home/iscsi_img/worker-00.ubuntu.img",
+        "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+        "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+        "filename": "worker-01.ubuntu.0d26b6f33a89.img",
+        "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img",
         "os": "ubuntu",
+        "os_version": "22.04",
+        "os_tag": "0d26b6f33a89",
+        "remark": "",
         "source": {
           "type": "empty",
           "size": "40G"
@@ -2186,8 +2195,11 @@ curl -s "$BASE_URL/workers" \
       }
     ],
     "cd": null,
-    "worker_id": "worker-00",
-    "mac": "00:0c:29:b9:8b:00"
+    "default_disk": "0d26b6f33a89",
+    "worker_id": "worker-01",
+    "mac": "00:0c:29:b9:8b:2d",
+    "bound_device": "00:0c:29:b9:8b:2d",
+    "readiness": "ready"
   }
 ]
 ```
@@ -2225,8 +2237,8 @@ The response structure is identical to the successful `POST /workers` result.
 
 Queries the Worker’s inventory information and performs real-time checks:
 
-- Whether the hostname’s MAC exists in `dnsmasq/dhcp-hosts.conf`.
-- Whether the corresponding disk target(s) exist on the Agent(s).
+- Whether the Worker’s `MAC,hostname` projection exists in `dnsmasq/dhcp-hosts.conf` (a missing projection only means the derived artifact is out of sync; the device ledger remains the binding authority).
+- Whether the corresponding disk target(s) exist on the Agent(s) (matched by disk NQN / derived IQN).
 - Whether the corresponding CD target exists on the Agent.
 
 ### Path Parameters
@@ -2253,10 +2265,14 @@ curl -s "$BASE_URL/workers/worker-01/status" \
     "disks": [
       {
         "agent": "a1b2c3d4e5f6",
-        "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu",
-        "filename": "worker-01.ubuntu.img",
-        "backing": "/home/iscsi_img/worker-01.ubuntu.img",
+        "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+        "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+        "filename": "worker-01.ubuntu.0d26b6f33a89.img",
+        "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img",
         "os": "ubuntu",
+        "os_version": "22.04",
+        "os_tag": "0d26b6f33a89",
+        "remark": "",
         "source": {
           "type": "master",
           "name": "_tpl_ubuntu_2204.img"
@@ -2264,8 +2280,11 @@ curl -s "$BASE_URL/workers/worker-01/status" \
       }
     ],
     "cd": null,
+    "default_disk": "0d26b6f33a89",
     "worker_id": "worker-01",
-    "mac": "00:0c:29:b9:8b:2d"
+    "mac": "00:0c:29:b9:8b:2d",
+    "bound_device": "00:0c:29:b9:8b:2d",
+    "readiness": "ready"
   },
   "actual": {
     "dnsmasq": {
@@ -2277,10 +2296,12 @@ curl -s "$BASE_URL/workers/worker-01/status" \
         "os": "ubuntu",
         "exists": true,
         "target": {
-          "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu",
+          "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+          "iqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
           "luns": [
             {
-              "backing": "/home/iscsi_img/worker-01.ubuntu.img"
+              "lun": 1,
+              "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img"
             }
           ]
         }
@@ -2451,7 +2472,7 @@ curl -s "$BASE_URL/operations?since=10&limit=100" \
       "status": "ok",
       "worker_id": "worker-01",
       "agent": "a1b2c3d4e5f6",
-      "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu"
+      "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89"
     }
   ]
 }
@@ -2461,7 +2482,7 @@ curl -s "$BASE_URL/operations?since=10&limit=100" \
 
 ## 13. Typical Test Sequence
 
-It is recommended to verify in this order:
+It is recommended to verify in this order (all examples use `worker-01` and device `00:0c:29:b9:8b:2d`):
 
 ### 13.1 Check Service Liveness
 
@@ -2469,9 +2490,10 @@ It is recommended to verify in this order:
 curl -s "$BASE_URL/healthz"
 ```
 
-### 13.2 Check Boot Variable Projection
+### 13.2 Check Boot-Chain Status and Boot Variable Projection
 
 ```bash
+curl -s "$BASE_URL/boot-assets" -H "Authorization: Bearer $TOKEN"
 curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01"
 curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01&format=json"
 ```
@@ -2498,24 +2520,37 @@ curl -s "$BASE_URL/agents?live=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-### 13.4 Register Worker Identity (hostname + MAC binding)
+### 13.4 Prepare the Device and Register the Worker
+
+The device must enter the device pool first (automatic enrollment via the registration window is described in section 5; manual registration below):
+
+```bash
+curl -s -X POST "$BASE_URL/devices" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mac": "00:0c:29:b9:8b:2d"
+  }'
+```
+
+Then register the Worker and bind the device directly:
 
 ```bash
 curl -s -X POST "$BASE_URL/workers" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "worker_id": "worker-00",
-    "mac": "00:0c:29:b9:8b:00"
+    "worker_id": "worker-01",
+    "mac": "00:0c:29:b9:8b:2d"
   }'
 ```
 
-At this point, the Worker is MAC-bound but has no system disk (`state=registered`, `disks` is an empty array).
+At this point, the Worker is bound to the device but has no system disk (`state=registered`, `disks` is an empty array, `readiness=partial`).
 
-### 13.5 Create a System Disk for worker-00 (empty disk)
+### 13.5 Create a System Disk for worker-01 (empty disk)
 
 ```bash
-curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
+curl -s -X POST "$BASE_URL/workers/worker-01/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2525,59 +2560,63 @@ curl -s -X POST "$BASE_URL/workers/worker-00/luns/disk" \
   }'
 ```
 
-After the disk is created, `state` transitions from `registered` to `ready`.
+After the disk is created, `state` transitions from `registered` to `ready`; the first disk automatically becomes `default_disk`, and the returned `os_tag` identifies that default boot disk.
 
-### 13.6 Set Default Boot Configuration
+### 13.6 Set Default Boot Configuration (optional)
+
+The first disk is already the default, so this call is normally unnecessary. For multiple disks or to override the menu item/timeout:
 
 ```bash
 # disk = the os_tag returned by disk creation in 13.5 (12 hex chars, precisely references a specific disk)
-curl -s -X PUT "$BASE_URL/workers/worker-00/default-disk" \
+curl -s -X PUT "$BASE_URL/workers/worker-01/default-disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "disk": "0d26b6f33a89"
+    "disk": "5f1c2a3b4d5e"
   }'
 ```
 
-`/boot-vars` will now return `menu-default=boot-os` (2026-08-30 MAIN MENU dynamicization: the OS item has converged to a single generic item). See section 7.3 for examples of setting menu items and timeout.
+`/boot-vars` will now return `menu-default=boot-os` (the MAIN MENU OS item has converged to a single generic item). See section 7.3 for examples of setting menu items and timeout.
 
 ### 13.7 Query Worker Inventory
 
 ```bash
-curl -s "$BASE_URL/workers/worker-00" \
+curl -s "$BASE_URL/workers/worker-01" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 13.8 Query Real-Time Status
 
 ```bash
-curl -s "$BASE_URL/workers/worker-00/status" \
+curl -s "$BASE_URL/workers/worker-01/status" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 13.9 Delete Worker, Keeping the Empty Disk File
 
 ```bash
-curl -s -X DELETE "$BASE_URL/workers/worker-00?delete_disk=false" \
+curl -s -X DELETE "$BASE_URL/workers/worker-01?delete_disk=false" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-This step is ideal for a workflow where you create an empty disk, then manually rename it to a master image.
+Deletion also unbinds the device (returns it to the pool without revoking it) and clears the Worker’s credential entries; keeping the `.img` supports the workflow where you create an empty disk, then manually rename it to a master image.
 
 ---
 
-## 14. Agent iSCSI LUN/Target Management
+## 14. Agent LUN/Target Management (NVMe-oF primary path)
 
 ### Description
 
-The Control Plane can directly manage iSCSI targets/LUNs on any Agent. Requests are forwarded by the Control Plane to the Agent over mTLS (the Control Plane’s component client certificate, bound to the internal CA), so callers only need the Control Plane Token and never need to contact the Agent directly.
+The Control Plane can directly manage targets/LUNs on any Agent. Requests are forwarded by the Control Plane to the Agent over mTLS (the Control Plane’s component client certificate, bound to the internal CA), so callers only need Control Plane credentials and never need to contact the Agent directly.
+
+The data-plane backend is selected by the node declaration `spec.agent.backend`: `nvmet` (default, primary path) identifies targets by **disk NQN**; `stgt` / `lio` are iSCSI compatibility backends and identify targets by IQN. To serve both, these endpoints keep `iqn` as the request key: on the nvmet backend the Agent converts it back to an NQN (same-suffix prefix transform), and list responses also return `nqn` (nvmet) or `iqn` (stgt/lio).
 
 Differences from Worker lifecycle endpoints (`POST /workers`, `DELETE /workers/{worker_id}`):
 
-- Worker endpoints are **inventory-oriented**: they automatically assemble IQNs, write `state/workers.yml`, and write dnsmasq bindings.
+- Worker endpoints are **inventory-oriented**: they generate the disk NQN and derived IQN, write `state/workers.yml`, and maintain the dnsmasq derived projection.
 - LUN management endpoints are **data-plane direct management**: they do not write any inventory; they directly operate targets on the Agent. Suitable for master image management, manual troubleshooting, temporary ISO mounting, etc.
 
-All endpoints require authentication (see 1.3, authenticator chain). If the Agent is not found, `404 agent not found` is returned. If the Agent is unreachable, `503` is returned. Business validation errors from the Agent side (e.g., IQN prefix mismatch, file already exists, IQN already exists) are passed through with the Agent’s status code and `detail`:
+All endpoints require management-plane authentication (see 1.3). If the Agent is not found, `404 agent not found` is returned. If the Agent is unreachable, `503` is returned. Business validation errors from the Agent side (e.g., NQN prefix mismatch, file already exists, target already exists) are passed through with the Agent’s status code and `detail`:
 
 ```json
 {"agent": "a1b2c3d4e5f6", "error": "iqn base mismatch: ..."}
@@ -2585,7 +2624,7 @@ All endpoints require authentication (see 1.3, authenticator chain). If the Agen
 
 ### 14.1 GET /agents/{agent_id}/luns
 
-Lists all iSCSI targets/LUNs on the specified Agent. The response structure depends on the Agent backend (stgt includes a `tid` field, LIO is the parsed output of `targetcli`). The Control Plane passes it through unchanged.
+Lists all targets/LUNs on the specified Agent. On the nvmet backend the target identifier is the NQN (`nqn`; the `iqn` key is kept for the historical interface contract and equals `nqn`); stgt includes a `tid` field, and LIO is the parsed output of `targetcli`. The Control Plane passes it through unchanged.
 
 #### Path Parameters
 
@@ -2600,15 +2639,34 @@ curl -s "$BASE_URL/agents/a1b2c3d4e5f6/luns" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-#### Example Success Response
+#### Example Success Response (nvmet)
 
 ```json
 [
   {
-    "iqn": "iqn.2026-07.com.controller:worker-01.ubuntu",
+    "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+    "iqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
     "luns": [
       {
-        "backing": "/home/iscsi_img/worker-01.ubuntu.img"
+        "lun": 1,
+        "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img"
+      }
+    ]
+  }
+]
+```
+
+Entries from stgt/lio backends have no `nqn`:
+
+```json
+[
+  {
+    "tid": 1,
+    "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+    "luns": [
+      {
+        "lun": 0,
+        "backing": "/home/iscsi_img/worker-01.ubuntu.0d26b6f33a89.img"
       }
     ]
   }
@@ -2629,7 +2687,7 @@ Creates a disk LUN on the specified Agent. Pass `master` to clone from a master 
 
 | Field | Required | Description |
 |---|---:|---|
-| `iqn` | Yes | Target IQN (the derived form of the disk NQN). Must be prefixed with the Agent’s IQN base (derived from `IPXE_NQN_BASE`). |
+| `iqn` | Yes | iSCSI form of the target identifier (disk IQN, derived from the disk NQN). Must be prefixed with the Agent’s derived IQN base (`nqn_to_iqn(spec.agent.nqnBase)`); the nvmet backend converts it back to an NQN. |
 | `filename` | No | Backing filename. If omitted, the Agent auto-generates one from the IQN. |
 | `master` | Conditionally required | Master image filename (located in `DISK_DIR`). Mutually exclusive with `size`. |
 | `size` | Conditionally required | Empty disk size, e.g., `40G`. Mutually exclusive with `master`. |
@@ -2642,7 +2700,7 @@ curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "iqn": "iqn.2026-07.com.controller:worker-02.ubuntu",
+    "iqn": "iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89",
     "master": "_tpl_ubuntu_2204.img"
   }'
 
@@ -2651,8 +2709,8 @@ curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/disk" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "iqn": "iqn.2026-07.com.controller:worker-02.ubuntu",
-    "filename": "worker-02.ubuntu.img",
+    "iqn": "iqn.2026-07.com.kurrent:worker-02.ubuntu.5f1c2a3b4d5e",
+    "filename": "worker-02.ubuntu.5f1c2a3b4d5e.img",
     "size": "40G"
   }'
 ```
@@ -2661,21 +2719,21 @@ curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/disk" \
 
 ```json
 {
-  "iqn": "iqn.2026-07.com.controller:worker-02.ubuntu",
-  "backing": "/home/iscsi_img/worker-02.ubuntu.img"
+  "iqn": "iqn.2026-07.com.kurrent:worker-02.ubuntu.5f1c2a3b4d5e",
+  "backing": "/home/iscsi_img/worker-02.ubuntu.5f1c2a3b4d5e.img"
 }
 ```
 
 ### 14.3 POST /agents/{agent_id}/luns/cd
 
-Creates a CD (ISO virtual drive) LUN on the specified Agent. Only Agents with `role.cd` set to true support this. If the Agent is not configured for the CD role (e.g., LIO), it returns `400 agent ... not configured for cd role`. Backend capability limitations are passed through from the Agent. A disabled (drained) Agent returns `409 agent ... disabled: not accepting new LUNs`.
+Creates a CD (ISO virtual drive) LUN on the specified Agent. Only Agents with `role.cd` set to true support this; the nvmet backend does not support CD (`400 nvmet backend does not support cd`); an Agent not configured for the CD role returns `400 agent ... not configured for cd role`. A disabled (drained) Agent returns `409 agent ... disabled: not accepting new LUNs`.
 
 #### Request Body Fields
 
 | Field | Required | Description |
 |---|---:|---|
 | `iso` | Yes | ISO filename (present in `DISK_DIR`). |
-| `iqn` | No | Target IQN. If omitted, the Agent auto-generates one from the derived IQN base (from `IPXE_NQN_BASE`):`iso_filename`. |
+| `iqn` | No | Target IQN. If omitted, the Agent auto-generates one from the derived IQN base (`nqn_to_iqn(spec.agent.nqnBase)`):`iso_filename`. |
 
 #### curl
 
@@ -2684,7 +2742,7 @@ curl -s -X POST "$BASE_URL/agents/f60123456789/luns/cd" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "iso": "Win11_24H2.iso"
+    "iso": "tools.iso"
   }'
 ```
 
@@ -2704,11 +2762,11 @@ Deletes a LUN/target on the specified Agent.
 
 ```bash
 # Delete only the target, keep the backing file
-curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89" \
   -H "Authorization: Bearer $TOKEN"
 
 # Delete target and backing file, continue even if target was already missing
-curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.controller:worker-02.ubuntu&delete_file=true&ignore_missing=true" \
+curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89&delete_file=true&ignore_missing=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -2716,7 +2774,7 @@ curl -s -X DELETE "$BASE_URL/agents/a1b2c3d4e5f6/luns?iqn=iqn.2026-07.com.contro
 
 ```json
 {
-  "deleted": "iqn.2026-07.com.controller:worker-02.ubuntu",
+  "deleted": "iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89",
   "delete_file": false
 }
 ```
@@ -2725,7 +2783,7 @@ When ignoring a missing target:
 
 ```json
 {
-  "deleted": "iqn.2026-07.com.controller:worker-02.ubuntu",
+  "deleted": "iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89",
   "delete_file": true,
   "ignored_missing": true
 }
@@ -2733,7 +2791,7 @@ When ignoring a missing target:
 
 ### 14.5 POST /agents/{agent_id}/luns/scan
 
-Triggers the Agent to scan its image directory and rebuild targets for missing `.img`/`.iso` files (file-is-truth). For stgt backends, the result includes what was recreated. For LIO backends, due to `saveconfig` persistence, it usually skips everything.
+Triggers the Agent to scan its image directory and rebuild targets for missing `.img` files (file-is-truth); master images (`*_tpl_*`) are managed by the master scanner and skipped. nvmet subsystems persist in configfs and usually skip everything; stgt returns what was recreated. `stgt` also creates CD targets for `.iso` files, while `nvmet` / `lio` skip ISOs.
 
 #### curl
 
@@ -2748,7 +2806,7 @@ curl -s -X POST "$BASE_URL/agents/a1b2c3d4e5f6/luns/scan" \
 {
   "created": [
     {
-      "iqn": "iqn.2026-07.com.controller:worker-02.ubuntu",
+      "iqn": "iqn.2026-07.com.kurrent:worker-02.ubuntu.0d26b6f33a89",
       "cd": false
     }
   ],
@@ -2812,7 +2870,7 @@ curl -s "$BASE_URL/masters" \
 
 The device inventory (`state/devices.yml`) is the bottom-layer entity of the three-layer entity model (device / Worker / system disk): auto-registration and manual import only enter the device pool — **registration ≠ authorization**: a device only gains an identity after being bound to a Worker. The binding relationship is authoritative on the device side (`bound_worker_id`); the Worker side only projects it and does not store it.
 
-**Binding semantics (P2)**: device ↔ Worker is strictly **one-to-one**. A device binds via `POST /devices/{mac}/bind` (16.7); `force=true` performs an atomic rebind (pre-check → new binding persisted → old binding cleared → rollback on failure). Unbinding (`DELETE /devices/{mac}/bind`, 16.8) returns the device to the pool; the Worker's system disks are kept. Deleting a Worker cascades an unbind (11). `POST /workers` with a `mac` also binds directly (7).
+**Binding semantics**: device ↔ Worker is strictly **one-to-one**. A device binds via `POST /devices/{mac}/bind` (16.7); `force=true` performs an atomic rebind (pre-check → new binding persisted → old binding cleared → rollback on failure). Unbinding (`DELETE /devices/{mac}/bind`, 16.8) returns the device to the pool; the Worker's system disks are kept. Deleting a Worker cascades an unbind (11). `POST /workers` with a `mac` also binds directly (7).
 
 **Readiness projection**: Worker responses (list / detail / status) derive two fields from the ledger:
 
@@ -2836,7 +2894,7 @@ devices:
     uuid: "4c4c4544-..."          # SMBIOS UUID (dual factor, optional)
     state: pooled                 # pooled | bound | revoked
     bound_worker_id: null         # authoritative here; worker side only projects
-    key_hash: null                # filled in the security blueprint phase; empty for now
+    key_hash: null                # device public-key fingerprint (filled by a pubkey report/claim; required by signature enforcement)
     source: ipxe                  # ipxe (auto) | manual (manual entry/import)
     fingerprint:                  # reported values; updated by device reports
       manufacturer: ASUSTeK COMPUTER INC.
@@ -2901,7 +2959,7 @@ Bulk import a device manifest (pre-import of the MAC manifest): each entry is in
 
 | Field | Description |
 |---|---|
-| `created` | MACs newly added to the pool |
+| `created` | Entries newly added to the pool (each `{mac}`) |
 | `skipped` | Already existing (pooled/bound) entries and reasons |
 | `failed` | Invalid MAC / revoked entries and reasons |
 
@@ -3041,55 +3099,3 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"mode":"manifest","pairs":[{"mac":"00:0c:29:b9:8b:2d","worker_id":"worker-01"}]}'
 ```
-
----
-
-## 17. Current Implementation Boundaries
-
-The current version supports:
-
-- Worker identity registration (hostname binding; `mac` optional — providing it binds the device directly)
-- Bulk Worker creation (count + naming rule, optional `macs` direct bind, `POST /workers/batch`, 7.6)
-- Device inventory (auto pool entry / manual registration / bulk import / revoke, `/devices` endpoints)
-- Device↔Worker one-to-one binding (bind / force rebind / unbind / batch bind preview + execution, 16.7–16.10)
-- Worker `mac` rebind mapping (`PUT /workers/{worker_id}/mac`, 7)
-- Cascade unbind on Worker deletion (11 / 11.1)
-- Boot-vars anti-impersonation (binding as authentication, 5)
-- iPXE device info reporting (11-field fingerprint, `GET /devices/report`; auto-registration only enters the pool, no Worker creation)
-- Worker system disk creation (`POST /workers/{worker_id}/luns/disk`)
-- Setting Worker default boot configuration (default disk / menu item / timeout, `PUT /workers/{worker_id}/default-disk`)
-- Worker deletion
-- Agent selection
-- Agent LUN direct management (list / create disk / create CD / delete / scan)
-- Master image list query (`GET /masters`, backed by periodic background scanning on storage nodes)
-- Master tag registration (os / os_version annotations, `PUT/DELETE /agents/{agent_id}/masters/{master_name}/tag`, 6.4; aggregated and merged in `/masters`)
-- Windows ISO special handling
-- dnsmasq hostname bindings
-- Worker and operation audit trail queries
-- Multi-OS system disks (a Worker can have disks for multiple OSes: at most one per (os, os_version), different versions can coexist, distinguished by the disk-level `os_tag`, with `default_disk` determining the default boot)
-- NVMe-oF authentication key store (DHHC-1, key follows Worker, 7.7; `/boot-vars` injects `nbft_secret`, 5)
-- Credential issuance & push driver (nvmet nodes issue a key automatically on disk creation; pushes to Agents on credential set/revoke, device bind/unbind/rebind, disk delete, Worker deletion; the Agent relays to the nvmet host service to sync the hosts matrix and the TLS PSK in the kernel `.nvme` keyring) + push reconciliation (state ledger + periodic idempotent replay of undelivered items, visible via the push projection, see 7.7)
-- Data-plane transport encryption by default: NVMe/TCP TLS 1.3 on the storage node's single data-plane port (`4421`), shared by the firmware and kernel boot segments; the PSK is derived from the authentication key and delivered via `/boot-vars` as `nbft_tls_psk` / `nbft_tls_port`, and a missing port or key refuses the boot instead of falling back to plaintext
-
-The current version does **not** yet include:
-
-- Automatic IP management
-- Automatic master image lifecycle management
-- Scheduled reconciliation
-- Data disk attachment (the `/luns/data` namespace is reserved)
-- Real transactions for the file-based storage: rollback = rewrite; if a rebind's old-binding cleanup fails **and** the restore also fails, locate and fix manually via the audit trail (16.7)
-
----
-
-### Component Ports
-
-#### Control-plane host
-- dnsmasq: `53` (default DNS listener), `67` (DHCP), `69` (TFTP)
-- nginx: `80` (301 redirect to 443 only), `443` (the only external entry: WebUI / management API / boot chain / file downloads)
-- Control Plane: no TCP port (in-container unix socket `/run/kurrent/cp.sock`, reachable only by nginx and the container health check)
-
-#### Storage node
-- Agent: `4840` (mTLS, called by the control plane)
-- nvmet-host: shared-volume UDS `/run/kurrent/nvmet/nvmet-host.sock` (mTLS, called by the Agent; no TCP listener)
-- NVMe-oF data plane: `4421` (nvmet port, TLS 1.3 `tsas` required; authentication via DH-HMAC-CHAP)
-- LIO / stgt (iSCSI data plane): `3260`

@@ -136,14 +136,15 @@ Admission order:
 | Variable | Meaning | Condition |
 | --- | --- | --- |
 | `disk-nqn` | Full NQN of the system disk, passed through verbatim | A default disk exists |
-| `storager-ip` | Data-plane address | The Worker is bound to a node |
+| `storager-ip` | Data-plane address | A default disk exists and its storage node is registered |
 | `nbft-tls-port` | Data-plane TLS port | nvmet backend with a ready port |
 | `nbft-tls-psk` | TLS PSK derived from the authentication key | Signature verified and a key exists |
 | `nbft-secret` | DHHC-1 authentication key | Signature verified and a key exists |
 | `hostnqn` | The Worker's Host NQN | Node and disk NQN available |
 | `os` / `os-version` | OS label for the menu | Default disk carries OS information |
 | `menu-default` / `menu-timeout` | Auto-boot entry and timeout (milliseconds) | Always emitted |
-| `base-iqn` / `iscsi-sep` | iSCSI installer root-path parameters | stgt / lio backends only |
+| `base-iqn` | Disk IQN prefix, used to derive `initiator-iqn` | A default disk exists |
+| `iscsi-sep` | iSCSI backend separator (not consumed by the current boot scripts) | stgt / lio backends only |
 
 Without a default disk, the control plane returns `menu-default=reboot` with a short timeout, so the device reboots while waiting for a disk or default selection. It never constructs a plaintext fallback.
 
@@ -155,11 +156,10 @@ Without a default disk, the control plane returns `menu-default=reboot` with a s
 | --- | --- |
 | `controller_ip` | Control-plane address, defaulting to DHCP `next-server` |
 | `https-port` / `https-url` | Control-plane HTTPS entry |
-| `chain-url` | Root for installer and tool assets |
 | `menu-url` | Absolute URL of the menu script |
 | `storager-ip` | Default data-plane address (overridable by `/boot-vars`) |
-| `base-iqn` | Base iSCSI IQN |
-| `iscsi-sep` | iSCSI separator (overridden per backend type) |
+| `base-iqn` | Base IQN, used to derive `initiator-iqn` |
+| `iscsi-sep` | Default iSCSI separator (not consumed by the current boot scripts) |
 | `initiator-iqn` | iSCSI initiator name |
 
 ## Data-plane URI
@@ -207,10 +207,10 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 ## Related pages
 
 - [Firmware Overview](../firmware/index.md)
-- [Capabilities](../firmware/index.md)
+- [Firmware Platform Reference](./firmware-platform.md)
 - [Build and Artifacts](../firmware/build-deploy.md)
 - [Provisioning and Flashing](../firmware/build-deploy.md)
-- [Device Identity and Trust](../firmware/index.md)
+- [Device Identity and Trust](../firmware/index.md#device-identity-and-trust)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)
 - [API Reference](./api.md)

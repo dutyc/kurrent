@@ -136,14 +136,15 @@ GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&sig=<base64>
 | 变量 | 含义 | 条件 |
 | --- | --- | --- |
 | `disk-nqn` | 系统盘完整 NQN（原样下发给固件） | 有默认盘 |
-| `storager-ip` | 数据面地址 | Worker 已绑定到节点 |
+| `storager-ip` | 数据面地址 | 有默认盘且其存储节点已登记 |
 | `nbft-tls-port` | 数据面 TLS 端口 | nvmet 后端且端口就绪 |
 | `nbft-tls-psk` | 由认证密钥派生的 TLS PSK | 验签通过且已有认证密钥 |
 | `nbft-secret` | DHHC-1 认证密钥 | 验签通过且已有认证密钥 |
 | `hostnqn` | Worker 的 Host NQN | 节点与盘 NQN 可用 |
 | `os` / `os-version` | 菜单展示的系统标识 | 默认盘带系统信息 |
 | `menu-default` / `menu-timeout` | 自动启动项与超时（毫秒） | 总是下发 |
-| `base-iqn` / `iscsi-sep` | iSCSI 安装器的根路径参数 | 仅 stgt / lio 后端 |
+| `base-iqn` | 盘 IQN 前缀，用于派生 `initiator-iqn` | 有默认盘 |
+| `iscsi-sep` | iSCSI 后端连接符（当前引导脚本不消费） | 仅 stgt / lio 后端 |
 
 无默认盘时控制面返回 `menu-default=reboot` 与短超时，设备重启等待建盘或设置默认盘；不会构造明文回退。
 
@@ -155,11 +156,10 @@ GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&sig=<base64>
 | --- | --- |
 | `controller_ip` | 控制面地址，默认取 DHCP `next-server` |
 | `https-port` / `https-url` | 控制面 HTTPS 入口 |
-| `chain-url` | 安装器与工具资产根路径 |
 | `menu-url` | 菜单脚本的绝对 URL |
 | `storager-ip` | 数据面默认地址（可被 `/boot-vars` 覆盖） |
-| `base-iqn` | iSCSI 基础 IQN |
-| `iscsi-sep` | iSCSI 连接符（按后端类型覆盖） |
+| `base-iqn` | 基础 IQN，用于派生 `initiator-iqn` |
+| `iscsi-sep` | iSCSI 连接符默认值（当前引导脚本不消费） |
 | `initiator-iqn` | iSCSI 发起端名称 |
 
 ## 数据面 URI
@@ -207,10 +207,10 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 ## 相关页面
 
 - [固件概述](../firmware/index.md)
-- [能力清单](../firmware/index.md)
+- [固件平台参考](./firmware-platform.md)
 - [构建与产物](../firmware/build-deploy.md)
 - [预置与刷写](../firmware/build-deploy.md)
-- [设备身份与信任](../firmware/index.md)
+- [设备身份与信任](../firmware/index.md#设备身份与信任)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../architecture/security.md)
 - [API 参考](./api.md)

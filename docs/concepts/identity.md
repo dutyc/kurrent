@@ -116,7 +116,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 存储节点的 Agent 与 nvmet-host 使用 nodes CA 签发的证书。首次加入时：
 
-1. 管理员签发绑定 `agent_id` 的 bootstrap token（`agent_id` 为 12 位小写十六进制；描述性名称写节点声明 `metadata.remark`）；
+1. 管理员签发绑定 `agent_id` 的 bootstrap token（`agent_id` 为 12 位小写十六进制，由控制面在签发时分配，join 写入节点状态根下的 `storager/state/agent.id`；CLI 与 WebUI 只消费响应返回的身份；昵称属于控制面台账）；
 2. 节点用 token 调 `/enroll`，取得组件证书；
 3. token 默认一次性，TTL 与次数上限由声明控制；
 4. nvmet-host 的凭据由 agent 在 enroll 响应中派生，无需单独签发。
@@ -160,7 +160,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 ## 相关页面
 
 - 引导链如何使用设备身份：[引导链](./boot-chain.md)
-- 固件侧密钥、签名与 TOFU：[设备身份与信任](../firmware/index.md)
+- 固件侧密钥、签名与 TOFU：[固件契约](../reference/firmware-contract.md)
 - 凭据与数据面：[存储与数据面](./storage.md)
 - 威胁模型与残余风险：[安全模型](../architecture/security.md)
 - 日常操作命令：[日常运维](../guide/operations.md)

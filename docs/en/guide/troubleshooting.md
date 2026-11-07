@@ -11,7 +11,7 @@ This page is organized by symptom: first identify the boundary where the failure
 - **iPXE stalls at HTTPS** — 443 / certificate / TOFU; server certificate; NVRAM fingerprint.
 - **Device not pooled** — registration window / public key / revocation; window state on Devices; device report.
 - **Empty menu or boot loop** — binding / system disk / default disk; Worker details; `/boot-vars` projection.
-- **Data plane fails after the menu** — 4421 / tlshd / credentials; `host-prepare.sh --check`; credential push state.
+- **Data plane fails after the menu** — 4421 / tlshd / credentials; `kurrent host check --role storage`; credential push state.
 - **Authentication fails after the system boots** — credential rotation / reconciliation; `kurrent workers credential show`.
 
 ## Control plane not ready
@@ -25,6 +25,9 @@ curl -k https://<control-plane-ip>/healthz
 - `/healthz` returns 503: a startup-derived artifact failed; `config status` lists the startup error. Fix the declaration and rerun `kurrent init`.
 - `init` exits non-zero and reports a rollback: the new declaration failed startup checks. Rollback restores only the declaration file; use `config status` for derived state such as certificates.
 - `configHash` differs from `config show`: the runtime has not loaded the current declaration; rerun `kurrent init`.
+- `init` reports a foreign owner for the state root or `~/.kurrent`: run the suggested `sudo chown -R "$(id -u):$(id -g)" <path>`; do not rerun as root.
+- `init` reports legacy in-repository state: confirm the migration, then rerun with `--adopt-state`; when a `bootstrapping` record and exchange bundle remain, the rerun resumes at the credential exchange.
+- `init` reports a missing state root while the deployment record exists: restore the state root from a backup, or remove `~/.kurrent/deployment.yaml` and deploy again; `kurrent deployment show` prints the recorded values.
 
 ## Agent not ok
 
@@ -72,7 +75,7 @@ After the window closes, reports update fingerprints only and do not pool device
 ## Data plane connection failure
 
 ```bash
-bash storager/nvmeof/host-prepare.sh --check
+kurrent host check --role storage
 docker logs kurrent-nvmet-host
 ss -tlnp | grep 4421
 ```
@@ -117,7 +120,7 @@ kurrent cert list
 | Evidence | Location |
 | --- | --- |
 | Control plane startup and derived artifacts | `docker logs kurrent-control-plane`; `kurrent config status` |
-| Management request decisions | `control_plane/state/audit.jsonl` |
+| Management request decisions | `control-plane/state/audit.jsonl` under the state root (`kurrent deployment show` prints the state root) |
 | Operation history | WebUI Operations / `kurrent ops list` |
 | Agent and data plane | `docker logs storager-agent`, `docker logs kurrent-nvmet-host` |
 | Boot chain status | WebUI "Boot chain" / `GET /boot-assets` |

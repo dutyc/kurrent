@@ -116,7 +116,7 @@ After exchanging a certificate or token for a session, the client carries only t
 
 The storage node's Agent and nvmet-host use certificates issued by the nodes CA. On first join:
 
-1. an administrator issues a bootstrap token bound to `agent_id` (12 lowercase hex characters; descriptive names go in the node declaration `metadata.remark`);
+1. an administrator issues a bootstrap token bound to `agent_id` (12 lowercase hex characters, allocated by the control plane at issuance and written by join to `storager/state/agent.id` under the node state root; the CLI and WebUI only consume the returned identity; nicknames belong to the control-plane ledger);
 2. the node calls `/enroll` with the token and receives a component certificate;
 3. the token is single-use by default; TTL and use count are capped by declaration;
 4. the nvmet-host credential is derived by the agent from the enroll response and is not issued separately.
@@ -160,7 +160,7 @@ With `KURRENT_CP_ALARM_WEBHOOK` set, alarm events are POSTed as JSON by a backgr
 ## Related Pages
 
 - How device identity is used at boot: [Boot Chain](./boot-chain.md)
-- Firmware-side keys, signatures and TOFU: [Device Identity and Trust](../firmware/index.md)
+- Firmware-side keys, signatures and TOFU: [Firmware Contract](../reference/firmware-contract.md)
 - Credentials and the data plane: [Storage and Data Plane](./storage.md)
 - Threat model and residual risk: [Security Model](../architecture/security.md)
 - Day-to-day commands: [Operations](../guide/operations.md)

@@ -11,7 +11,7 @@
 - **iPXE 卡在 HTTPS**：443 / 证书 / TOFU；服务器证书、NVRAM 指纹。
 - **设备不入池**：注册窗口 / 公钥 / 吊销；Devices 页窗口状态；设备上报。
 - **菜单为空或循环重启**：绑定 / 系统盘 / 默认盘；Worker 详情；`/boot-vars` 投影。
-- **菜单后数据面连接失败**：4421 / tlshd / 凭据；`host-prepare.sh --check`；凭据推送状态。
+- **菜单后数据面连接失败**：4421 / tlshd / 凭据；`kurrent host check --role storage`；凭据推送状态。
 - **系统启动后认证失败**：凭据轮换 / 对账；`kurrent workers credential show`。
 
 ## 控制面未就绪
@@ -25,6 +25,9 @@ curl -k https://<控制面IP>/healthz
 - `/healthz` 返回 503：启动期派生件失败，`config status` 会列出启动错误；修复声明后重跑 `kurrent init`。
 - `init` 非零退出并报告回滚：新声明未通过启动检查；回滚只恢复声明文件，证书等派生物以 `config status` 为准。
 - `configHash` 与 `config show` 不一致：运行态没有加载当前声明，重新执行 `kurrent init`。
+- `init` 报状态根或 `~/.kurrent` 属主不符：按提示执行 `sudo chown -R "$(id -u):$(id -g)" <路径>`，不要以 root 重跑。
+- `init` 报仓库内存在旧状态：确认迁移后加 `--adopt-state` 重跑；`bootstrapping` 记录与交换包保留时，修复后重跑从凭据交换继续。
+- `init` 报状态根不存在而部署记录仍在：从备份恢复状态根，或删除 `~/.kurrent/deployment.yaml` 后重新部署；`kurrent deployment show` 可确认记录内容。
 
 ## Agent 非 ok
 
@@ -72,7 +75,7 @@ kurrent join https://<控制面地址> --token <token> --agent-id <agent_id>
 ## 数据面连接失败
 
 ```bash
-bash storager/nvmeof/host-prepare.sh --check
+kurrent host check --role storage
 docker logs kurrent-nvmet-host
 ss -tlnp | grep 4421
 ```
@@ -117,7 +120,7 @@ kurrent cert list
 | 证据 | 位置 |
 | --- | --- |
 | 控制面启动与派生件 | `docker logs kurrent-control-plane`；`kurrent config status` |
-| 管理面请求决策 | `control_plane/state/audit.jsonl` |
+| 管理面请求决策 | 状态根下 `control-plane/state/audit.jsonl`（`kurrent deployment show` 查看状态根） |
 | 操作轨迹 | WebUI Operations / `kurrent ops list` |
 | Agent 与数据面 | `docker logs storager-agent`、`docker logs kurrent-nvmet-host` |
 | 引导链状态 | WebUI「引导链」/ `GET /boot-assets` |

@@ -8,6 +8,8 @@ Kurrent splits the compute side into three independent entities. Each has its ow
 | Worker | `worker_id` (hostname) | Worker ledger `state/workers.yml` | Under which identity |
 | System disk | NQN | Disk file on the storage node + Worker ledger | Which system to boot |
 
+![The three-entity model: identifiers, authorities and bindings for devices, Workers and system disks](/diagrams/entities.svg)
+
 ## Device
 
 A device represents a physical machine. On its first network boot, firmware reports an 11-field fingerprint (MAC, UUID, SMBIOS, CPU, memory, NIC and others) and the device public key; the control plane records it under the MAC.
@@ -64,7 +66,7 @@ A system disk is a disk file on a storage node, identified authoritatively by it
 
 ```text
 NQN    = <nqnBase>:<worker_id>.<os>.<os_tag>
-IQN    = derived from the NQN (consumed by the iSCSI backend and installers)
+IQN    = derived from the NQN (used by the iSCSI compatibility backend)
 os_tag = 12 random hex digits (disk-level identifier)
 file   = <worker_id>.<os>.<os_tag>.img
 ```

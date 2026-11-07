@@ -16,7 +16,7 @@ Available today:
 Remaining:
 
 - iPXE-side NBFT generation, replacing the injected simulation used in current verification chains;
-- A broader distribution matrix, including Windows and ESXi NVMe-oF boot;
+- A broader distribution matrix;
 - More NICs with native drivers and an expanded firmware support matrix.
 
 ## Direction 2: IPv6 and state storage
@@ -72,7 +72,7 @@ Remaining:
 - **High availability** — Not provided.
 - **Post-boot orchestration** — Out of scope; can be provided by a layer above.
 - **Firmware signing** — Mainline unsigned; Secure Boot artifacts not in mainline.
-- **Verified distributions** — Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0.
+- **Verified distributions** — See the [Distribution Matrix](../reference/distributions.md).
 
 ## How progress is judged
 

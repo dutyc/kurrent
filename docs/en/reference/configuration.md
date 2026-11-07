@@ -158,11 +158,9 @@ spec:
 | --- | --- | --- | --- |
 | `apiVersion` | string | yes | Fixed `kurrent.io/v1` |
 | `kind` | string | yes | Fixed `NodeConfiguration` |
-| `metadata.name` | string | yes | Node identity (agent_id): 12 lowercase hex characters, same form as the disk `os_tag` |
-| `metadata.remark` | string | no | Human-readable note (the only place for a descriptive name), defaults to empty |
 | `spec` | object | yes | See below |
 
-`metadata.name` is both the control-plane registry key and the component certificate CN, bound by the bootstrap token. After `kurrent join` writes it, it should not be edited by hand. Descriptive names belong in `metadata.remark`, never in the identity field.
+The node declaration has no `metadata` block: the node identity (12 lowercase hex characters, same form as the disk `os_tag`) is allocated by the control plane at bootstrap-token issuance and written by join to `storager/state/agent.id`, which both component containers mount read-only. It is both the control-plane registry key and the component certificate CN, bound by the bootstrap token, and should not be edited by hand. Nicknames belong to the control-plane ledger and are set in the WebUI or with `kurrent agents edit`.
 
 ### `spec.agent`
 
@@ -170,7 +168,7 @@ spec:
 | --- | --- | --- | --- | --- |
 | `backend` | string | no | `nvmet` / `stgt` / `lio`, default `nvmet` | Data-plane backend |
 | `advertiseUrl` | string | no | http(s) URL, may be empty | Agent address reachable from the control plane, used for registration and renewal |
-| `diskDir` | string | yes | Absolute host path | Disk image directory; also the compose mount source |
+| `diskDir` | string | yes | Absolute host path | Disk image directory; join injects it as `KURRENT_DISK_DIR` for the compose mount |
 | `nqnBase` | string | yes | `nqn.<yyyy-mm>.<reverse-domain>` | Namespace for Host NQN and disk NQNs |
 
 ### `spec.controlPlane`
@@ -184,9 +182,6 @@ spec:
 ```yaml
 apiVersion: kurrent.io/v1
 kind: NodeConfiguration
-metadata:
-  name: 3f2a9c1d8b7e
-  remark: Production storage
 spec:
   agent:
     backend: nvmet
@@ -221,7 +216,7 @@ kurrent config validate --node
 kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 ```
 
-`join` generates the declaration from the template when missing and merges the control-plane address when it exists. Node declaration errors fail before writing, not at container startup.
+`join` generates the declaration from the template when missing and merges the control-plane address when it exists; the first run writes the node identity to `storager/state/agent.id` (`--agent-id` is required then and must match the state file on reruns). Node declaration errors fail before writing, not at container startup.
 
 ## configHash and drift
 

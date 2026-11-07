@@ -31,7 +31,7 @@ Kurrent 的系统盘由母盘克隆生成，而非逐台安装。母盘在虚拟
 
 ## 已验证发行版
 
-当前完成整机冷启动验证的发行版为 Debian 12/13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2 与 openSUSE Leap 16.0。各版本的安装介质、安装约束、initramfs 消费方式、定制脚本与默认包源见下文[脚本获取](#_3-脚本获取)；版本、软件源与家族差异见[发行版矩阵](../reference/distributions.md)，原生 NBFT 消费的研究记录见固件仓[发行版研究](https://github.com/dutyc/kurrent-firmware/blob/main/docs/nvmeof-research.md)。
+当前已验证的发行版及版本见[发行版矩阵](../reference/distributions.md)。各版本的安装介质、安装约束、initramfs 消费方式、定制脚本与默认包源见下文[脚本获取](#_3-脚本获取)，原生 NBFT 消费的研究记录见固件仓[发行版研究](https://github.com/dutyc/kurrent-firmware/blob/main/docs/nvmeof-research.md)。
 
 未列入上述范围的版本不应视为已验证，RHEL 9.x 尚未实测。原生 NBFT 消费不等于原生认证：RHEL 与 SUSE 自带的 `95nvmf` 只执行无凭据的 `nvme connect-all --nbft`，本项目的 `95nbft` 消费携带凭据的 NBCT，构建时以 `--omit nvmf` 关闭原生模块。
 
@@ -44,7 +44,7 @@ Kurrent 的系统盘由母盘克隆生成，而非逐台安装。母盘在虚拟
 - UEFI 虚拟机或物理机；目标盘使用 raw/qcow2 或直通盘。
 - 最小化安装目标发行版；ESP 容量不低于 256 MiB。脚本不自动扩展分区，部分安装介质的默认 ESP 较小，应在运行前扩容。
 - XFS 场景（Fedora、AlmaLinux、openSUSE Leap）：安装盘必须为 **4K 逻辑块**虚拟盘。XFS 的扇区大小在 `mkfs` 时确定；512 扇区 XFS 无法在 nvmet 的 4096 B 导出上挂载。
-- 母盘内需具备 `python3`、`lsblk` / `findmnt` / `blkid`（util-linux）与可用的软件源；`nvme-cli`、`jq`、`keyutils`、`ktls-utils`、`initramfs-tools` 等由脚本 A 阶段安装。
+- 母盘内需具备 `python3`、`lsblk` / `findmnt` / `blkid`（util-linux）与可用的软件源；`nvme-cli`、`jq`、`keyutils`、`ktls-utils`、`initramfs-tools`（Arch 为 mkinitcpio）等由脚本 A 阶段安装。
 - 脚本应在**母盘系统内**以 root 身份运行，不在宿主机运行。
 
 安装完成后，先行完成业务软件、驱动、服务与用户等系统内容定制；上述内容将随母盘克隆至每个系统盘。盘内不得写入机器身份、target/NQN、认证密钥或控制面地址；不同角色应制作不同的 `_tpl_` 母盘。
@@ -62,7 +62,7 @@ dpkg-query -W ktls-utils 2>/dev/null || rpm -q ktls-utils
 systemctl status tlshd
 ```
 
-Debian 12 的 6.1 内核不满足认证要求；其余变体默认使用当前 `uname -r`。内核不支持 NVMe/TCP TLS 时，该版本不得作为生产母盘，数据面亦不得回落至明文。
+Debian 12 的 6.1 内核不满足认证要求；其余变体默认使用当前 `uname -r`。Arch Linux 的内核配置位于 `/boot/config-linux`（或 `zcat /proc/config.gz`），`ktls-utils` 用 `tlshd -v` 核对（官方仓库无该包）。内核不支持 NVMe/TCP TLS 时，该版本不得作为生产母盘，数据面亦不得回落至明文。
 
 ### 3. 脚本获取
 
@@ -83,6 +83,7 @@ ls test/*/golden-image-setup-*.sh
 | Fedora 44<br>`fedora44` | Server DVD；XFS/LVM；须在 4K 逻辑块盘上安装；dracut `95nbft` | `uname -r`<br>`mirrors.aliyun.com/fedora` |
 | AlmaLinux 10.2<br>`almalinux10` | minimal ISO；kickstart，XFS；须在 4K 逻辑块盘上安装；dracut `95nbft` | `uname -r`<br>`repo.huaweicloud.com/almalinux` |
 | openSUSE Leap 16.0<br>`opensuse-leap16` | online installer（Agama）；Agama profile，XFS；目标盘须为空；dracut `95nbft` | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/opensuse` |
+| Arch Linux（rolling）<br>`archlinux` | archiso ISO；archinstall JSON，ext4；内嵌 GRUB 2.14；mkinitcpio `nbft` hook | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/archlinux` |
 
 脚本内嵌 `initramfs-nbft` 组件与 GRUB 2.14 产物，**单个 `.sh` 文件可拷入母盘运行**，无需复制完整仓库。仅在修改组件并重新内嵌时，需在仓库内执行：
 
@@ -120,7 +121,7 @@ sudo bash golden-image-setup-debian12.sh --yes
 - **`--yes`**：跳过 E 阶段的交互确认；仅在可丢弃环境使用。
 - **`--grub-efi FILE`**：使用本地构建的 `BOOTX64.EFI` 替换内嵌 GRUB 2.14；Debian 12 自带的 GRUB 2.06 不影响默认流程，脚本默认使用内嵌 2.14。除特定需求外不应使用。
 - **`--no-serial`**：不添加 `console=ttyS0,115200`；适用于无串口的物理机。
-- **`--mirror URL`**：切换软件源；默认使用对应发行版的国内镜像（Debian/Ubuntu/Fedora 为阿里云，AlmaLinux 为华为云，openSUSE Leap 为 TUNA）。
+- **`--mirror URL`**：切换软件源；默认使用对应发行版的国内镜像（Debian/Ubuntu/Fedora 为阿里云，AlmaLinux 为华为云，openSUSE Leap 与 Arch 为 TUNA）。
 - **`--keep-sources`**：保留母盘原软件源；设置后 `--mirror` 不生效。
 
 ### 6. 典型用法
@@ -148,16 +149,17 @@ sudo bash golden-image-setup-debian12.sh --yes
 
 安装 `nvme-cli`、`jq`、`keyutils`、`ktls-utils` 等运行依赖，并确认内核带 NVMe 认证与 NVMe/TCP TLS。内核段要完成 DH-HMAC-CHAP 认证和 TLS，两者缺一不可。
 
-Debian 12 需要 backports 6.12；Debian 13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2 与 openSUSE Leap 16.0 的自带内核满足要求。认证失败的典型现象是内核段 `ret=401` 或 `authentication setup failed`。
+Debian 12 需要 backports 6.12；Debian 13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2、openSUSE Leap 16.0 与 Arch Linux（rolling）的自带内核满足要求。认证失败的典型现象是内核段 `ret=401` 或 `authentication setup failed`。
 
 ### B. initramfs 消费模块
 
-initramfs 必须在内核启动后重新连接系统盘。两种集成方式：
+initramfs 必须在内核启动后重新连接系统盘。三种集成方式：
 
 | 框架 | 集成 | 关键点 |
 | --- | --- | --- |
 | initramfs-tools（Debian/Ubuntu） | `hooks/nbft` 与 `scripts/local-top/nbft` | `nbft_auto` 参数；dash/ash 语义；`tlshd` 配置文件 |
 | dracut（Fedora/AlmaLinux/Leap） | `95nbft` 模块 | `--omit nvmf`；Fedora 用 `systemd-networkd`，AlmaLinux 与 Leap 走 NetworkManager；`--no-hostonly`；Fedora 的 LVM 显式激活 |
+| mkinitcpio（Arch） | 本地 hook `install/nbft` 与 `hooks/nbft` | `nbft_auto` 参数；hook 内 dhcpcd 取 DHCP；`tlshd` 配置与 `nvme_tcp` 模块 |
 
 RHEL 系与 SUSE 系还需把 `/etc/crypto-policies/back-ends/gnutls.config` 装进 initramfs；缺失时 `tlshd` 以 `gnutls: The request is invalid. (-50)` 退出，内核段 TLS 无法建立。
 
@@ -172,6 +174,9 @@ lsinitramfs /boot/initrd.img-$(uname -r) | grep -E 'nbft|tlshd|nvme'
 # dracut（Fedora / AlmaLinux / Leap）
 lsinitrd /boot/initramfs-$(uname -r).img | grep -E 'nbft|tlshd|nvme'
 lsinitrd /boot/initrd-$(uname -r) 2>/dev/null | grep -E 'nbft|tlshd|nvme'
+
+# mkinitcpio（Arch）
+lsinitcpio /boot/initramfs-linux.img | grep -E 'nbft|tlshd|nvme'
 ```
 
 ### C. 系统配置

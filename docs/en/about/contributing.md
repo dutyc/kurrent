@@ -12,9 +12,11 @@ Kurrent is developed by a small group of maintainers working with extensive AI a
 - **`tftp/`, `dnsmasq/`** — Boot scripts, first-hop firmware, and DHCP configuration.
 - **`docs/`** — Bilingual documentation site (VitePress).
 - **`tests/`** — Python tests, deployment probes, and test tooling.
+- **`scripts/`** — Build-time scripts (such as API documentation sync).
 - **`api/`** — Bilingual control-plane API documentation.
 - **`about/`** — Architecture, roadmap, and project notes.
-- **`thirdparty/`** — Pinned upstream reference implementations and patches.
+
+The repository tracks products, verification, and public documentation only. Upstream reference sources, audit evidence, design blueprints, personal deliverables, and old documentation snapshots live under the local `.local/` directory; runtime data such as disk images is pointed at an out-of-repository directory by `spec.agent.diskDir` / `KURRENT_DISK_DIR`. Neither is versioned.
 
 Firmware lives in the separate `dutyc/kurrent-firmware` repository, which maintains only iPXE difference patches and build assets.
 
@@ -24,12 +26,12 @@ Firmware lives in the separate `dutyc/kurrent-firmware` repository, which mainta
 | --- | --- |
 | Docs | `npm ci && npm run docs:build` |
 | Docs (Pages form) | `VITEPRESS_BASE=/kurrent/ VITEPRESS_NO_CLEAN=1 npm run docs:build` |
-| CLI | `cd cli && go vet ./... && go test ./... && go build -o kurrent .` |
+| CLI | `mkdir -p bin && cd cli && go vet ./... && go test ./... && go build -o ../bin/kurrent .` |
 | Control plane and nodes | `.venv-linux/bin/python -m pytest tests/ -q` |
 | WebUI | `cd webui/app && npm ci && npm test && npm run build` |
 | Deployment probe | `bash tests/deploy/probe_edge.sh` against a running deployment |
 
-Python tests must be limited to `tests/`; execution from the repository root also collects upstream tests under `thirdparty/`.
+Python tests must be limited to `tests/`.
 
 Changes touching the boot chain, credentials, or data plane need an end-to-end verification on real hardware or QEMU in addition to unit tests, with evidence in the PR.
 

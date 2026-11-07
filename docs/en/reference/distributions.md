@@ -13,6 +13,7 @@ The firmware repository provides a self-contained master-image script per distri
 | Fedora 44 | Server DVD | kickstart | dracut `95nbft` + `nbft-connect` | 6.19 |
 | AlmaLinux 10.2 | minimal ISO | kickstart | dracut `95nbft` + `nbft-connect` | 6.12 |
 | openSUSE Leap 16.0 | online installer (Agama) | Agama profile | dracut `95nbft` + `nbft-connect` | 6.12 |
+| Arch Linux (rolling) | archiso ISO | archinstall JSON | mkinitcpio `nbft` hook + `nbft-connect` | 7.2 (rolling) |
 
 Acceptance covers the full chain: PXE cold boot → firmware-phase authentication → GRUB → kernel → initramfs consuming NBFT/NBCT → rootfs → login prompt. Reaching GRUB or the kernel alone does not constitute acceptance. Exact media versions, kernel point releases and acceptance dates are recorded in the firmware repository's [distribution matrix](https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md).
 
@@ -27,6 +28,7 @@ Acceptance covers the full chain: PXE cold boot → firmware-phase authenticatio
 | Fedora 44 | `test/fedora44/golden-image-setup-fedora44.sh` | Aliyun (fedora + updates) | XFS; install on a 4K-logical-block disk |
 | AlmaLinux 10.2 | `test/almalinux10/golden-image-setup-almalinux10.sh` | Huawei Cloud (BaseOS/AppStream/CRB/Extras) | XFS; install on a 4K-logical-block disk |
 | openSUSE Leap 16.0 | `test/opensuse-leap16/golden-image-setup-leap16.sh` | TUNA OSS | XFS; target disk must be empty |
+| Arch Linux (rolling) | `test/archlinux/golden-image-setup-archlinux.sh` | TUNA | ext4; 4K-logical-block disk; `ktls-utils` built from source |
 
 Every script embeds the `initramfs-nbft` components and the GRUB 2.14 artifact, so a single file can be copied into the master and executed. After changing components or the GRUB artifact, rerun `python3 test/shared/embed-components.py` in the firmware repository.
 
@@ -34,7 +36,7 @@ Every script embeds the `initramfs-nbft` components and the GRUB 2.14 artifact, 
 
 Native NBFT consumption is not native authentication. The RHEL `nm-initrd-generator`/`95nvmf` path and the SUSE dracut `95nvmf` module can build network and discovery connections from NBFT, but the NBFT standard table carries neither DH-HMAC-CHAP keys nor TLS PSKs; their code path is a credential-less `nvme connect-all --nbft`.
 
-This project uses `95nbft` to consume a custom NBCT table carrying the transport address, subsystem NQN, Host NQN, DH-HMAC-CHAP key and TLS handoff parameters, then issues `nvme connect --dhchap-secret` per entry. Records with `tls_trsvcid` inject the PSK into the kernel `.nvme` keyring and reconnect with `--tls`. Builds use `--omit nvmf` so the native module cannot establish an unauthenticated connection first.
+This project consumes the custom NBCT table through the dracut `95nbft` module or Arch's mkinitcpio `nbft` hook. The table carries the transport address, subsystem NQN, Host NQN, DH-HMAC-CHAP key and TLS handoff parameters, and the consumer issues `nvme connect --dhchap-secret` per entry. Records with `tls_trsvcid` inject the PSK into the kernel `.nvme` keyring and reconnect with `--tls`. Dracut variants build with `--omit nvmf` so the native module cannot establish an unauthenticated connection first.
 
 ## Family Differences
 
@@ -70,13 +72,20 @@ On RHEL, `crypto-policies` is a hard initrd dependency: GnuTLS `@SYSTEM` priorit
 
 RHEL 9.x has not been tested. Its 5.14 kernel predates the upstream NVMe/TCP TLS feature (6.7+); whether the vendor backported it must be checked against `CONFIG_NVME_TCP_TLS` and the `ktls-utils` version before use.
 
+### Arch Linux
+
+- The initramfs is integrated through a local mkinitcpio hook (`install/nbft` + `hooks/nbft`); the distribution's native `nvmf` auto-connect is not enabled.
+- The hook obtains its lease with `dhcpcd` and tries candidate interfaces in the order NBFT mapping, `carrier=1`, then other non-lo interfaces; it does not rely on the kernel `ip=dhcp`. Multi-NIC whole-machine boot has not been verified; confirm interface selection on the target hardware.
+- `ktls-utils` is not in the official Arch repositories; the master script builds `tlshd` from a pinned source release, and `/etc/tlshd/config` is carried into the initramfs.
+- The root filesystem is ext4; GPT is converted to 4K, the ESP is rebuilt as 953 MiB 4K FAT32, and the embedded GRUB 2.14 is used. NICs that require external firmware need the corresponding `/usr/lib/firmware` files on the master.
+
 ## Adding a Distribution
 
 1. Derive the script from the closest existing variant and check the installer kernel and initrd names, unattended data, package manager source format and initrd toolchain.
 2. Use a 4K-logical-block virtual disk; XFS and Agama scenarios impose additional disk constraints.
 3. After the unattended installation, run A–F inside the master. `--skip-disk` skips only the GPT conversion and ESP rebuild; ESP contents are still refreshed.
 4. Complete PXE cold-boot acceptance on an isolated network: two controller records on the target, the packet-capture criteria and a login prompt.
-5. After component changes, rerun `embed-components.py` and run `test/test-nbft-connect-nbct.sh` under both dash and bash.
+5. After component changes, rerun `embed-components.py` and run `test/test-nbft-connect-nbct.sh` under both dash and bash; for the Arch variant also run `test/archlinux/test-nbft-dhcp-iface.sh` and `test/archlinux/test-arch-install-exit-path.sh`.
 
 ## Related Pages
 

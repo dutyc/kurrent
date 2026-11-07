@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" role="img" aria-labelledby="firmware-title firmware-desc">
+  <title id="firmware-title">Firmware build and deployment pipeline</title>
+  <desc id="firmware-desc">The separate kurrent-firmware repository pins upstream iPXE, applies ordered patches, builds UEFI artifacts into dist/, and deploys snponly.efi into the platform TFTP root. The platform then supplies boot variables and the NVMe/TCP data plane.</desc>
+  <rect width="1200" height="500" fill="#faf9f6"/>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#6f6a61"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#8a3f2b"/>
+    </marker>
+  </defs>
+
+  <g font-family="Inter, 'Noto Sans CJK SC', 'Segoe UI', sans-serif">
+    <text x="48" y="42" font-size="10" letter-spacing="2.4" fill="#8a3f2b">FIRMWARE PIPELINE</text>
+    <text x="48" y="72" font-family="Georgia, 'Noto Serif CJK SC', serif" font-size="24" fill="#151412">From upstream iPXE to a booting device</text>
+    <line x1="48" y1="88" x2="1152" y2="88" stroke="#d8d1c5"/>
+
+    <rect x="48" y="110" width="600" height="300" rx="10" fill="#f4f1ea" stroke="#a8a197" stroke-dasharray="4 4"/>
+    <text x="72" y="140" font-size="15" font-weight="600" fill="#151412">kurrent-firmware</text>
+    <text x="72" y="158" font-size="11" fill="#6f6a61">separate repository · pinned baseline</text>
+
+    <rect x="72" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="86" y="214" font-size="12" font-weight="600" fill="#151412">upstream</text>
+    <text x="86" y="232" font-size="10" fill="#6f6a61">iPXE</text>
+    <text x="86" y="248" font-size="10" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" fill="#8d867b">e6e51ccb</text>
+
+    <rect x="216" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="230" y="214" font-size="12" font-weight="600" fill="#151412">patches</text>
+    <text x="230" y="232" font-size="10" fill="#6f6a61">0001–0010</text>
+    <text x="230" y="248" font-size="10" fill="#8d867b">file order</text>
+
+    <rect x="360" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="374" y="214" font-size="12" font-weight="600" fill="#151412">build</text>
+    <text x="374" y="232" font-size="10" fill="#6f6a61">build.sh</text>
+    <text x="374" y="248" font-size="10" fill="#8d867b">UEFI targets</text>
+
+    <rect x="504" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="518" y="214" font-size="12" font-weight="600" fill="#151412">dist/</text>
+    <text x="518" y="232" font-size="10" fill="#6f6a61">artifacts</text>
+    <text x="518" y="248" font-size="10" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" fill="#8d867b">SHA256SUMS</text>
+
+    <line x1="192" y1="225" x2="216" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <line x1="336" y1="225" x2="360" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <line x1="480" y1="225" x2="504" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <text x="72" y="292" font-size="10" fill="#6f6a61">Produces snponly.efi and the direct-uefi artifacts.</text>
+    <text x="72" y="374" font-size="10" fill="#8d867b">The repository does not carry upstream source; every build starts from the pinned baseline.</text>
+
+    <rect x="688" y="110" width="464" height="300" rx="10" fill="#f4f1ea" stroke="#a8a197" stroke-dasharray="4 4"/>
+    <text x="712" y="140" font-size="15" font-weight="600" fill="#151412">kurrent (platform)</text>
+    <text x="712" y="158" font-size="11" fill="#6f6a61">deployment and boot</text>
+
+    <rect x="712" y="190" width="180" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="726" y="214" font-size="11" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" fill="#151412">tftp/</text>
+    <text x="726" y="232" font-size="10" fill="#6f6a61">snponly.efi · boot.ipxe</text>
+    <text x="726" y="248" font-size="10" fill="#8d867b">read-only TFTP root</text>
+
+    <rect x="944" y="190" width="184" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="958" y="214" font-size="12" font-weight="600" fill="#151412">Device</text>
+    <text x="958" y="232" font-size="10" fill="#6f6a61">network boot</text>
+    <text x="958" y="248" font-size="10" fill="#8d867b">iPXE · TOFU</text>
+
+    <rect x="712" y="300" width="200" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
+    <text x="726" y="324" font-size="12" font-weight="600" fill="#151412">Control Plane</text>
+    <text x="726" y="342" font-size="10" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" fill="#6f6a61">/boot-vars</text>
+    <text x="726" y="358" font-size="10" fill="#8d867b">identity · disk · credentials</text>
+
+    <rect x="944" y="300" width="184" height="70" rx="7" fill="#f7efe9" stroke="#8a3f2b"/>
+    <text x="958" y="324" font-size="12" font-weight="600" fill="#151412">Data plane</text>
+    <text x="958" y="342" font-size="10" fill="#6f6a61">NVMe/TCP 4421</text>
+    <text x="958" y="358" font-size="10" fill="#8d867b">TLS 1.3 · no fallback</text>
+
+    <line x1="624" y1="225" x2="712" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <text x="668" y="217" font-size="9" text-anchor="middle" fill="#6f6a61">deploy</text>
+    <line x1="892" y1="225" x2="944" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <text x="918" y="217" font-size="9" text-anchor="middle" fill="#6f6a61">TFTP</text>
+    <path d="M912 335 H928 V225 H944" fill="none" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <text x="934" y="284" font-size="9" fill="#6f6a61">HTTPS</text>
+    <line x1="1080" y1="260" x2="1080" y2="300" stroke="#8a3f2b" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+    <text x="1088" y="284" font-size="9" fill="#8a3f2b">NVMe/TCP</text>
+
+    <text x="48" y="448" font-size="10" fill="#8d867b">The firmware repository supplies capabilities. The platform repository decides when to call them; firmware never reads control-plane policy.</text>
+  </g>
+</svg>

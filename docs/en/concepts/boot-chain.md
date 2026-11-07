@@ -6,20 +6,7 @@ This page describes the main path (NVMe/TCP with TLS 1.3). Firmware build and pr
 
 ## Overview
 
-```text
-power on
-  → DHCP (dnsmasq)       address, next-server
-  → TFTP                 snponly.efi + boot.ipxe pointer
-  → HTTPS + TOFU         boot.ipxe.cfg (all later scripts over HTTPS)
-  → /devices/report      fingerprint + device public key
-  → /devices/challenge   one-shot nonce
-  → sign(nonce‖mac)      device private key
-  → /boot-vars           verify and admit, then project disk NQN, host NQN, credentials
-  → menu.ipxe            default disk selected on timeout
-  → sanboot nvme://...   NVMe/TCP 4421, DH-HMAC-CHAP + TLS 1.3
-  → NBFT / NBCT          firmware hands connection data and keys to initramfs
-  → kernel reconnect → rootfs → login
-```
+![Boot chain: first hop, device identity and data plane](/diagrams/boot-chain.svg)
 
 The split is explicit: firmware provides protocol drivers, device-key commands, NVRAM and TOFU; the platform repository owns boot scripts and admission decisions.
 
@@ -154,4 +141,4 @@ Attackers on the same Layer 2, a compromised host or physical access are outside
 | Boot scripts, registration window, `/boot-vars` admission | Platform control plane |
 | System disks, credentials, menu generation | Platform control plane |
 
-Firmware build, artifacts and device provisioning are covered in [Build and Artifacts](../firmware/build-deploy.md) and [Provisioning](../firmware/build-deploy.md); the full semantics of the device key, signature format and TOFU are in [Device Identity and Trust](../firmware/index.md); NVMe/TCP and NBCT configuration is in [NVMe-oF Boot](../firmware/index.md).
+Firmware build, artifacts and device provisioning are covered in [Build and Artifacts](../firmware/build-deploy.md) and [Provisioning](../firmware/build-deploy.md); the full semantics of the device key, signature format and TOFU are in the [Firmware Contract](../reference/firmware-contract.md); NVMe/TCP and NBCT configuration is in the [Firmware Platform Reference](../reference/firmware-platform.md).

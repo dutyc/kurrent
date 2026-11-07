@@ -79,10 +79,11 @@ const zh = {
     side: '文档',
     items: [
       ['01', '入门', '项目定位、标准部署流程与第一次端到端交付。', '/guide/overview'],
-      ['02', '概念', '架构、实体、引导链、固件、存储、身份与配置。', '/architecture/'],
-      ['03', '任务', '系统盘定制、固件构建与部署、日常运维与故障排查。', '/guide/system-disk'],
-      ['04', '参考', '配置键表、CLI、API、固件契约与发行版矩阵。', '/reference/configuration'],
-      ['05', '项目', '路线图、参与贡献与设计依据。', '/about/roadmap'],
+      ['02', '概念', '架构、实体、引导链、存储、身份、安全与配置。', '/architecture/'],
+      ['03', '固件', '固件概述、构建部署、接口契约与发行版矩阵。', '/firmware/'],
+      ['04', '任务', '系统盘定制、日常运维与故障排查。', '/guide/system-disk'],
+      ['05', '参考', '配置键表、CLI、API 与术语表。', '/reference/configuration'],
+      ['06', '项目', '路线图、参与贡献与设计依据。', '/about/roadmap'],
     ],
   },
   footer: {
@@ -153,10 +154,11 @@ const en = {
     side: 'Docs',
     items: [
       ['01', 'Getting Started', 'Positioning, the standard deployment procedure, and a first end-to-end delivery.', '/en/guide/overview'],
-      ['02', 'Concepts', 'Architecture, entities, boot chain, firmware, storage, identity, and configuration.', '/en/architecture/'],
-      ['03', 'Tasks', 'System disk customization, firmware build and deployment, operations, and troubleshooting.', '/en/guide/system-disk'],
-      ['04', 'Reference', 'Configuration keys, CLI, API, the firmware contract, and the distribution matrix.', '/en/reference/configuration'],
-      ['05', 'Project', 'Roadmap, contribution, and design rationale.', '/en/about/roadmap'],
+      ['02', 'Concepts', 'Architecture, entities, boot chain, storage, identity, security, and configuration.', '/en/architecture/'],
+      ['03', 'Firmware', 'Firmware overview, build and deployment, contract, and distribution matrix.', '/en/firmware/'],
+      ['04', 'Tasks', 'System disk customization, operations, and troubleshooting.', '/en/guide/system-disk'],
+      ['05', 'Reference', 'Configuration keys, CLI, API, and glossary.', '/en/reference/configuration'],
+      ['06', 'Project', 'Roadmap, contribution, and design rationale.', '/en/about/roadmap'],
     ],
   },
   footer: {

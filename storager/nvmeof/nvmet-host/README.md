@@ -23,7 +23,7 @@
 # 1. 宿主前置（唯一宿主步骤，需 root；幂等，含重启持久化——模块写 /etc/modules-load.d、
 #    configfs 写 /etc/fstab；tlshd 只检查不代装）：
 sudo bash ../host-prepare.sh
-#    只读诊断（无需 root，部署前排查用）：bash ../host-prepare.sh --check
+#    只读诊断（无需 root，部署前排查用，仓库根执行）：kurrent host check --role storage
 
 # 2. 节点侧加入（推荐主路径，仓库根执行）：生成/合并 storager/kurrent.yaml、落 bootstrap
 #    凭据、按 backend 起整套编排（Agent + 本组件），详见 cli/README.md 与节点声明示例；
@@ -31,16 +31,18 @@ sudo bash ../host-prepare.sh
 kurrent join <cp-url> --token <bootstrap-token>   # token: kurrent token create 签发
 
 # 3. 仅重启本编排（声明/镜像已就位时；改过组件代码则加 --build）：
+#    挂载源由 kurrent join 注入；手工执行时从部署记录渲染，再补上声明的盘目录
 cd storager/nvmeof
-docker compose --env-file ../.env up -d
+eval "$(kurrent deployment show -o env)"
+KURRENT_DISK_DIR=/data/storager_img docker compose up -d
 
 # 4. 验证（共享卷 UDS；mTLS 健康检查脚本在容器内执行）
 docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
 # → 0（configfs 就绪）
 ```
 
-> **本组件无独立配置**：身份（`metadata.name` = agent_id，证书 CN=`nvmet-<agent_id>`）与 enroll
-> 入口（`spec.controlPlane.url`）都读同一份节点声明 `storager/kurrent.yaml`（与 Agent 共享、只读挂载）；
+> **本组件无独立配置**：身份（`storager/state/agent.id`，证书 CN=`nvmet-<agent_id>`）与 enroll
+> 入口（`spec.controlPlane.url`）分别读节点状态文件与节点声明 `storager/kurrent.yaml`（与 Agent 共享、只读挂载）；
 > 一次性引导凭据读 `storager/bootstrap/nvmet-host.token`（由 Agent enroll 上报 `backend=nvmet` 时
 > 控制面派生下发，**不手工签发**）。
 
@@ -90,7 +92,7 @@ sudo systemctl daemon-reload && sudo systemctl restart tlshd
 
 > 不用 `--with-systemd`：上游单元会与发行版单元同名（`/usr/lib/systemd/system/tlshd.service`），
 > 覆盖后升级发行版包容易产生双份二进制。`-c /etc/tlshd/config` 沿用发行版配置。
-> 仅升级 `ktls-utils` 不够：`host-prepare.sh --check` 与 `kurrent join` 都以**服务实际执行的
+> 仅升级 `ktls-utils` 不够：`kurrent host check --role storage` 与 `kurrent join` 都以**服务实际执行的
 > 二进制**为准判定版本。
 
 ## 环境变量
@@ -100,6 +102,7 @@ sudo systemctl daemon-reload && sudo systemctl restart tlshd
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `KURRENT_CONFIG_FILE` | `/etc/kurrent/kurrent.yaml` | 节点声明路径覆盖（测试注入用；compose 挂载 `../kurrent.yaml` 只读） |
+| `KURRENT_NODE_ID_FILE` | `/etc/kurrent/state/agent.id` | 节点身份文件（compose 挂载 `${KURRENT_NODE_STATE_DIR}/state` 只读；测试注入用） |
 | `NVMET_CONFIGFS` | `/sys/kernel/config/nvmet` | configfs 根（测试可注入） |
 | `NVMET_TLS_PORT_ID` | `2` | 数据面端口 ID（**空字符串 = 关闭数据面**，联调用；控制面因端口未就绪拒绝引导） |
 | `NVMET_TLS_TRSVCID` | `4421` | 数据面端口 trsvcid（`tsas=tls1.3`） |
@@ -110,19 +113,10 @@ sudo systemctl daemon-reload && sudo systemctl restart tlshd
 
 管理面为共享卷 UDS 常量（`/run/kurrent/nvmet/nvmet-host.sock`，目录 0700），无监听地址/端口；compose 不注入。
 
-以下变量**此前**以 env 下发，现已收敛（`.env` 里若残留，`kurrent join` 会主动清掉）：
-
-| 旧变量 | 现来源 |
-|---|---|
-| `KURRENT_AGENT_ID` | 声明 `metadata.name`（bootstrap token 绑定的节点身份，join 写入） |
-| `KURRENT_COMPONENT` | 代码常量（`nvmet-host`，pki_client 调用点；CSR CN 前缀 `nvmet`） |
-| `KURRENT_PKI_DIR` | compose 挂载（宿主 `${KURRENT_NVMET_PKI_HOST}` → `/etc/kurrent/pki`） |
-| `KURRENT_CP_ENROLL_URL` | 声明 `spec.controlPlane.url` |
-| `KURRENT_CP_CA` | compose 挂载（控制面 `server.crt` → `/etc/kurrent/cp-ca.crt:ro`） |
-| `KURRENT_BOOTSTRAP_TOKEN(_NVMET)` | `storager/bootstrap/nvmet-host.token`（Agent enroll 派生，只读挂载） |
-
-> 例外：`KURRENT_DISK_DIR` 与 `KURRENT_NVMET_PKI_HOST` **仍是 `.env` 插值键**——它们是 compose
-> 挂载源（不经组件代码读取），值由 `kurrent join` 从声明同步写入。
+身份、控制面入口与引导凭据都不经 env 下发：身份读状态根下的 `storager/state/agent.id`，enroll 入口读节点声明
+`spec.controlPlane.url`，派生凭据读 `storager/bootstrap/nvmet-host.token`。compose 的挂载源
+（`KURRENT_NODE_STATE_DIR` / `KURRENT_AGENT_ID` / `KURRENT_CP_CA_FILE` / `KURRENT_DISK_DIR`）由
+`kurrent join` 在调用 compose 时注入，不落盘为配置文件。
 
 ## API（全部 mTLS 鉴权，Agent 是唯一调用方）
 
@@ -159,9 +153,9 @@ sudo systemctl daemon-reload && sudo systemctl restart tlshd
 
 ## 传输加密（NVMe/TCP TLS 1.3，单端口）
 
-设计（源码级机制、实测证据与验收判据）见本地蓝图层 `blueprint/nvme-tcp-tls-in-kernel.md` /
-`blueprint/nvme-tcp-tls-in-firmware.md`（含主仓改动清单 `blueprint/nvme-tcp-tls-kurrent-changes.md`；
-`blueprint/` 不入版本库）。
+设计（源码级机制、实测证据与验收判据）见本地蓝图层 `.local/blueprint/nvme-tcp-tls-in-kernel.md` /
+`.local/blueprint/nvme-tcp-tls-in-firmware.md`（含主仓改动清单 `.local/blueprint/nvme-tcp-tls-kurrent-changes.md`；
+`.local/blueprint/` 不入版本库）。
 
 - **单端口全链路加密**：数据面只有 `4421` 一个口（`tsas=tls1.3`，写 tsas 时内核自动置 `treq=required`）；
   iPXE 固件段（`sanboot` 直连，固件自带 TLS 1.3 PSK 客户端）与 GRUB 之后的内核段（`nvme connect --tls`）

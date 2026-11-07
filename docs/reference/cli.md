@@ -5,21 +5,24 @@
 ## 安装与凭据
 
 ```bash
+mkdir -p bin
 cd cli
-go build -o kurrent .
-sudo install -m 0755 kurrent /usr/local/bin/kurrent
-kurrent credentials install    # 把管理凭据快照到 ~/.kurrent
+go build -o ../bin/kurrent .
+sudo install -m 0755 ../bin/kurrent /usr/local/bin/kurrent
+kurrent init                   # 首次部署：同时安装管理凭据到 ~/.kurrent
+kurrent credentials install    # 后续轮换时刷新快照
 ```
 
-`credentials install` 复制 `control_plane/state/admin.conf` 与证书副本到 `~/.kurrent`（目录 0700、文件 0600），使 PATH 安装的二进制脱离仓库也可使用 443 mTLS。凭据轮换后需重新执行 `install` 刷新。
+`kurrent init` 通过一次性交换安装 `~/.kurrent/admin.conf` 与证书副本（目录 0700、文件 0600），使 PATH 安装的二进制脱离仓库也可使用 443 mTLS。凭据轮换后重新执行 `kurrent init` 或 `kurrent credentials install` 刷新。
 
 凭据发现顺序：
 
 1. `--credentials` 指定的文件
 2. `KURRENT_CREDENTIALS` 环境变量
-3. 从当前目录逐级上溯 `control_plane/state/admin.conf`
-4. 可执行文件旁的 `<exe>/../control_plane/state/admin.conf`
-5. 用户级快照 `~/.kurrent/admin.conf`
+3. 部署记录指向的 `<state>/control-plane/state/admin.conf`
+4. 从当前目录逐级上溯旧布局 `control_plane/state/admin.conf`
+5. 可执行文件旁的 `<exe>/../control_plane/state/admin.conf`
+6. 用户级快照 `~/.kurrent/admin.conf`
 
 没有管理凭据时必须显式给出 `--server` 与 `--token`，走 Bearer 通道。
 
@@ -35,8 +38,10 @@ kurrent [--credentials PATH] [--server URL] [--token T] <group> <verb> [args]
 | | `validate [--node] [--config PATH]` | 在组件镜像内按运行时 schema 校验 |
 | | `show [--node] [--config PATH]` | 输出注入默认值后的生效声明 |
 | | `status` | 运行态声明、configHash、dnsmasq 与证书漂移 |
-| `init` | — | 控制面初始化：校验、应用、启动、健康检查，失败回滚 |
+| `init` | — | 首次部署事务：校验、状态根准备、启动、凭据交换、自检；失败回滚或可续 |
 | `join` | — | 节点加入：生成或合并声明，收敛启动 Agent |
+| `deployment` | `show [-o yaml\|env]` | 只读展示部署记录、仓库根、状态根与手工 compose 变量 |
+| `host` | `check` | 只读宿主基线：监听面、Docker 暴露、防火墙、凭据权限、状态根与存储节点内核前置 |
 | `token` | `create` / `list` / `revoke` | 签发、列出、吊销 bootstrap 与管理 token |
 | `sessions` | `list` / `revoke` / `revoke-all` | 管理面会话台账与逐个/全部吊销 |
 | `cert` | `keygen` / `issue` / `list` / `revoke` | 用户证书：本地生成 CSR、签发、列出、吊销 |
@@ -60,14 +65,15 @@ kurrent config status
 
 `init` 的行为：
 
-- 构建校验镜像并全量校验声明；
-- 校验失败不写盘，退出码非零；
-- 应用声明、重启控制面、等待 `/healthz`；
-- 启动失败回滚上一份声明并恢复运行；
-- 重启 dnsmasq 并核验其保持运行；
-- 幂等，修改声明后重跑即生效。
+- 预检 Docker/Compose v2、WebUI 构建产物、状态根与 `~/.kurrent` 的属主与可写性；
+- 构建校验镜像并全量校验声明，失败不写盘；
+- 在状态根（默认 `~/.local/state/kurrent`）建立目录并种下 compose 挂载点，写入部署记录 `bootstrapping`；
+- 以固定项目名 `kurrent` 启动、重启控制面并等待 `/healthz`；启动失败回滚上一份声明并恢复运行；
+- 等待一次性凭据交换，校验后安装到 `~/.kurrent`，以安装副本完成 mTLS `GET /whoami` 自检；
+- 交换包消费后重启 dnsmasq 并核验其保持运行，部署记录转 `ready`；
+- 幂等：修改声明后重跑即生效；移动仓库后重跑按记录复用状态根并重建容器。
 
-`--config` 可指向其他声明文件，将其应用为控制面配置。
+`--config` 可指向其他声明文件，将其应用为控制面配置；`--state-dir` 指定状态根；`--adopt-state` 把仓库内旧状态迁移到状态根（先停旧编排、逐文件校验复制，成功后删除旧副本）。
 
 ## 节点加入
 
@@ -79,18 +85,30 @@ kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.80.1
 kurrent join https://192.168.80.1 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-`--agent-id` 是节点身份，只接受 12 位小写十六进制；省略时由命令生成。描述性名称写入节点声明 `metadata.remark`，不要占用身份字段。控制面入口是 origin 地址（可带反向代理路径）；误贴的 `/api/cp` 后缀会在写声明前自动去除。
+`--agent-id` 是节点身份，只接受 12 位小写十六进制；省略时由控制面在签发 bootstrap token 时分配（显式传入则绑定已有身份，用于恢复），`kurrent token create` 与 WebUI 都只消费响应返回的 `agent_id`。join 首次执行把它写入节点状态根下的 `storager/state/agent.id`，之后重跑须与状态文件一致。昵称属于控制面台账，用 `kurrent agents edit <id> --remark <text>` 设置。控制面入口是 origin 地址（可带反向代理路径）；误贴的 `/api/cp` 后缀会在写声明前自动去除。
 
 `join` 的行为：
 
 - `storager/kurrent.yaml` 缺失时按模板生成，已存在时读入并同步控制面地址；
-- 写入 `bootstrap/agent.token`（0600）与 `.env` 插值键；
-- 使用 compose 收敛启动 Agent；
+- 在节点状态根（默认 `~/.local/state/kurrent`）下建立 `storager/{state,bootstrap,pki,logs,certs}`，写入身份 `state/agent.id` 与引导凭据 `bootstrap/agent.token`（0600）；
+- 解析控制面信任锚并复制为 `certs/cp-ca.crt`：`--cp-ca` ＞ 同机控制面状态根中的 `control-plane/state/certs/server.crt` ＞ 已有节点副本；
+- 以 `diskDir`、节点状态根与信任锚注入 compose 变量，以固定项目名 `kurrent-storage` 收敛启动 Agent；
 - nvmet 后端预检内核模块、configfs 与 `tlshd >= 1.5.0`，未就绪时指路 `storager/nvmeof/host-prepare.sh`；
 - 等待派生的 `nvmet-host` 凭据写出后重启该组件；
 - 幂等，可重跑。
 
-仓库根以外执行需 `--dir` 指定 `storager` 目录。
+`--dir` 可指向仓库根或 `storager` 目录；`--state-dir` 指定节点状态根；`--cp-ca` 提供分机部署的控制面信任锚；`--adopt-state` 把仓库内旧节点状态迁移到状态根。默认 `diskDir` 位于 checkout 内时 join 会告警（移动仓库会连同盘镜像移动），需要固定位置时在声明中写仓库外绝对路径。
+
+## 宿主检查
+
+```bash
+sudo kurrent host check                        # 角色按运行中的 compose 服务推断
+sudo kurrent host check --role all             # 同机部署，或容器未启动时显式指定
+kurrent host check --role storage              # 内核 nvmet 前置 / configfs / tlshd
+sudo kurrent host check --role control -o json --strict
+```
+
+只读本地检查，不访问管理 API，控制面未启动时也可用。公共 TCP 监听、Docker 守护进程 TCP 暴露与 `DOCKER-USER`/ufw 对两种角色都检查，端口白名单按角色区分（control：22/53/67/69/80/443；storage：22/4840/4421）。`control` 另查控制面容器暴露面、凭据权限与状态根（须在仓库外、0700、属主正确，且与部署记录一致）；`storage` 另查 nvmet / nvmet-tcp 模块、configfs 与 `tlshd`；`all` 取并集。容器按 compose 服务标签识别，不依赖固定容器名。状态为 `ok` / `warn` / `fail` / `skip`；退出码 `0` 通过、`1` 有 FAIL、`2` 用法错误，`--strict` 把 SKIP 也计为失败。修复系统状态仍用 `sudo bash storager/nvmeof/host-prepare.sh`。
 
 ## 凭据签发
 
@@ -131,7 +149,7 @@ kurrent cert components
 kurrent cert revoke-component 3f2a9c1d8b7e
 ```
 
-私钥只在本地生成，CSR 上送，私钥永不上传。`issue` 要求 CN 已在 `control_plane/state/users.yml` 登记。吊销会重签 CRL、reload nginx，并使该证书上的会话失效。组件吊销同时删除该节点的 bootstrap token；恢复时重新签发 token 并重跑 `join`。
+私钥只在本地生成，CSR 上送，私钥永不上传。`issue` 要求 CN 已在 `<state>/control-plane/state/users.yml` 登记。吊销会重签 CRL、reload nginx，并使该证书上的会话失效。组件吊销同时删除该节点的 bootstrap token；恢复时重新签发 token 并重跑 `join`。
 
 ## NVMe-oF 凭据
 
@@ -163,11 +181,14 @@ kurrent workers credential revoke storage-worker-01
 
 | 现象 | 排查 |
 | --- | --- |
-| `No management credentials found` | 在仓库内执行、运行 `credentials install`，或显式给 `--server` + `--token` |
-| mTLS 证书错误 | 凭据文件与服务端不匹配；重新执行 `credentials install` |
+| `No management credentials found` | 先跑 `kurrent init`；或 `credentials install` 刷新快照；或显式给 `--server` + `--token` |
+| mTLS 证书错误 | 凭据文件与服务端不匹配；重新执行 `kurrent init` 或 `credentials install` |
 | `config validate` 失败 | 按报错修正声明；未知字段会被拒绝 |
-| `join` 停在宿主预检 | 按提示执行 `host-prepare.sh`，确认内核模块、configfs 与 `tlshd` |
-| token 无效或已过期 | 重新 `token create`；确认 `--agent-id` 与节点声明一致 |
+| `init` 报状态根属主不符 | 按提示执行 `sudo chown -R "$(id -u):$(id -g)" <路径>`，不要以 root 重跑 |
+| `init` 报旧布局状态 | 确认迁移后加 `--adopt-state` 重跑 |
+| `join` 停在宿主预检 | 先跑 `kurrent host check --role storage` 定位，再按提示执行 `host-prepare.sh` |
+| `join` 报缺少控制面信任锚 | 用 `--cp-ca` 提供控制面的 `server.crt`（见部署页分机步骤） |
+| token 无效或已过期 | 重新 `token create`；确认 `--agent-id` 与节点状态文件 `<state>/storager/state/agent.id` 一致 |
 
 ## 相关页面
 

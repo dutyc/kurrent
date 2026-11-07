@@ -26,7 +26,7 @@ The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment,
 
 ## Delivery Flow
 
-A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. [System Disk Customization](https://dutyc.github.io/kurrent/en/guide/system-disk.html) and [First Delivery](https://dutyc.github.io/kurrent/en/guide/usage.html) cover image preparation and the first boot. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2 and openSUSE Leap 16.0; see the [distribution matrix](https://dutyc.github.io/kurrent/en/reference/distributions.html) for details, and the verification set does not limit which distributions can boot.
+A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. [System Disk Customization](https://dutyc.github.io/kurrent/en/guide/system-disk.html) and [First Delivery](https://dutyc.github.io/kurrent/en/guide/usage.html) cover image preparation and the first boot. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0 and Arch Linux (rolling); see the [distribution matrix](https://dutyc.github.io/kurrent/en/reference/distributions.html) for details, and the verification set does not limit which distributions can boot.
 
 ## Firmware Repo
 

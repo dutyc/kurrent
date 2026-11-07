@@ -1,10 +1,10 @@
 # First Delivery
 
-> This page turns a device already attached to the PXE network into a network-bootable system: verify the master image → admit the device → bind a Worker → create a system disk → set the default disk → cold-boot acceptance → manage credentials. It assumes [Deployment](./deployment.md) is complete and the controller and storage nodes report `health=ok`.
+> This page turns a device already attached to the PXE network into a network-bootable system: verify the master image → admit the device → bind a Worker → create a system disk → set the default disk → cold-boot acceptance. It assumes [Deployment](./deployment.md) is complete and the controller and storage nodes report `health=ok`.
 
 ## Delivery Path
 
-Complete the seven steps in order; their completion signals are:
+Complete the six steps in order; their completion signals are:
 
 1. Verify the master image: a 4K-native GPT master exists under `diskDir` and appears in `GET /masters`.
 2. Admit the device: Devices shows `pooled` with the key claimed.
@@ -12,19 +12,19 @@ Complete the seven steps in order; their completion signals are:
 4. Create a system disk: the master clone is complete and `os_tag` exists; nvmet also issues the credential.
 5. Set the default disk: the Worker's default boot disk points at the target system.
 6. Cold-boot acceptance: GRUB, kernel and initramfs reach rootfs and a login prompt.
-7. Manage credentials: rotation/revocation works and push status is healthy.
 
 ## WebUI and API
 
 Every step works through the WebUI or the control-plane REST API. **The CLI currently exposes only `workers list/get` and credential operations**; worker creation, device binding, disk creation and default-disk selection use the API or WebUI.
 
-On the controller, in the repository root, prepare the API helper (the admin certificate is the management credential bootstrapped by `kurrent init`):
+On the controller, prepare the API helper (the admin certificate is the management credential installed by `kurrent init`, under the state root):
 
 ```bash
+STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
 BASE_URL=https://192.168.1.10/api/cp
-CERT=control_plane/state/pki/users/admin/client.crt
-KEY=control_plane/state/pki/users/admin/client.key
-CA=control_plane/state/certs/server.crt
+CERT="$STATE/control-plane/state/pki/users/admin/client.crt"
+KEY="$STATE/control-plane/state/pki/users/admin/client.key"
+CA="$STATE/control-plane/state/certs/server.crt"
 api() {
   curl -sS --cert "$CERT" --key "$KEY" --cacert "$CA" \
     "$BASE_URL$1" "${@:2}"
@@ -133,7 +133,7 @@ api /workers/worker-01/luns/disk -X POST \
 ```
 
 - Omitting `disk_agent` lets placement choose a node; passing it pins the disk to a storage node.
-- The response carries the 12-hex `os_tag` and the full disk NQN. On nvmet backends the control plane **issues the DHHC-1 authentication key at disk creation** and pushes it to the Agent holding the disk.
+- The response carries the 12-hex `os_tag` and the full disk NQN. On nvmet backends the control plane **issues the DHHC-1 authentication key at disk creation** and pushes it to the Agent holding the disk; rotation, revocation and push status are covered under [Operations](./operations.md#nvme-of-credentials).
 - The Worker's first system disk is set as the default automatically; the second and later disks do not rewrite it.
 
 For batch creation use `POST /workers/luns/disk/batch`; `dry_run=true` returns the plan only. See the [API Reference](../reference/api.md) for fields and response shapes.
@@ -182,22 +182,6 @@ First checks on failure:
 | Boot error `0x7f22208e` | Is the master/system disk GPT 4K-native? Is `gpt` in `GET /masters` equal to `4k`? |
 
 For other symptoms see [Troubleshooting](./troubleshooting.md).
-
-## 7. Manage Credentials
-
-Credentials follow the Worker and take effect immediately on rotation or revocation:
-
-```bash
-kurrent workers credential show worker-01
-kurrent workers credential set worker-01 --generate
-kurrent workers credential revoke worker-01
-```
-
-`show` reports the key hash prefix and per-Agent push status; `set --generate` rotates in place without printing plaintext; `revoke` makes the next boot fail.
-
-The TLS PSK is derived from the authentication key, so rotating or revoking the key rotates or revokes the PSK atomically. Failed pushes are retried by the control plane's periodic reconciliation, and the status is visible on the Worker detail page under "NVMe-oF credentials". The management plane also exposes equivalent REST endpoints for automation; see the [API Reference](../reference/api.md). The CLI is the preferred interactive path.
-
-Plaintext keys exist only where the chain requires them (the 0600 state files on the control plane and Agent, the storage node's configfs and the kernel `.nvme` keyring); no application-layer encryption is added — disk and host access boundaries are the deployment's responsibility.
 
 ## Related Pages
 
