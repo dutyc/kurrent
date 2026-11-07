@@ -54,6 +54,7 @@ cp_cfg.DEFAULT_AUDIT_FILE = str(_STATE_DIR / "audit.jsonl")
 cp_cfg.DEFAULT_MASTERS_FILE = str(_STATE_DIR / "masters.yml")
 cp_cfg.DEFAULT_CREDENTIAL_PUSH_FILE = str(_STATE_DIR / "credential-push.yml")
 cp_cfg.DEFAULT_ADMIN_CONF = str(_STATE_DIR / "admin.conf")
+cp_cfg.DEFAULT_BOOTSTRAP_DIR = str(_STATE_DIR / "bootstrap")
 cp_cfg.DEFAULT_SESSION_KEY_FILE = str(_STATE_DIR / "session.key")
 # 测试环境不触达真实 dnsmasq 容器（dnsmasq 自己监听 dhcp-hostsfile，控制面不通知）
 # 控制面认证：测试统一走开发模式放行（KURRENT_CP_INSECURE=1）；认证器链行为由

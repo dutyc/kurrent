@@ -864,16 +864,23 @@ def _write_admin_conf(admin_conf_path: Path, cert_path: Path, key_path: Path,
     两条信任链独立：客户端身份 = users CA 签发的 admin 证书（nginx 校链）；
     服务端信任锚 = TOFU 自签 server.crt（443 nginx 证书，与引导链同一锚）。
     证书路径为相对本文件所在目录的引用（宿主/容器视角一致）。
-    server 缺省 https://127.0.0.1/api/cp；旧格式迁移时传入原文件中的地址以保留手改。
+    server 缺省 https://127.0.0.1/api/cp（宿主 HTTPS 端口非 443 时带上端口）；
+    旧格式迁移时传入原文件中的地址以保留手改。
     """
     def rel(p: Path) -> str:
         return os.path.relpath(p, admin_conf_path.parent)
+
+    def default_server() -> str:
+        port = os.environ.get("KURRENT_HTTPS_PORT", "").strip()
+        if port and port.isdigit() and port != "443":
+            return f"https://127.0.0.1:{port}/api/cp"
+        return "https://127.0.0.1/api/cp"
 
     server_cert = Path(config.settings.cert_dir) / "server.crt"
     doc = {
         # nginx 唯一入口的 API 根（/api/cp 前缀反代控制面）；远程管理员改写为
         # https://<host>/api/cp（或 CLI 用 --server 覆盖）
-        "server": server or "https://127.0.0.1/api/cp",
+        "server": server or default_server(),
         "certificate-authority": rel(server_cert),
         "client-certificate": rel(cert_path),
         "client-key": rel(key_path),

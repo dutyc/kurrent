@@ -42,6 +42,7 @@ DEFAULT_CONTROL_PLANE_COMPONENT = "control-plane"       # 控制面自身 client
 DEFAULT_MASTERS_FILE = "/app/state/masters.yml"
 DEFAULT_CREDENTIAL_PUSH_FILE = "/app/state/credential-push.yml"  # 凭据推送状态台账（对账/投影用）
 DEFAULT_ADMIN_CONF = "/app/state/admin.conf"               # 管理凭据文件（kurrent 原生扁平 YAML，CLI 自动发现；证书路径为相对引用）
+DEFAULT_BOOTSTRAP_DIR = "/app/bootstrap"                    # 一次性管理凭据交换目录（kurrent init 写 request，控制面发布副本）
 DEFAULT_SESSION_KEY_FILE = "/app/state/session.key"        # 会话签名密钥（运行时秘密，0600）
 
 # ── 协议契约/安全边界（代码层常量，不收敛 yml）──
@@ -90,6 +91,7 @@ _PATH_FIELDS = {
     "audit_file": "DEFAULT_AUDIT_FILE",
     "masters_file": "DEFAULT_MASTERS_FILE",
     "admin_conf": "DEFAULT_ADMIN_CONF",
+    "bootstrap_dir": "DEFAULT_BOOTSTRAP_DIR",
     "session_key_file": "DEFAULT_SESSION_KEY_FILE",
 }
 _STR_FIELDS = {

@@ -11,8 +11,8 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
-from . import (audit, audit_middleware, cert_bootstrap, config, dnsmasq_conf,
-               maintenance, nginx_reload, pki, runtime_status, users)
+from . import (audit, audit_middleware, bootstrap_exchange, cert_bootstrap, config,
+               dnsmasq_conf, maintenance, nginx_reload, pki, runtime_status, users)
 from .principal import enforce_principal
 from .routers import (agents, boot, boot_assets, certs, devices, enroll,
                       operations, session, settings, tokens, workers)
@@ -117,3 +117,13 @@ try:
 except Exception as exc:
     log.exception("pki: failed to ensure component PKI")
     runtime_status.record_error("组件 PKI 初始化失败", exc)
+
+# 首次部署的管理凭据交换：交换目录存在 request 时发布 admin.conf 副本与 ready
+# 清单（含 SHA-256），CLI 安装并自检后删除。失败进入 runtime_status（/healthz 503）。
+try:
+    bootstrap_exchange.publish_requested_bundle(
+        config.settings.bootstrap_dir, config.settings.admin_conf,
+    )
+except Exception as exc:
+    log.exception("bootstrap exchange: failed to publish management credentials")
+    runtime_status.record_error("管理凭据交换失败", exc)
