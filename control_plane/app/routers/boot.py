@@ -1,5 +1,6 @@
 """引导链端点（不鉴权）：healthz / boot-vars / devices/report / devices/challenge 及注入投影逻辑。"""
 
+import logging
 from typing import Any
 
 from fastapi import HTTPException, Query, Request, Response
@@ -31,9 +32,10 @@ from ..utils import (
     now_iso,
     parse_uint,
 )
-from .workers import MENU_NAV_ITEMS, _base_nqn_from_target, _host_nqn_for
+from .workers import _base_nqn_from_target, _host_nqn_for
 
 router = PrincipalRouter()
+log = logging.getLogger("control-plane")
 
 
 @router.get("/healthz")
@@ -304,21 +306,23 @@ def _worker_boot_payload(
         # os_version 为备注（'' = 无版本）：空值不下发，menu 侧 os-label 拼接自适应
         if disk.get("os_version"):
             payload["os_version"] = str(disk["os_version"]).lower()
+    # 后端类型实时查询一次，供连接符与 TLS 两处共用；None = 查询失败/取值非法，
+    # 与真实 stgt 区分（不投影后端相关字段）。
+    backend = _backend_for(agent_id) if agent_id else None
     if agent_id:
         # disk-nqn：盘记录里的完整 NQN 权威值，由固件原样拼进 root-path。
         # 不在客户端用 hostname/os/os-tag 重拼——DHCP hostname 滞后或缺省不应影响数据面。
         nqn = disk.get("nqn")
         base_nqn = _base_nqn_from_target(nqn)
-        # base-iqn 投影保持 iSCSI 形态（安装器 iSCSI 引导消费）：来源 = 盘 IQN（由盘 NQN 派生）前缀
+        # base-iqn 投影保持 iSCSI 形态：来源 = 盘 IQN（由盘 NQN 派生）前缀，供固件派生 initiator-iqn
         base_iqn = _base_iqn_from_target(disk.get("iqn"))
         try:
             storager_ip = agents.storager_ip_for(agent_id)
         except Exception:
             return {}
-        backend = _backend_for(agent_id)
         # 只投影 iSCSI root 连接符（差异点），root-path 拼装由 iPXE 侧完成：
         # stgt 需 `:::1:`（lun 占位 1），LIO 需 `::::`（空占位）；
-        # nvmet 后端无 iSCSI target，不下发该键，menu 的 iSCSI 安装器项 isset 守卫跳过。
+        # nvmet 后端无 iSCSI target，不下发该键。
         if nqn:
             payload["disk_nqn"] = str(nqn)
         payload["base_iqn"] = base_iqn
@@ -341,7 +345,7 @@ def _worker_boot_payload(
     # 不新增存储字段）；端口取 Agent 上报的数据面端口（能力即真相，与 _backend_for 同源）。
     # nvmet 后端必须同时具备认证密钥与就绪的数据面端口——任一缺失即拒绝下发引导变量
     # （记审计），因为明文口已撤除，放行只会得到一条连不上的 root-path。
-    if agent_id and _backend_for(agent_id) == "nvmet":
+    if backend == "nvmet":
         if not include_credentials:
             record("boot_vars.encryption", "denied", worker_id=worker_id, reason="unverified")
             return {}
@@ -362,25 +366,32 @@ def _reboot_boot_payload() -> dict[str, Any]:
     return {"menu_default": "reboot", "menu_timeout": settings.auto_boot_timeout_ms}
 
 
-def _backend_for(agent_id: str) -> str:
-    """返回 Agent 的存储后端类型（stgt | lio | nvmet）。
+def _backend_for(agent_id: str) -> str | None:
+    """返回 Agent 的存储后端类型（stgt | lio | nvmet）；查询失败返回 None。
 
     一律实时查询 Agent `/capabilities` 的 `backend` 字段（节点自报，能力即真相）：
     后端类型是节点的运行事实，不由控制面登记信息推导——`agents.yml` 的 `tags` 只作人工
     标签，不参与本判定（标签与实况漂移时会拼出错误的 iSCSI 连接符，且标签优先会盖掉实况）。
-    未登记 / 查询失败 / 取值非法 → 默认 stgt（保持既有格式兼容）。
+
+    未登记、查询异常或取值非法时返回 None 并记 warning，不按 stgt 兜底——查询失败
+    与真实 stgt 必须区分，调用方据此跳过后端相关投影（iSCSI 连接符、nvmet TLS）。
     """
     try:
         agent = agents.get(agent_id)
     except KeyError:
-        return "stgt"
+        log.warning("boot: agent %s not registered; storage backend unknown", agent_id)
+        return None
     try:
         backend = str(agents.client(agent).capabilities().get("backend", "")).lower()
-        if backend in {"stgt", "lio", "nvmet"}:
-            return backend
-    except Exception:
-        pass
-    return "stgt"
+    except Exception as err:
+        log.warning("boot: agent %s capabilities query failed; storage backend unknown: %s",
+                    agent_id, err)
+        return None
+    if backend in {"stgt", "lio", "nvmet"}:
+        return backend
+    log.warning("boot: agent %s reported invalid storage backend %r; treating as unknown",
+                agent_id, backend)
+    return None
 
 
 def _nvmet_data_port_for(agent_id: str) -> str:
@@ -526,19 +537,13 @@ def _find_worker_by_hostname(workers: dict[str, Any], hostname: str) -> tuple[st
 
 
 def _menu_default_for(record_: dict[str, Any]) -> str:
-    """默认启动项：default_disk（指向具体盘）> boot.menu_default（显式配置）> reboot（未配置时循环重启等待）。
-    2026-08-30 MAIN MENU 动态化：菜单 OS 项已收敛为唯一通用项 boot-os，
-    显式 menu_default 中的 OS 语义值（旧系统名）统一归一到 boot-os；
-    非 OS 导航值（menu-diag / menu-install / config / shell / reboot / exit）保留原样。"""
+    """默认启动项：default_disk > boot.menu_default > reboot。"""
     if record_.get("default_disk"):
         return "boot-os"
     boot = record_.get("boot") or {}
     menu_default = boot.get("menu_default") or boot.get("menu-default")
     if menu_default:
-        md = str(menu_default).lower()
-        if md not in MENU_NAV_ITEMS:
-            return "boot-os"  # OS 语义默认值归一（脚本已无对应标签，choose --default 须指向现有项）
-        return md
+        return str(menu_default).lower()
     return "reboot"
 
 

@@ -15,14 +15,13 @@ class CreateWorkerRequest(BaseModel):
     mac: str | None = None
     hostname: str | None = None
     arch: str | None = None
-    windows_iso: str | None = None
     boot: BootSpec | None = None
 
 
 class BatchCreateWorkersRequest(BaseModel):
     """批量创建 Worker（逐项独立）：count 数量 + name_prefix 命名规则，
     worker_id = name_prefix + 序号（从 01 起，位宽按 count 自适应）。
-    macs 可选：提供时须与 count 等长，逐项校验设备池并直接绑定；不传 = 全部纯空转。不支持 windows_iso。"""
+    macs 可选：提供时须与 count 等长，逐项校验设备池并直接绑定；不传 = 全部纯空转。"""
     count: int = Field(..., ge=1, le=100, description="数量（1-100）")
     name_prefix: str = "worker-"
     arch: str | None = None

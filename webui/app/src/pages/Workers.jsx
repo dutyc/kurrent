@@ -61,7 +61,7 @@ export default function Workers() {
 
   // 创建 Worker 对话框
   const [createOpen, setCreateOpen] = useState(false)
-  const [createForm, setCreateForm] = useState({ count: '1', name: '', macs: '', windows_iso: '' })
+  const [createForm, setCreateForm] = useState({ count: '1', name: '', macs: '' })
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [createResult, setCreateResult] = useState(null)
@@ -343,7 +343,6 @@ export default function Workers() {
       if (count === 1) {
         const body = { worker_id: createForm.name.trim() }
         if (macs.length === 1) body.mac = macs[0]
-        if (createForm.windows_iso.trim()) body.windows_iso = createForm.windows_iso.trim()
         const created = await createWorker(body)
         closeCreate()
         setCreateResult({ succeeded: [{ worker_id: created?.worker_id || body.worker_id }] })
@@ -355,7 +354,7 @@ export default function Workers() {
         setCreateOpen(false)
         // 有失败就留着表单值：改掉个别 MAC 直接重提，已建成的按幂等跳过
         if ((res.failed || []).length === 0) {
-          setCreateForm({ count: '1', name: '', macs: '', windows_iso: '' })
+          setCreateForm({ count: '1', name: '', macs: '' })
         }
       }
       await fetchWorkers()
@@ -370,7 +369,7 @@ export default function Workers() {
     setCreateOpen(false)
     setCreateError(null)
     setCreateResult(null)
-    setCreateForm({ count: '1', name: '', macs: '', windows_iso: '' })
+    setCreateForm({ count: '1', name: '', macs: '' })
   }
 
   const filtered = workers.filter((w) => {
@@ -833,20 +832,6 @@ export default function Workers() {
                 <p className="create-hint">{t('workers.macsHint')}</p>
               </div>
             </div>
-            {!isBatch && (
-              <details className="adv-details">
-                <summary>{t('workers.advanced')}</summary>
-                <div className="adv-details-body">
-                  <Input
-                    label={t('workers.windowsIso')}
-                    name="windows_iso"
-                    value={createForm.windows_iso}
-                    onChange={(e) => setCreateForm((p) => ({ ...p, windows_iso: e.target.value }))}
-                    placeholder={t('workers.windowsIsoPlaceholder')}
-                  />
-                </div>
-              </details>
-            )}
             {createError && <p className="create-error">{createError}</p>}
           </form>
         </Modal>

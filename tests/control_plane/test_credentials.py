@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import zlib
 
 import pytest
@@ -304,6 +305,85 @@ def test_boot_vars_no_tls_for_non_nvmet_backend(
     res = signed_boot_vars(MAC_A, "worker-01")
     assert "nbft-tls-psk" not in res.text
     assert "nbft-tls-port" not in res.text
+
+
+@pytest.mark.parametrize(("backend", "separator"), [("stgt", ":::1:"), ("lio", "::::")])
+def test_boot_vars_real_iscsi_backend_projects_separator(
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars,
+    caplog, backend, separator,
+):
+    """真实 stgt / lio 后端才投影对应连接符，且不产生“后端未知”告警。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client, backend=backend,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="control-plane"):
+        res = signed_boot_vars(MAC_A, "worker-01", format_="json")
+
+    assert res.status_code == 200
+    assert res.json()["iscsi_sep"] == separator
+    assert not [r for r in caplog.records if "storage backend unknown" in r.getMessage()]
+
+
+def test_boot_vars_capability_failure_is_not_stgt(
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars, caplog,
+):
+    """能力查询失败 → 后端未知，不按 stgt 投影连接符，也不注入 nvmet TLS；记录 warning。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client,
+        backend="nvmet",
+        port={"port_id": "2", "trtype": "tcp", "trsvcid": "4421", "tsas": "tls1.3", "ready": True},
+    )
+
+    def unreachable():
+        raise RuntimeError("agent unreachable")
+
+    mock_agent_client.capabilities = unreachable
+
+    with caplog.at_level(logging.WARNING, logger="control-plane"):
+        res = signed_boot_vars(MAC_A, "worker-01", format_="json")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["disk_nqn"]  # 公共字段仍投影
+    assert "iscsi_sep" not in body
+    assert "nbft_tls_psk" not in body
+    assert "nbft_tls_port" not in body
+
+    warnings = [r.getMessage() for r in caplog.records if "capabilities query failed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "a1b2c3d4e5f6" in warnings[0]
+
+
+def test_boot_vars_invalid_backend_is_not_stgt(
+    client, auth_headers, register_claimed_device, mock_agent_client, signed_boot_vars, caplog,
+):
+    """Agent 上报未知后端值 → 后端未知，不投影连接符，并记录取值告警。"""
+    _setup_worker_with_disk(
+        client, auth_headers, register_claimed_device, mock_agent_client, backend="iscsi",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="control-plane"):
+        res = signed_boot_vars(MAC_A, "worker-01", format_="json")
+
+    assert res.status_code == 200
+    assert "iscsi_sep" not in res.json()
+    assert any("invalid storage backend" in r.getMessage() for r in caplog.records)
+
+
+def test_backend_for_unregistered_agent_returns_none(monkeypatch, caplog):
+    """未登记 Agent 同样属于后端未知，返回 None 而不是 stgt。"""
+    from control_plane.app.routers.boot import _backend_for
+    from control_plane.app.stores import agents
+
+    def missing(_agent_id):
+        raise KeyError(_agent_id)
+
+    monkeypatch.setattr(agents, "get", missing)
+
+    with caplog.at_level(logging.WARNING, logger="control-plane"):
+        assert _backend_for("deadbeef0000") is None
+    assert any("not registered" in r.getMessage() for r in caplog.records)
 
 
 def test_boot_vars_no_secret_without_credential(

@@ -245,10 +245,6 @@ def ensure_hostname_not_in_workers(workers: dict[str, Any], hostname: str) -> No
             raise HTTPException(409, f"hostname already used by worker: {worker_id}")
 
 
-def build_iqn(base_iqn: str, worker_id: str, suffix: str) -> str:
-    return f"{base_iqn.rstrip(':')}:{worker_id}.{suffix}".lower()
-
-
 def build_nqn(base_nqn: str, worker_id: str, suffix: str) -> str:
     """由节点 NQN 命名空间生成盘 NQN（盘标识权威，NVMe-oF 首选协议）：
     nqn.2026-07.com.kurrent:worker-01.ubuntu。

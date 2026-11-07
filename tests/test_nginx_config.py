@@ -215,11 +215,12 @@ def test_no_directory_listing_in_nginx():
 
 
 def test_static_roots_do_not_follow_symlinks():
-    """public/ 与 tftp/ 由宿主机维护，解包可能带入符号链接：不得借此读出容器内
-    其它路径（nginx 容器内还挂着 TOFU 服务端私钥）。"""
-    blocks = _location_blocks(CONF.read_text(encoding="utf-8"))
-    assert "disable_symlinks on from=/data;" in blocks["/file/"]
+    """tftp/ 由宿主机维护，解包可能带入符号链接：不得借此读出容器内其它路径
+    （nginx 容器内还挂着 TOFU 服务端私钥）。"""
+    text = CONF.read_text(encoding="utf-8")
+    blocks = _location_blocks(text)
     assert "disable_symlinks on from=/tftp;" in blocks["/tftp/"]
+    assert "location /file/" not in text
 
 
 def test_dnsmasq_tftp_root_only_has_first_stage_files():

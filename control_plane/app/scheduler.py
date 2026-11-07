@@ -163,35 +163,6 @@ class AgentRegistry:
     def client(self, agent: AgentConfig) -> AgentClient:
         return AgentClient(agent, self.timeout)
 
-    def select_cd_agent(self) -> tuple[AgentConfig, dict[str, Any]]:
-        return self._select(lambda agent: agent.role_cd, require_cd=True)
-
-    def _select(self, role_predicate, *, require_cd: bool) -> tuple[AgentConfig, dict[str, Any]]:
-        errors: list[str] = []
-        for agent in self.load():
-            if not agent.enabled or not role_predicate(agent):
-                continue
-            if not agent.base_url:
-                errors.append(f"{agent.id}: missing base_url")
-                continue
-            client = self.client(agent)
-            try:
-                client.healthz()
-                caps = client.capabilities()
-            except Exception as exc:
-                errors.append(f"{agent.id}: {exc}")
-                continue
-            if require_cd and not caps.get("cd"):
-                errors.append(f"{agent.id}: cd not supported by backend")
-                continue
-            if "base_nqn" not in caps:
-                errors.append(f"{agent.id}: capabilities missing base_nqn")
-                continue
-            return agent, caps
-        role = "cd" if require_cd else "disk"
-        detail = "; ".join(errors) if errors else "no enabled agent configured"
-        raise RuntimeError(f"no available {role} agent: {detail}")
-
     def list_public(self, live: bool = True) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for agent in self.load():

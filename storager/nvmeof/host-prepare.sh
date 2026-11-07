@@ -8,16 +8,19 @@
 #
 # 用法：
 #   sudo bash host-prepare.sh     # 就位（modprobe + mount + /etc/modules-load.d + /etc/fstab）
-#   bash host-prepare.sh --check  # 只读诊断、不做修改（无需 root；部署前排查用）
+# 只读诊断用 `kurrent host check --role storage`（无需 root，部署前排查用）。
 set -u
+
+if [ "$#" -ne 0 ]; then
+	printf '不支持参数 %s：本脚本只做需 root 的就位；只读诊断用 kurrent host check --role storage\n' "$*" >&2
+	exit 2
+fi
 
 TARGET=/sys/kernel/config
 MODULES="nvmet nvmet-tcp"
 CONF=/etc/modules-load.d/kurrent-nvmet.conf
 TLSHD_MIN=1.5.0
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CHECK=false
-[ "${1:-}" = "--check" ] && CHECK=true
 failed=0
 tlshd_bad=false
 
@@ -52,8 +55,8 @@ tlshd_version() {
 
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
 
-if ! $CHECK && [ "$(id -u)" -ne 0 ]; then
-	printf '需 root 运行（sudo bash %s；只读诊断加 --check）\n' "$0" >&2
+if [ "$(id -u)" -ne 0 ]; then
+	printf '需 root 运行（sudo bash %s）；只读诊断用 kurrent host check --role storage\n' "$0" >&2
 	exit 1
 fi
 
@@ -61,43 +64,35 @@ printf '== 1/4 内核模块（%s）\n' "$MODULES"
 for m in $MODULES; do
 	if module_loaded "$m"; then
 		ok "已加载: $m"
-	elif $CHECK; then
-		fail "未加载: $m（sudo bash $0 就位）"
 	elif modprobe "$m" 2>/dev/null && module_loaded "$m"; then
 		ok "已加载: $m（modprobe）"
 	else
 		fail "加载失败: $m（内核 $(uname -r) 不含该模块？）"
 	fi
 done
-if ! $CHECK; then
-	for m in $MODULES; do
-		if module_persisted "$m"; then
-			ok "重启持久化: $m"
-		else
-			[ -f "$CONF" ] || printf '# kurrent 存储节点：nvmet 数据面模块（由 host-prepare.sh 维护）\n' > "$CONF"
-			printf '%s\n' "$m" >> "$CONF"
-			todo "写入 $CONF: $m（重启自动加载）"
-		fi
-	done
-fi
+for m in $MODULES; do
+	if module_persisted "$m"; then
+		ok "重启持久化: $m"
+	else
+		[ -f "$CONF" ] || printf '# kurrent 存储节点：nvmet 数据面模块（由 host-prepare.sh 维护）\n' > "$CONF"
+		printf '%s\n' "$m" >> "$CONF"
+		todo "写入 $CONF: $m（重启自动加载）"
+	fi
+done
 
 printf '== 2/4 configfs 挂载（%s）\n' "$TARGET"
 if configfs_mounted; then
 	ok "已挂载"
-elif $CHECK; then
-	fail "未挂载（sudo bash $0 就位）"
 elif mount -t configfs configfs "$TARGET" 2>/dev/null && configfs_mounted; then
 	ok "已挂载（mount）"
 else
 	fail "挂载失败: $TARGET（目录缺失或权限异常）"
 fi
-if ! $CHECK; then
-	if configfs_persisted; then
-		ok "重启持久化: /etc/fstab"
-	else
-		printf 'configfs %s configfs defaults 0 0\n' "$TARGET" >> /etc/fstab
-		todo "写入 /etc/fstab（重启自动挂载）"
-	fi
+if configfs_persisted; then
+	ok "重启持久化: /etc/fstab"
+else
+	printf 'configfs %s configfs defaults 0 0\n' "$TARGET" >> /etc/fstab
+	todo "写入 /etc/fstab（重启自动挂载）"
 fi
 
 printf '== 3/4 验证\n'

@@ -4,8 +4,15 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CERT="$ROOT/control_plane/state/pki/users/admin/client.crt"
-KEY="$ROOT/control_plane/state/pki/users/admin/client.key"
+# 运行时状态在仓库外的状态根；旧布局仍在仓库内时回退到 control_plane/state。
+STATE="${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}"
+if [ -f "$STATE/control-plane/state/admin.conf" ]; then
+    ADMIN_STATE="$STATE/control-plane/state"
+else
+    ADMIN_STATE="$ROOT/control_plane/state"
+fi
+CERT="$ADMIN_STATE/pki/users/admin/client.crt"
+KEY="$ADMIN_STATE/pki/users/admin/client.key"
 BASE="https://127.0.0.1"
 FAILED=0
 
@@ -75,7 +82,7 @@ COMP_TMP=$(mktemp -d)
 trap 'rm -rf "$COMP_TMP"' EXIT
 COMP_CERT="" COMP_KEY=""
 # 任意一个在控制面容器内真实存在的 agent 组件证书即可（宿主遗留目录可能不存在）
-for dir in "$ROOT"/control_plane/state/pki/components/agent-*; do
+for dir in "$ADMIN_STATE"/pki/components/agent-*; do
     [ -d "$dir" ] || continue
     name=$(basename "$dir")
     docker cp "kurrent-control-plane:/app/state/pki/components/$name/client.crt" \
@@ -306,18 +313,15 @@ else
 fi
 check_code 200 "iPXE 菜单可下载" "$(code "$BASE/tftp/boot.ipxe.cfg")"
 
-# ── 静态根不跟随符号链接：public/ 或 tftp/ 里的链接不得读到容器内其它路径 ──
-PUB_LINK="$ROOT/webui/deploy/public/.probe-symlink"
+# ── 静态根不跟随符号链接：tftp/ 里的链接不得读到容器内其它路径 ──
 TFTP_LINK="$ROOT/tftp/.probe-symlink"
-ln -sf /etc/nginx/certs/server.key "$PUB_LINK" 2>/dev/null
 ln -sf /etc/nginx/certs/server.key "$TFTP_LINK" 2>/dev/null
-if [ -L "$PUB_LINK" ] && [ -L "$TFTP_LINK" ]; then
-    check_code 403 "/file/ 不跟随符号链接" "$(code "$BASE/file/.probe-symlink")"
+if [ -L "$TFTP_LINK" ]; then
     check_code 403 "/tftp/ 不跟随符号链接" "$(code "$BASE/tftp/.probe-symlink")"
 else
-    printf 'SKIP  符号链接守卫断言（public/ 或 tftp/ 不可写）\n'
+    printf 'SKIP  符号链接守卫断言（tftp/ 不可写）\n'
 fi
-rm -f "$PUB_LINK" "$TFTP_LINK"
+rm -f "$TFTP_LINK"
 
 # ── 管理面响应不可缓存 ──
 if curl -sk --max-time 5 --cert "$CERT" --key "$KEY" -D - -o /dev/null \

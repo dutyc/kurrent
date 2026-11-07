@@ -36,7 +36,6 @@ from ..stores import agents, credential_pushes, credentials, devices, dnsmasq, r
 from ..utils import (
     add_worker_disk,
     build_disk_filename,
-    build_iqn,
     build_nqn,
     canonical_hostname,
     canonical_id,
@@ -60,16 +59,8 @@ from .devices import _bind_device, _ensure_device_poolable, _rollback_devices_bi
 
 log = logging.getLogger("control-plane")
 
-# menu.ipxe 主菜单 item ID（choose --default 的合法值），作为 boot.menu_default 的严格校验集合
-MENU_ITEMS = {
-    "windows", "ubuntu", "debian", "centos", "esxi",
-    "menu-diag", "menu-install", "config", "shell", "reboot", "exit",
-}
-# 菜单导航项（非 OS 语义）：boot.menu_default 归一逻辑按此集合区分——
-# OS 语义默认值（默认盘存在或旧系统名）统一归一到唯一 OS 项 boot-os（2026-08-30 MAIN MENU 动态化）
-MENU_NAV_ITEMS = {"menu-diag", "menu-install", "config", "shell", "reboot", "exit"}
-# OS_ITEMS 已退役（2026-08-30 裁定）：os 为备注性质（人类理解用），唯一性由 os_tag 随机标识保证；
-# 建盘不再白名单校验，os 合法集合不再存在
+# menu.ipxe 主菜单中可手工选择的 item ID；boot-os 由默认盘推导，不在校验集合内
+MENU_ITEMS = {"config", "shell", "reboot", "exit"}
 
 from ..principal import PrincipalRouter
 
@@ -121,8 +112,6 @@ def create_worker(req: CreateWorkerRequest, request: Request):
     arch = req.arch or settings.default_arch
     mac = canonical_mac(req.mac) if req.mac else None
 
-    cd_record: dict[str, Any] | None = None
-
     with store.locked():
         data = store.load_workers()
         workers = data["workers"]
@@ -139,61 +128,37 @@ def create_worker(req: CreateWorkerRequest, request: Request):
         client_ip = client_host(request)
         record("create_worker", "started", worker_id=worker_id, client=client_ip)
 
-        try:
-            if req.windows_iso:
-                cd_agent, cd_caps = agents.select_cd_agent()
-                # CD 盘无 nqn（nvmet 不支持 cd）：base_nqn 派生 IQN 后按历史契约生成盘 IQN
-                cd_iqn = build_iqn(nqn_to_iqn(cd_caps["base_nqn"]), worker_id, "windows.iso")
-                cd_client = agents.client(cd_agent)
-                cd_result = cd_client.create_cd(req.windows_iso, cd_iqn)
-                cd_record = {
-                    "agent": cd_agent.id,
-                    "iqn": cd_result.get("iqn", cd_iqn),
-                    "iso": req.windows_iso,
-                    "backing": cd_result.get("backing"),
-                }
-                record("agent.create_cd", "ok", worker_id=worker_id, agent=cd_agent.id, iqn=cd_record["iqn"])
+        worker_record = {
+            "hostname": hostname,
+            "arch": arch,
+            "state": "registered",
+            "disks": [],
+        }
+        if req.boot:
+            worker_record["boot"] = req.boot.dict(exclude_none=True)
+        workers[worker_id] = worker_record
+        store.save_workers(data)
+        record("workers.write", "ok", worker_id=worker_id)
 
-            worker_record = {
-                "hostname": hostname,
-                "arch": arch,
-                "state": "installing" if cd_record else "registered",
-                "disks": [],
-                "cd": cd_record,
-            }
-            if req.boot:
-                worker_record["boot"] = req.boot.dict(exclude_none=True)
-            workers[worker_id] = worker_record
-            store.save_workers(data)
-            record("workers.write", "ok", worker_id=worker_id)
+        if mac:
+            # 绑定设备（设备↔worker 一对一授权）：复用绑定核心流程
+            bind_result = _bind_device(mac, worker_id, force=False)
+            record("device.bind", "ok", mac=mac, worker_id=worker_id, force=False,
+                   old_worker_id=bind_result.get("old_worker_id"),
+                   old_device_mac=bind_result.get("old_device_mac"), client=client_ip)
+        else:
+            record("create_worker", "idle", worker_id=worker_id, hostname=hostname,
+                   mac=None, client=client_ip)
 
-            if mac:
-                # 绑定设备（设备↔worker 一对一授权）：复用绑定核心流程
-                bind_result = _bind_device(mac, worker_id, force=False)
-                record("device.bind", "ok", mac=mac, worker_id=worker_id, force=False,
-                       old_worker_id=bind_result.get("old_worker_id"),
-                       old_device_mac=bind_result.get("old_device_mac"), client=client_ip)
-            else:
-                record("create_worker", "idle", worker_id=worker_id, hostname=hostname,
-                       mac=None, client=client_ip)
-
-            record("create_worker", "succeeded", worker_id=worker_id, client=client_ip)
-            return _enrich_worker(worker_id, worker_record)
-        except AgentAPIError as exc:
-            record("create_worker", "failed", worker_id=worker_id, client=client_ip, error=exc.detail)
-            _persist_failed_worker(data, worker_id, hostname, arch, None, cd_record, exc.detail)
-            raise HTTPException(exc.status_code, {"agent": exc.agent_id, "error": exc.detail}) from exc
-        except Exception as exc:
-            record("create_worker", "failed", worker_id=worker_id, client=client_ip, error=str(exc))
-            _persist_failed_worker(data, worker_id, hostname, arch, None, cd_record, str(exc))
-            raise HTTPException(500, str(exc)) from exc
+        record("create_worker", "succeeded", worker_id=worker_id, client=client_ip)
+        return _enrich_worker(worker_id, worker_record)
 
 
 @router.post("/workers/batch")
 def batch_create_workers(req: BatchCreateWorkersRequest, request: Request):
     """批量创建 Worker（逐项独立，幂等重跑）：命名规则 + 数量生成 worker_id（worker-01…），
     macs 与 count 等长时逐项绑定（设备须在池中，不传 = 全部纯空转）。
-    已存在 → skipped；设备不可绑定 → failed 且该项不创建（可修正后重试）。不支持 windows_iso。"""
+    已存在 → skipped；设备不可绑定 → failed 且该项不创建（可修正后重试）。"""
     prefix = req.name_prefix.strip()
     if not prefix:
         raise HTTPException(400, "name_prefix must not be empty")
@@ -232,7 +197,6 @@ def batch_create_workers(req: BatchCreateWorkersRequest, request: Request):
                     "arch": req.arch or settings.default_arch,
                     "state": "registered",
                     "disks": [],
-                    "cd": None,
                 }
                 if req.boot:
                     worker_record["boot"] = req.boot.dict(exclude_none=True)
@@ -983,29 +947,39 @@ def migrate_single_disk_default() -> None:
         log.exception("workers: single-disk default migration failed")
 
 
-def _persist_failed_worker(
-    data: dict[str, Any],
-    worker_id: str,
-    hostname: str,
-    arch: str,
-    disk_record: dict[str, Any] | None,
-    cd_record: dict[str, Any] | None,
-    error: str,
-) -> None:
-    if not disk_record and not cd_record:
-        return
-    data["workers"][worker_id] = {
-        "hostname": hostname,
-        "arch": arch,
-        "state": "failed",
-        "error": error,
-        "disks": [disk_record] if disk_record else [],
-        "cd": cd_record,
-    }
+def migrate_menu_defaults() -> None:
+    """存量迁移：删除菜单里已不存在的 boot.menu_default（旧 OS 名与子菜单项）。
+
+    新写入由 API 拒绝旧值；存量记录若保留，会把不存在的项传给 iPXE
+    `choose --default`。删除后回落到 default_disk 或 reboot（幂等）。
+    """
     try:
-        store.save_workers(data)
+        with store.locked():
+            data = store.load_workers()
+            changed = False
+            for worker_id, record_ in data["workers"].items():
+                boot = record_.get("boot")
+                if not isinstance(boot, dict):
+                    continue
+                invalid = False
+                for key in ("menu_default", "menu-default"):
+                    raw = boot.get(key)
+                    if raw is None:
+                        continue
+                    if str(raw).strip().lower() in MENU_ITEMS:
+                        continue
+                    boot.pop(key, None)
+                    invalid = True
+                if not invalid:
+                    continue
+                if not boot:
+                    record_.pop("boot", None)
+                changed = True
+                log.warning("workers: removed legacy menu_default from %s", worker_id)
+            if changed:
+                store.save_workers(data)
     except Exception:
-        log.exception("failed to persist failed worker state")
+        log.exception("workers: menu_default migration failed")
 
 
 # ============================ NVMe-oF 凭据（DHHC-1，按 Worker 跟盘） ============================

@@ -1,7 +1,0 @@
-# 此目录存放 iPXE 引导所需的公开文件
-# 挂载到 nginx 容器内 /data/，通过 /file/ 和 /browse/ 访问
-#
-# 典型内容:
-#   Win11_24H2.iso            Windows 安装 ISO
-#   vmlinuz / initrd.img      Linux 内核文件
-

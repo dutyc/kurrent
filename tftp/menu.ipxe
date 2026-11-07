@@ -5,12 +5,7 @@
 # Some menu defaults
 # set menu-timeout 0 if no client-specific settings found
 isset ${menu-timeout} || set menu-timeout 0
-set submenu-timeout ${menu-timeout}
 isset ${menu-default} || set menu-default exit
-
-# Figure out if client is 64-bit capable
-cpuid --ext 29 && set arch x64 || set arch x86
-cpuid --ext 29 && set archl amd64 || set archl i386
 
 ###################### MAIN MENU ####################################
 
@@ -24,15 +19,12 @@ item --gap --             ------------------------- Operating systems ----------
 set os-label ${os}
 isset ${os-version} && set os-label ${os} ${os-version} ||
 item --key b boot-os      Boot ${os-label} (NVMe-oF)
-item --gap --             ------------------------- Tools and utilities ----------------------------
-item --key d menu-diag    System tools...
-item --key i menu-install Installers...
 item --gap --             ------------------------- Advanced options -------------------------------
 item --key c config       Configure settings
 item shell                Drop to iPXE shell
 item reboot               Reboot computer
 item
-item --key x exit         Exit iPXE and continue BIOS boot
+item --key x exit         Exit iPXE and continue boot
 choose --timeout ${menu-timeout} --default ${menu-default} selected || goto cancel
 set menu-timeout 0
 goto ${selected}
@@ -44,7 +36,6 @@ echo You cancelled the menu, dropping you to a shell
 echo Type 'exit' to get the back to the menu
 shell
 set menu-timeout 0
-set submenu-timeout 0
 goto start
 
 :failed
@@ -59,11 +50,6 @@ exit
 
 :config
 config
-goto start
-
-:back
-set submenu-timeout 0
-clear submenu-default
 goto start
 
 ############ MAIN MENU ITEMS ############
@@ -89,131 +75,4 @@ isset ${nbft-secret} && set root-path ${root-path}?secret=${nbft-secret} && set 
 set root-path ${root-path}${nvme-sep}tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}
 set keep-san 1
 sanboot ${root-path} || goto failed
-goto start
-
-###################### SYSTEM TOOL MENU #############################
-
-:menu-diag
-menu Diagnostic tools
-item memtest       Memtest86+
-item winpe         WinPE
-item
-item --key 0x08 back Back to top menu...
-iseq ${menu-default} menu-diag && isset ${submenu-default} && goto menu-diag-timed ||
-choose selected && goto ${selected} || goto start
-:menu-diag-timed
-choose --timeout ${submenu-timeout} --default ${submenu-default} selected && goto ${selected} || goto start
-
-:memtest
-set base-url ${chain-url}/tools
-initrd ${base-url}/memtest86_5.01.iso
-chain memdisk iso raw || goto failed
-goto start
-
-:winpe
-set base-url ${chain-url}/tools
-initrd ${base-url}/wepe.iso
-chain memdisk iso raw || goto failed
-goto start
-
-############################ INSTALLER MENU #########################
-
-:menu-install
-menu Installers for ${initiator-iqn}
-item winpe-install        Hook Windows iSCSI and boot WinPE for intallation
-item ubuntu-install       Hook Ubuntu ${archl} iSCSI and install
-item debian-install       Hook Debian ${archl} iSCSI and install
-item centos-install       Hook CentOS ${archl} iSCSI and install
-item esxi-install         Hook ESXi ${archl} iSCSI and install
-item
-item --key 0x08 back      Back to top menu...
-iseq ${menu-default} menu-install && isset ${submenu-default} && goto menu-install-timed ||
-choose selected && goto ${selected} || goto start
-:menu-install-timed
-choose --timeout ${submenu-timeout} --default ${submenu-default} selected && goto ${selected} || goto start
-
-:winpe-install
-# 后端无 iSCSI target（nvmet：未下发 iscsi-sep）时不可用，回菜单
-isset ${iscsi-sep} || goto start
-echo Booting Windows PE ${arch} installer for ${initiator-iqn}
-echo (for installing Windows)
-set netX/gateway ${storager-ip}
-set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.windows
-set data-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.windows.iso
-set keep-san 1
-echo sanhook start...
-sanhook --drive 0x80 ${root-path} || goto failed
-sanhook --drive 0x81 ${data-path} || goto failed
-echo set base url starting
-set base-url ${chain-url}/install/windows/24h2
-kernel ${base-url}/wimboot
-initrd ${base-url}/boot/bcd bcd
-initrd ${base-url}/boot/boot.sdi boot.sdi
-initrd ${base-url}/sources/boot.wim boot.wim
-boot || goto failed
-goto start
-
-:ubuntu-install
-isset ${iscsi-sep} || goto start
-echo Starting Ubuntu installer for ${initiator-iqn}
-set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.ubuntu
-cpuid --ext 29 && set arch amd64 || set arch x86
-set base-url ${chain-url}/install/ubuntu/22.04
-kernel ${base-url}/netboot/vmlinuz \
-    auto=true \
-    priority=critical \
-    url=${base-url}/preseed.cfg \
-    ipv6.disable=1 \
-    netcfg/disable_autoconfig=true \
-    mirror/country=manual \
-    mirror/http/hostname=mirrors.tuna.tsinghua.edu.cn \
-    mirror/http/directory=/debian \
-    mirror/suite=bookworm \
-    ---
-initrd ${base-url}/netboot/initrd.gz
-boot || goto failed
-goto start
-
-:debian-install
-isset ${iscsi-sep} || goto start
-echo Starting Debian 12 installer for ${initiator-iqn}
-set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.debian
-cpuid --ext 29 && set arch amd64 || set arch x86
-set base-url ${chain-url}/install/debian/12
-kernel ${base-url}/netboot/vmlinuz \
-    auto=true \
-    priority=critical \
-    url=${base-url}/preseed.cfg \
-    ipv6.disable=1 \
-    netcfg/disable_autoconfig=true \
-    mirror/country=manual \
-    mirror/http/hostname=mirrors.tuna.tsinghua.edu.cn \
-    mirror/http/directory=/debian \
-    mirror/suite=bookworm \
-    ---
-initrd ${base-url}/netboot/initrd.gz
-boot || goto failed
-goto start
-
-:centos-install
-isset ${iscsi-sep} || goto start
-echo Starting CentOS 7 ${archl} installer for ${initiator-iqn}
-set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.centOS
-set base-url ${chain-url}/install/centos
-set keep-san 1
-sanhook ${root-path} || goto failed
-kernel ${base-url}/images/pxeboot/vmlinuz initrd=initrd.img repo=${base-url}
-initrd ${base-url}/images/pxeboot/initrd.img
-boot || goto failed
-goto start
-
-:esxi-install
-isset ${iscsi-sep} || goto start
-echo Starting ESXi 7 installer for ${initiator-iqn}
-set root-path iscsi:${storager-ip}${iscsi-sep}${base-iqn}:${hostname}.esxi
-set base-url ${chain-url}/install/esxi
-set keep-san 1
-sanhook ${root-path} || goto failed
-initrd ${base-url}/esxi.iso
-chain memdisk iso raw || goto failed
 goto start

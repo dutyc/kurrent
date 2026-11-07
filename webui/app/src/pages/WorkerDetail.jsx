@@ -88,9 +88,9 @@ export default function WorkerDetail() {
   const [diskModalOpen, setDiskModalOpen] = useState(false)
   const [expandedDisk, setExpandedDisk] = useState(null)
 
-  // menu.ipxe 导航项（与后端 MENU_NAV_ITEMS 一致）：MAIN MENU 动态化后 OS 项已收敛为
-  // 唯一通用项 boot-os（由默认盘配置推导，不在此可选），这里仅保留非 OS 导航值
-  const MENU_OPTIONS = ['menu-diag', 'menu-install', 'config', 'shell', 'reboot', 'exit'].map((v) => ({ value: v, label: v }))
+  // menu.ipxe 可手工选择的导航项（与后端 MENU_ITEMS 一致）：boot-os 由默认盘配置推导，
+  // 不在此可选，这里仅保留非 OS 导航值
+  const MENU_OPTIONS = ['config', 'shell', 'reboot', 'exit'].map((v) => ({ value: v, label: v }))
   const CLEAR_OPTION = { value: '__clear__', label: t('workerDetail.clear') }
 
   const DISK_TYPE_OPTIONS = [

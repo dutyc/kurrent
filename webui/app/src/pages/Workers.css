@@ -51,43 +51,6 @@
   border-color: var(--black);
 }
 
-/* 低频项默认收起 */
-.adv-details {
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-  margin-top: 4px;
-}
-
-.adv-details > summary {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--gray-500);
-  cursor: pointer;
-  list-style: none;
-}
-
-.adv-details > summary::-webkit-details-marker {
-  display: none;
-}
-
-.adv-details > summary::before {
-  content: "▸ ";
-}
-
-.adv-details[open] > summary::before {
-  content: "▾ ";
-}
-
-.adv-details > summary:hover {
-  color: var(--black);
-}
-
-.adv-details-body {
-  margin-top: 10px;
-}
-
 /* ===== 工具栏 ===== */
 .workers-toolbar {
   display: flex;

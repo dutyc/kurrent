@@ -36,12 +36,12 @@ class TestWorkerCreate:
     def test_create_with_arch_and_boot(self, client, auth_headers):
         res = client.post("/workers", json={
             "worker_id": "worker-01", "arch": "x86_64",
-            "boot": {"menu_default": "windows", "menu_timeout": 5},
+            "boot": {"menu_default": "config", "menu_timeout": 5},
         }, headers=auth_headers)
         assert res.status_code == 201
         body = res.json()
         assert body["arch"] == "x86_64"
-        assert body["boot"] == {"menu_default": "windows", "menu_timeout": 5}
+        assert body["boot"] == {"menu_default": "config", "menu_timeout": 5}
 
     def test_create_with_mac_binds_device(self, client, auth_headers):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
@@ -445,6 +445,42 @@ class TestDefaultBoot:
         res = client.put("/workers/worker-01/default-disk", json={"menu_default": "hack"},
                          headers=auth_headers)
         assert res.status_code == 400
+
+    def test_legacy_menu_defaults_rejected_400(self, client, auth_headers):
+        """只接受当前菜单可手工选择的项；工具菜单与旧系统名不再兼容。"""
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        for value in ("menu-diag", "windows"):
+            res = client.put("/workers/worker-01/default-disk", json={"menu_default": value},
+                             headers=auth_headers)
+            assert res.status_code == 400, value
+            assert value in res.text
+
+    def test_migration_removes_legacy_menu_defaults(self, client, auth_headers):
+        """存量旧值在启动迁移中清除；有效值与同一 boot 块的其它字段保留。"""
+        for worker_id in ("worker-01", "worker-02", "worker-03"):
+            client.post("/workers", json={"worker_id": worker_id}, headers=auth_headers)
+
+        from control_plane.app.routers.workers import migrate_menu_defaults
+        from control_plane.app.stores import store
+
+        with store.locked():
+            data = store.load_workers()
+            data["workers"]["worker-01"]["boot"] = {
+                "menu_default": "windows", "menu_timeout": 5,
+            }
+            data["workers"]["worker-02"]["boot"] = {"menu_default": "config"}
+            data["workers"]["worker-03"]["boot"] = {"menu-default": "menu-diag"}
+            store.save_workers(data)
+
+        migrate_menu_defaults()
+        migrate_menu_defaults()  # 幂等
+
+        first = client.get("/workers/worker-01", headers=auth_headers).json()
+        second = client.get("/workers/worker-02", headers=auth_headers).json()
+        third = client.get("/workers/worker-03", headers=auth_headers).json()
+        assert first["boot"] == {"menu_timeout": 5}
+        assert second["boot"] == {"menu_default": "config"}
+        assert "boot" not in third
 
     def test_set_menu_timeout_negative_400(self, client, auth_headers):
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)

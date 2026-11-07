@@ -22,7 +22,6 @@ BOOT_CFG = """\
 #!ipxe
 set https-port 443
 set https-url https://${controller_ip}:${https-port}/
-set chain-url ${https-url}file
 set menu-url ${https-url}tftp/menu.ipxe
 """
 
@@ -37,22 +36,11 @@ MENU = """\
 :start
 menu iPXE boot menu for ${initiator-iqn}
 item --key b boot-os    Boot ${os}
-item --key d menu-diag  System tools...
+item --key c config     Configure settings
 
 :boot-os
 set root-path nvme://${storager-ip}:${port}/${disk-nqn}
 sanboot ${root-path} || goto failed
-
-:menu-diag
-menu Diagnostic tools
-item memtest Memtest86+
-item --gap
-item setup  Settings
-
-:memtest
-set base-url ${chain-url}/tools
-initrd ${base-url}/memtest.iso
-chain memdisk iso raw || goto failed
 """
 
 
@@ -83,7 +71,7 @@ def test_inventory_reports_uefi_firmware_chain_and_menu(tmp_path):
 
     assert {item["file"] for item in data["stage2"]} == {"boot.ipxe", "boot.ipxe.cfg", "menu.ipxe"}
     assert all(item["status"] == "ok" for item in data["stage2"])
-    assert data["menu"] == {"status": "ok", "items": 4}
+    assert data["menu"] == {"status": "ok", "items": 2}
 
 
 def test_firmware_capability_gap_is_flagged(tmp_path):
