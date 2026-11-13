@@ -12,6 +12,7 @@ import {
   closeRegistrationWindow,
   getEnforcement,
   setEnforcement,
+  approveDeviceBaseline,
   getWorkers,
   batchCreateWorkers,
   getOperations,
@@ -99,7 +100,7 @@ export default function Devices() {
   const [bindings, setBindings] = useState(null) // null = 未加载/加载中
   const [bindingsError, setBindingsError] = useState(null)
 
-  // ===== 注册窗口（部署期：仅窗口开启期间新设备上报可携公钥注册入池） + 设备身份验签强制开关 =====
+  // ===== 注册窗口（部署期：仅窗口开启期间新设备上报可携 TPM AK 注册入池） + TPM 证明强制开关 =====
   const [regWindow, setRegWindow] = useState(null) // null = 未加载；{ open, opened_at, ttl_minutes, closes_at, remaining_seconds, max_devices, admitted, remaining_devices, quota_exhausted }
   const [windowBusy, setWindowBusy] = useState(false)
   const [windowError, setWindowError] = useState(null)
@@ -108,6 +109,8 @@ export default function Devices() {
   const [countdown, setCountdown] = useState(0) // 本地逐秒递减的剩余秒数（以服务端 remaining_seconds 为基准）
   const [enforcement, setEnforcementState] = useState(null)
   const [enforcementBusy, setEnforcementBusy] = useState(false)
+  const [mismatchOnly, setMismatchOnly] = useState(false)
+  const [approveError, setApproveError] = useState(null) // { mac, message }
   const windowLimits = regWindow?.limits || {}
   const maxDevicesUpper = windowLimits.max_devices ?? DEFAULT_MAX_DEVICES_UPPER
   const maxTtlMinutes = windowLimits.ttl_minutes_max ?? DEFAULT_MAX_TTL_MINUTES
@@ -240,7 +243,7 @@ export default function Devices() {
     return () => clearInterval(iv)
   }, [regWindow?.open, fetchRegistrationWindow, fetchDevices, unbindMode, wizardOpen])
 
-  // 开启注册窗口：窗口开启期间新设备上报可携公钥自动注册入池（TTL 到期自动关闭；额度用尽即停）
+  // 开启注册窗口：窗口开启期间新设备上报可携 TPM AK 自动注册入池（TTL 到期自动关闭；额度用尽即停）
   const handleOpenWindow = async () => {
     setWindowBusy(true)
     setWindowError(null)
@@ -276,7 +279,7 @@ export default function Devices() {
     }
   }
 
-  // 切换设备身份验签强制开关：开启后 /boot-vars 只向验签通过的已绑定设备下发
+  // 切换 TPM 证明强制开关：开启后 /boot-vars 只向通过证明的已绑定设备下发
   const handleToggleEnforcement = async () => {
     setEnforcementBusy(true)
     setWindowError(null)
@@ -287,6 +290,17 @@ export default function Devices() {
       setWindowError(e.message)
     } finally {
       setEnforcementBusy(false)
+    }
+  }
+
+  // 批准新平台基线：写入最近一次证明上报的 PCR 摘要，设备下次启动按新基线校验
+  const handleApproveBaseline = async (mac) => {
+    setApproveError(null)
+    try {
+      await approveDeviceBaseline(mac)
+      await fetchDevices()
+    } catch (e) {
+      setApproveError({ mac, message: e.message })
     }
   }
 
@@ -593,7 +607,40 @@ export default function Devices() {
     return 'default'
   }
 
+  const fmtTime = (iso) => (iso ? iso.replace('T', ' ').slice(0, 19) : '—')
+  const shortHex = (hex, head = 10, tail = 4) =>
+    hex && hex.length > head + tail ? `${hex.slice(0, head)}…${hex.slice(-tail)}` : hex || '—'
+
+  const attestView = (d) => {
+    if (d.state === 'revoked' || !d.identity?.ak_public) return null
+    const a = d.attestation || {}
+    if (a.state === 'proven') return { variant: 'ok', label: t('devices.attest.proven') }
+    if (a.state === 'mismatch') return { variant: 'error', label: t('devices.attest.mismatch') }
+    if (a.last_reason === 'baseline_approved') {
+      return { variant: 'default', label: t('devices.attest.awaiting') }
+    }
+    return { variant: 'default', label: t('devices.attest.unproven') }
+  }
+
+  const baselineText = (d) => {
+    const baseline = d.pcr_baseline
+    const a = d.attestation || {}
+    if (!baseline?.digest_sha256) return t('devices.attest.baselineNone')
+    if (a.state === 'mismatch') return t('devices.attest.baselineMismatch')
+    if (a.state === 'proven') return t('devices.attest.baselineMatch', { time: fmtTime(baseline.recorded_at) })
+    if (a.last_reason === 'baseline_approved') {
+      return t('devices.attest.baselineUpdated', { time: fmtTime(baseline.recorded_at) })
+    }
+    return t('devices.attest.baselineRecorded', { time: fmtTime(baseline.recorded_at) })
+  }
+
+  const mismatchedDevices = devices.filter(
+    (d) => d.state !== 'revoked' && d.attestation?.state === 'mismatch'
+  )
+  const mismatchActive = mismatchOnly && mismatchedDevices.length > 0
+
   const filtered = devices
+    .filter((d) => !mismatchActive || (d.state !== 'revoked' && d.attestation?.state === 'mismatch'))
     .filter((d) => {
       const term = filter.toLowerCase()
       return (
@@ -1020,7 +1067,7 @@ export default function Devices() {
         </div>
       )}
 
-      {/* 注册窗口面板：部署期开启窗口供新设备携公钥注册入池；窗口关闭/额度用尽后上报只记指纹不入池 */}
+      {/* 注册窗口面板：部署期开启窗口供新设备携 TPM AK 注册入池；窗口关闭/额度用尽后上报只记指纹不入池 */}
       <div className="reg-window-panel">
         <div className="reg-window-head">
           <span className="reg-window-title">{t('devices.regWindow.title')}</span>
@@ -1075,18 +1122,59 @@ export default function Devices() {
             </>
           )}
         </div>
-        <label
-          className={`reg-window-enforce${enforcement ? ' rwe-on' : ''}`}
-          title={t('devices.regWindow.enforceHint')}
-        >
-          <input
-            type="checkbox"
-            checked={enforcement === true}
-            onChange={handleToggleEnforcement}
-            disabled={enforcement === null || enforcementBusy}
+        <div className="enforce-control" title={t('devices.regWindow.enforceHint')}>
+          <span className="enforce-label">{t('devices.regWindow.enforce')}</span>
+          <Badge variant={enforcement === null ? 'default' : enforcement ? 'ok' : 'partial'}>
+            {enforcement === null
+              ? '—'
+              : enforcement
+                ? t('devices.regWindow.enforceOn')
+                : t('devices.regWindow.enforceOff')}
+          </Badge>
+          <ConfirmAction
+            trigger={
+              <Button
+                variant="ghost"
+                className="enforce-action"
+                disabled={enforcement === null || enforcementBusy}
+              >
+                {enforcement
+                  ? t('devices.regWindow.enforceOffBtn')
+                  : t('devices.regWindow.enforceOnBtn')}
+              </Button>
+            }
+            message={
+              enforcement
+                ? t('devices.regWindow.enforceOffMessage')
+                : t('devices.regWindow.enforceOnMessage')
+            }
+            details={
+              <div>
+                <div className="confirm-digest-row">
+                  {t('devices.regWindow.enforceCurrent', {
+                    state: enforcement
+                      ? t('devices.regWindow.enforceOn')
+                      : t('devices.regWindow.enforceOff'),
+                  })}
+                </div>
+                <div className="confirm-digest-row">{t('devices.regWindow.enforceImpact')}</div>
+                <div className="confirm-digest-row">{t('devices.regWindow.enforceAudit')}</div>
+              </div>
+            }
+            extraFields={
+              enforcement
+                ? [{ name: 'ack', label: t('devices.regWindow.enforceAck') }]
+                : undefined
+            }
+            requireExtra={enforcement ? ['ack'] : undefined}
+            confirmLabel={
+              enforcement
+                ? t('devices.regWindow.enforceOffBtn')
+                : t('devices.regWindow.enforceOnBtn')
+            }
+            onConfirm={handleToggleEnforcement}
           />
-          <span>{t('devices.regWindow.enforce')}</span>
-        </label>
+        </div>
         {windowError && <span className="workers-toolbar-error">{windowError}</span>}
       </div>
 
@@ -1110,6 +1198,15 @@ export default function Devices() {
           {t('devices.guide.btn')}
         </Button>
       </div>
+
+      {mismatchedDevices.length > 0 && (
+        <div className="devices-attest-banner">
+          <span>{t('devices.attest.banner', { count: mismatchedDevices.length })}</span>
+          <Button variant="ghost" onClick={() => setMismatchOnly(!mismatchOnly)}>
+            {mismatchActive ? t('devices.attest.viewAll') : t('devices.attest.viewMismatch')}
+          </Button>
+        </div>
+      )}
 
       {unbindMode && (
         <div className="unbind-bar">
@@ -1154,12 +1251,15 @@ export default function Devices() {
             {unbindMode && <span className="wh-check" />}
             <span className="dh-mac">{t('devices.mac')}</span>
             <span className="dh-state">{t('devices.state')}</span>
+            <span className="dh-attest">{t('devices.attest.column')}</span>
             <span className="dh-worker">{t('devices.boundWorker')}</span>
             <span className="dh-fp">{t('devices.fingerprint')}</span>
             <span className="dh-source">{t('devices.source')}</span>
             <span className="dh-time">{t('devices.firstSeen')}</span>
           </div>
-          {filtered.map((d) => (
+          {filtered.map((d) => {
+            const att = attestView(d)
+            return (
             <div key={d.mac}>
               <div
                 className={`devices-row${unbindMode ? ' dr-unbind' : ''}`}
@@ -1191,6 +1291,9 @@ export default function Devices() {
                 </span>
                 <span className="dr-state">
                   <Badge variant={stateVariant(d)}>{d.state}</Badge>
+                </span>
+                <span className="dr-attest">
+                  {att && <Badge variant={att.variant}>{att.label}</Badge>}
                 </span>
                 <span className="dr-worker">
                   {d.bound_worker_id ? (
@@ -1235,6 +1338,79 @@ export default function Devices() {
                     <span className="dd-label">{t('devices.lastSeen')}</span>
                     <span>{d.last_seen ? d.last_seen.replace('T', ' ').slice(0, 19) : '—'}</span>
                   </div>
+                  {d.identity?.ak_public ? (
+                    <>
+                      <div className="devices-detail-item">
+                        <span className="dd-label">{t('devices.attest.identity')}</span>
+                        <span>
+                          {d.identity.ak_type === 'rsa2048'
+                            ? t('devices.attest.akRsa')
+                            : t('devices.attest.akEcc')}
+                        </span>
+                      </div>
+                      <div className="devices-detail-item">
+                        <span className="dd-label">{t('devices.attest.akFingerprint')}</span>
+                        <span className="td-mono" title={d.identity.ak_name}>
+                          {shortHex(d.identity.ak_name, 14, 8)}
+                        </span>
+                      </div>
+                      <div className="devices-detail-item">
+                        <span className="dd-label">{t('devices.attest.lastAttest')}</span>
+                        <span>{fmtTime(d.attestation?.last_at)}</span>
+                      </div>
+                      <div className="devices-detail-item">
+                        <span className="dd-label">{t('devices.attest.baseline')}</span>
+                        <span>{baselineText(d)}</span>
+                      </div>
+                      <div className="devices-detail-item">
+                        <span className="dd-label">{t('devices.attest.reason')}</span>
+                        <span className="td-mono">{d.attestation?.last_reason || '—'}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="devices-detail-item">
+                      <span className="dd-label">{t('devices.attest.identity')}</span>
+                      <span>{t('devices.attest.notRegistered')}</span>
+                    </div>
+                  )}
+                  {d.attestation?.state === 'mismatch' && (
+                    <div className="attest-alert">
+                      <span className="attest-alert-text">{t('devices.attest.pendingHint')}</span>
+                      <ConfirmAction
+                        trigger={
+                          <Button variant="danger">{t('devices.attest.approveBtn')}</Button>
+                        }
+                        message={t('devices.attest.approveMessage')}
+                        details={
+                          <div>
+                            <div className="confirm-digest-row">
+                              {t('devices.attest.digestCurrent')}:{' '}
+                              <span
+                                className="confirm-digest"
+                                title={d.pcr_baseline?.digest_sha256 || ''}
+                              >
+                                {shortHex(d.pcr_baseline?.digest_sha256, 16, 8)}
+                              </span>
+                            </div>
+                            <div className="confirm-digest-row">
+                              {t('devices.attest.digestPending')}:{' '}
+                              <span
+                                className="confirm-digest"
+                                title={d.attestation?.pending_digest || ''}
+                              >
+                                {shortHex(d.attestation?.pending_digest, 16, 8)}
+                              </span>
+                            </div>
+                          </div>
+                        }
+                        confirmLabel={t('devices.attest.approveConfirm')}
+                        onConfirm={() => handleApproveBaseline(d.mac)}
+                      />
+                    </div>
+                  )}
+                  {approveError?.mac === d.mac && (
+                    <span className="attest-error">{approveError.message}</span>
+                  )}
                   <div className="devices-detail bind-history-section">
                     <span className="dd-label">{t('devices.bindHistory')}</span>
                     {bindingsError ? (
@@ -1267,7 +1443,8 @@ export default function Devices() {
                 </div>
               )}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

@@ -1,7 +1,7 @@
 /* ===== 设备池列表 ===== */
 .devices-header {
   display: grid;
-  grid-template-columns: 170px 90px 140px 1fr 80px 150px;
+  grid-template-columns: 170px 90px 96px 140px 1fr 80px 150px;
   gap: 16px;
   padding: 12px 20px;
   background: var(--gray-25);
@@ -14,12 +14,12 @@
 }
 
 .devices-header-unbind {
-  grid-template-columns: 28px 170px 90px 140px 1fr 80px 150px;
+  grid-template-columns: 28px 170px 90px 96px 140px 1fr 80px 150px;
 }
 
 .devices-row {
   display: grid;
-  grid-template-columns: 170px 90px 140px 1fr 80px 150px;
+  grid-template-columns: 170px 90px 96px 140px 1fr 80px 150px;
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border-light);
@@ -37,7 +37,13 @@
 }
 
 .devices-row.dr-unbind {
-  grid-template-columns: 28px 170px 90px 140px 1fr 80px 150px;
+  grid-template-columns: 28px 170px 90px 96px 140px 1fr 80px 150px;
+}
+
+.dr-attest {
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .td-mono {
@@ -133,10 +139,73 @@
   white-space: nowrap;
 }
 
+/* ===== TPM 证明：汇总横幅、行内告警、审批摘要 ===== */
+.devices-attest-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--gray-800);
+  background: var(--gray-50);
+  font-size: 12px;
+  color: var(--gray-600);
+  line-height: 1.5;
+}
+
+.devices-attest-banner .btn {
+  flex-shrink: 0;
+}
+
+.attest-alert {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--gray-300);
+  background: var(--white);
+  font-size: 12px;
+  color: var(--gray-600);
+  line-height: 1.5;
+}
+
+.attest-alert-text {
+  min-width: 0;
+}
+
+.attest-alert .btn {
+  flex-shrink: 0;
+}
+
+.attest-error {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: #c0392b;
+}
+
+.confirm-digest {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.confirm-digest-row + .confirm-digest-row {
+  margin-top: 4px;
+}
+
 /* ===== 绑定记录（展开详情全宽区块） ===== */
 .bind-history-section {
   grid-column: 1 / -1;
   display: block;
+}
+
+.bind-history-section > .dd-label {
+  display: block;
+  margin-bottom: 6px;
 }
 
 .bind-history {
@@ -431,26 +500,30 @@
   color: var(--gray-600);
 }
 
-.reg-window-enforce {
+.enforce-control {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   margin-left: auto;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--gray-600);
-  cursor: pointer;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-light);
   white-space: nowrap;
 }
 
-.reg-window-enforce input {
-  accent-color: var(--gray-900);
-  cursor: pointer;
+/* 确认弹窗挂在控件内部：重置 nowrap，避免正文溢出弹窗 */
+.enforce-control .confirm-box {
+  white-space: normal;
 }
 
-.reg-window-enforce:has(input:disabled) {
-  opacity: 0.6;
-  cursor: not-allowed;
+.enforce-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-600);
+}
+
+.enforce-action {
+  padding: 4px 10px;
+  font-size: 11px;
 }
 
 .workers-toolbar-error {

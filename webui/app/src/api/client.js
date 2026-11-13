@@ -153,7 +153,7 @@ export function closeRegistrationWindow() {
 }
 
 export function getEnforcement() {
-  // 设备身份验签强制开关（过渡期兼容：关闭时无密钥设备照现状放行）
+  // TPM 证明强制开关（默认开启；关闭仅用于过渡/排障）
   return request('/settings/enforcement');
 }
 
@@ -430,6 +430,11 @@ export function bindDevice(mac, workerId, force = false) {
 
 export function unbindDevice(mac) {
   return request(`/devices/${encodeURIComponent(mac)}/bind`, { method: 'DELETE' });
+}
+
+export function approveDeviceBaseline(mac) {
+  // 批准设备最近一次证明上报的 PCR 摘要为新平台基线（固件/启动配置变更后使用）
+  return request(`/devices/${encodeURIComponent(mac)}/approve-baseline`, { method: 'POST' });
 }
 
 export function batchBindPreview(data) {
