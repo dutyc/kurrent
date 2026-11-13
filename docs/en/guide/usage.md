@@ -7,7 +7,7 @@
 Complete the six steps in order; their completion signals are:
 
 1. Verify the master image: a 4K-native GPT master exists under `diskDir` and appears in `GET /masters`.
-2. Admit the device: Devices shows `pooled` with the key claimed.
+2. Admit the device: Devices shows `pooled` with its AK claimed.
 3. Bind a Worker: the device and Worker are bound one-to-one.
 4. Create a system disk: the master clone is complete and `os_tag` exists; nvmet also issues the credential.
 5. Set the default disk: the Worker's default boot disk points at the target system.
@@ -66,24 +66,20 @@ api /settings/registration-window | jq
 
 If a window is already open, `POST` returns 409; inspect the current state, and close it before reopening if needed.
 
-On network boot the device runs: DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM) → `/devices/report` sends the fingerprint and public key.
+On network boot the device runs: DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → the TPM creates an AK on first use (the private key stays inside the TPM) → `/devices/report` sends the fingerprint, AK public key and name → each boot requests a nonce from `/devices/challenge`, quotes PCR 0/2/4/7 and submits the quote with `/boot-vars`.
 
 ```bash
-# Confirm the device is pooled and has claimed its key
+# Confirm the device is pooled and has claimed its AK
 api /devices | jq
 ```
 
-After every device has claimed its key, close the window and enable signature enforcement:
+After every device has claimed its AK, close the window. TPM attestation enforcement is on by default, so no extra step is needed:
 
 ```bash
 api /settings/registration-window -X DELETE
-
-# Enable only after every device has claimed its key
-api /settings/enforcement -X PUT \
-  -H 'Content-Type: application/json' -d '{"enabled": true}'
 ```
 
-> After the window closes, reports only refresh the fingerprint and never admit the device; there is no enrollment channel outside the window. With enforcement on, bound devices without a key, without a signature, or with an invalid signature are also refused. A revoked device does not recover merely by reporting again.
+> After the window closes, reports only refresh the fingerprint and never admit the device; there is no enrollment channel outside the window. TPM attestation enforcement is on by default, and bound devices without an AK, with an invalid quote, a replayed nonce or a PCR mismatch are refused; disable it only for migration or troubleshooting, and credentials are never injected in any mode. A revoked device does not recover merely by reporting again.
 
 ## 3. Bind a Worker
 

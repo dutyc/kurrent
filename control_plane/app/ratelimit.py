@@ -1,7 +1,7 @@
 """匿名引导端点限速（/devices/report 与 /devices/challenge）。
 
 滑动窗口 + 进程内计数：控制面是单实例，重启即清空。用途是抑制扫描、放大与无意义
-的公钥喷洒（两个端点都不鉴权），不作为身份或安全边界。计数按来源 IP（nginx 对这两
+的无效 AK/quote 喷洒（两个端点都不鉴权），不作为身份或安全边界。计数按来源 IP（nginx 对这两
 个 location 覆盖写入 X-Real-IP，因此不能被客户端伪造）。
 
 阈值可用 KURRENT_CP_RATE_LIMIT_REPORT / _CHALLENGE 覆盖（每分钟次数，<=0 关闭）。

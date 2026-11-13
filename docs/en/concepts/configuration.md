@@ -178,7 +178,7 @@ These environment variables temporarily override background parameters from the 
 | Variable | Override |
 | --- | --- |
 | `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` | Credential push reconciliation period (seconds) |
-| `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` | DHHC-1 scheduled rotation days |
+| `KURRENT_CP_CREDENTIAL_ROTATION_HOURS` | DHHC-1 scheduled rotation period (hours) |
 | `KURRENT_CP_CRL_REFRESH_INTERVAL` | CRL re-sign period (seconds) |
 
 The declaration is the default source; environment variables are for testing and troubleshooting. Production should keep stable values in the declaration so runtime state does not diverge from it.

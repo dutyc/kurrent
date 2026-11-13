@@ -36,6 +36,7 @@ const zhSidebar = [
     items: [
       { text: '固件概述', link: '/firmware/' },
       { text: '固件构建与部署', link: '/firmware/build-deploy' },
+      { text: 'Secure Boot 引导', link: '/firmware/secure-boot' },
     ],
   },
   {
@@ -100,6 +101,7 @@ const enSidebar = [
     items: [
       { text: 'Firmware Overview', link: '/en/firmware/' },
       { text: 'Firmware Build and Deployment', link: '/en/firmware/build-deploy' },
+      { text: 'Secure Boot', link: '/en/firmware/secure-boot' },
     ],
   },
   {

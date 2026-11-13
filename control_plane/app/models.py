@@ -174,8 +174,8 @@ class OpenRegistrationWindowRequest(BaseModel):
 
 
 class SetEnforcementRequest(BaseModel):
-    """切换设备身份验签强制开关（2026-08-21 裁定：显式强制开关）。
-    enabled=true 后，无 key_hash 设备的 /boot-vars 请求直接拒绝下发（注入四条件第 4 条硬性）。"""
+    """切换 TPM 证明强制开关（2026-08-21 裁定：显式强制开关）。
+    enabled=true 后，无 AK 设备的 /boot-vars 请求直接拒绝下发（注入四条件第 4 条硬性）。"""
     enabled: bool
 
 

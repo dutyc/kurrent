@@ -12,7 +12,7 @@ Kurrent splits the compute side into three independent entities. Each has its ow
 
 ## Device
 
-A device represents a physical machine. On its first network boot, firmware reports an 11-field fingerprint (MAC, UUID, SMBIOS, CPU, memory, NIC and others) and the device public key; the control plane records it under the MAC.
+A device represents a physical machine. On its first network boot, firmware reports an 11-field fingerprint (MAC, UUID, SMBIOS, CPU, memory, NIC and others) and its TPM AK public key; the control plane records it under the MAC.
 
 A device record contains:
 
@@ -22,7 +22,9 @@ A device record contains:
 | `uuid` / `fingerprint` | Reported hardware information for identification and audit |
 | `state` | `pooled` / `bound` / `revoked` |
 | `bound_worker_id` | Bound Worker; empty when unbound |
-| Public-key hash | Digest of the device identity key, used for admission when signature enforcement is on |
+| `identity` | TPM 2.0 AK public key, name and algorithm; claimed via TOFU during the registration window and not replaceable online |
+| `pcr_baseline` | Platform baseline digest for PCR 0/2/4/7 and its recording time; recorded on the first successful attestation |
+| `attestation` | `state` (`unproven` / `proven` / `mismatch`), last attestation time and reason code |
 | `source` | `ipxe` (automatic report) or `manual` (manual registration/import) |
 
 Lifecycle:
@@ -34,7 +36,7 @@ pooled ──bind──► bound ──revoke──► revoked
 ```
 
 - **Registration is not authorization.** Entering the pool only means "this machine has been seen"; it grants no boot rights. Only after binding to a Worker does the device become that Worker's booting node.
-- Automatic admission happens only while the registration window is open and the report carries a valid public key; once closed, reports only update fingerprints and add no entries. Manual registration and purging revoked entries are not limited by the window.
+- Automatic admission happens only while the registration window is open and the report carries a valid AK; once closed, reports only update fingerprints and add no entries. Manual registration and purging revoked entries are not limited by the window.
 - `revoked` devices no longer accept reports; the dnsmasq binding file receives `MAC,ignore`, so a revoked device gets no lease.
 
 ## Worker
@@ -107,7 +109,7 @@ Rebinding device A to device B is a cold migration:
 1. Confirm B is registered with a device identity key, and the target Worker's credentials are effective on the storage node.
 2. Power off or isolate A; live migration and data-plane fencing are not provided.
 3. Rebind B on the Devices page; the system disk and Worker identity stay unchanged.
-4. B boots, passes challenge-response and receives the connection information for the same disk.
+4. B boots, passes TPM attestation and receives the connection information for the same disk.
 
 The same path works in reverse; there is no automated orchestration yet.
 

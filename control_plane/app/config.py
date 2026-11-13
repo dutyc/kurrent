@@ -126,7 +126,7 @@ class Settings:
 
     测试重定向 DEFAULT_* 常量或替换 KURRENT_CONFIG_FILE 后无需重建实例即生效。
     两个凭据后台参数保留 env 覆盖（KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL /
-    KURRENT_CP_CREDENTIAL_ROTATION_DAYS），供测试与临时运维；声明值是缺省来源。
+    KURRENT_CP_CREDENTIAL_ROTATION_HOURS），供测试与临时运维；声明值是缺省来源。
     """
 
     def __getattr__(self, name: str):
@@ -149,17 +149,23 @@ class Settings:
                 return float(raw)
             except ValueError:
                 return float(CONFIG.spec.credentials.reconcile_interval_seconds)
-        if name == "credential_rotation_days":
-            raw = os.getenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS")
+        if name == "credential_rotation_hours":
+            raw = os.getenv("KURRENT_CP_CREDENTIAL_ROTATION_HOURS")
             if raw is None:
-                return float(CONFIG.spec.credentials.rotation_days)
+                return float(CONFIG.spec.credentials.rotation_hours)
             try:
                 return float(raw)
             except ValueError:
-                return float(CONFIG.spec.credentials.rotation_days)
+                return float(CONFIG.spec.credentials.rotation_hours)
         if name == "insecure":
             # 开发模式开关（唯一放行口；生产严禁）：KURRENT_CP_INSECURE=1 显式开启
             return os.getenv("KURRENT_CP_INSECURE", "") == "1"
+        if name == "boot_https_port":
+            # Secure Boot 引导端点端口（nginx 4443）；仅用于资产状态展示。
+            try:
+                return int(os.getenv("KURRENT_BOOT_HTTPS_PORT", "4443"))
+            except ValueError:
+                return 4443
         if name == "openapi_enabled":
             # 交互式 API 文档默认关闭（避免未鉴权枚举接口）；开发环境显式开启
             return os.getenv("KURRENT_CP_OPENAPI", "") == "1"

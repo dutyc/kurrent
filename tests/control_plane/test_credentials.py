@@ -459,13 +459,14 @@ def test_boot_vars_hostname_only_withholds_credentials(
     assert "nbft_tls_psk" not in res.text
 
 
-def test_boot_vars_transitional_omits_secret_for_non_nvmet(
+def test_boot_vars_disabled_omits_secret_for_non_nvmet(
     client, auth_headers, register_claimed_device, mock_agent_client,
 ):
-    """过渡期允许下发菜单变量，但未验签请求仍不得注入 CHAP 密钥。"""
+    """显式关闭验签强制时允许下发菜单变量，但未验签请求仍不得注入 CHAP 密钥。"""
     _setup_worker_with_disk(
         client, auth_headers, register_claimed_device, mock_agent_client, backend="stgt",
     )
+    client.put("/settings/enforcement", json={"enabled": False}, headers=auth_headers)
 
     res = client.get("/boot-vars", params={"mac": MAC_A, "hostname": "worker-01"})
     assert res.status_code == 200

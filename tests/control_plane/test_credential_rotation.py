@@ -27,8 +27,8 @@ def _ok_push(w, s, subs, hosts, tls_psk=None):
 
 
 def _setup(client, auth_headers, worker_id: str = "worker-01", secret: str | None = None,
-           age_days: float = 100) -> str:
-    """注册 agent + worker + 一块盘 + 凭据；把密钥时间戳回拨 age_days 天。"""
+           age_hours: float = 2400) -> str:
+    """注册 agent + worker + 一块盘 + 凭据；把密钥时间戳回拨 age_hours 小时。"""
     assert client.post("/agents", json=AGENT_BODY, headers=auth_headers).status_code == 201
     client.post("/workers", json={"worker_id": worker_id}, headers=auth_headers)
     assert client.post(f"/workers/{worker_id}/luns/disk", json={
@@ -38,13 +38,13 @@ def _setup(client, auth_headers, worker_id: str = "worker-01", secret: str | Non
     res = client.put(f"/workers/{worker_id}/credential", json={"secret": secret},
                      headers=auth_headers)
     assert res.status_code == 200, res.text
-    _backdate(worker_id, age_days)
+    _backdate(worker_id, age_hours)
     return secret
 
 
-def _backdate(worker_id: str, age_days: float) -> None:
+def _backdate(worker_id: str, age_hours: float) -> None:
     data = yaml.safe_load(settings.credentials_file.read_text(encoding="utf-8"))
-    stamp = (dt.datetime.now().astimezone() - dt.timedelta(days=age_days)).isoformat()
+    stamp = (dt.datetime.now().astimezone() - dt.timedelta(hours=age_hours)).isoformat()
     entry = data["credentials"][worker_id]
     entry["created_at"] = stamp
     entry["updated_at"] = stamp
@@ -76,7 +76,7 @@ def test_rotation_replaces_due_secret(client, auth_headers, mock_agent_client):
 
 
 def test_rotation_skips_fresh_secret(client, auth_headers, mock_agent_client):
-    _setup(client, auth_headers, age_days=1)
+    _setup(client, auth_headers, age_hours=1)
     pushes = []
     mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 0}
@@ -139,7 +139,7 @@ def test_rotation_skips_without_nvmet_targets(client, auth_headers, mock_agent_c
     client.post("/workers", json={"worker_id": "worker-x"}, headers=auth_headers)
     client.put("/workers/worker-x/credential", json={"secret": make_secret()},
                headers=auth_headers)
-    _backdate("worker-x", 200)
+    _backdate("worker-x", 4800)
     pushes = []
     mock_agent_client.set_credential = lambda w, s, subs, hosts, tls_psk=None, generation=0: pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk)
     assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 1}
@@ -150,5 +150,35 @@ def test_rotation_skips_without_nvmet_targets(client, auth_headers, mock_agent_c
 
 def test_rotation_disabled_when_period_zero(client, auth_headers, mock_agent_client, monkeypatch):
     _setup(client, auth_headers)
-    monkeypatch.setenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS", "0")
+    monkeypatch.setenv("KURRENT_CP_CREDENTIAL_ROTATION_HOURS", "0")
     assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 0}
+
+
+def test_rotation_period_in_hours(client, auth_headers, mock_agent_client, monkeypatch):
+    """周期按小时判定：2 小时周期下 1 小时未到期，3 小时到期。"""
+    pushes = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk))
+    monkeypatch.setenv("KURRENT_CP_CREDENTIAL_ROTATION_HOURS", "2")
+    _setup(client, auth_headers, age_hours=1)
+    pushes.clear()
+    assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 0}
+    _backdate("worker-01", 3)
+    assert rotate_due_credentials() == {"rotated": 1, "failed": 0, "skipped": 0}
+    assert len(pushes) == 1
+
+
+def test_rotation_boundary_at_default_period(client, auth_headers, mock_agent_client):
+    """默认 24 小时周期：23.5 小时未到期，24.5 小时到期。"""
+    pushes = []
+    mock_agent_client.set_credential = (
+        lambda w, s, subs, hosts, tls_psk=None, generation=0:
+        pushes.append(s) or _ok_push(w, s, subs, hosts, tls_psk))
+    _setup(client, auth_headers, age_hours=23.5)
+    pushes.clear()
+    assert rotate_due_credentials() == {"rotated": 0, "failed": 0, "skipped": 0}
+    assert pushes == []
+    _backdate("worker-01", 24.5)
+    assert rotate_due_credentials() == {"rotated": 1, "failed": 0, "skipped": 0}
+    assert len(pushes) == 1

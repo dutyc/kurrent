@@ -122,11 +122,11 @@ kurrent workers credential set worker-01 --generate  # 轮换（不打印明文�
 kurrent workers credential revoke worker-01        # 吊销：下次引导被拒绝
 ```
 
-nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。推送失败由后台对账重试；`spec.credentials.reconcileIntervalSeconds` 控制周期，`rotationDays` 控制定期轮换。
+nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。推送失败由后台对账重试；`spec.credentials.reconcileIntervalSeconds` 控制周期，`rotationHours` 控制定期轮换（默认 24 小时，吊销是主要处置手段）。
 
 ## 设备与 Worker 生命周期
 
-- **注册新设备**：WebUI → Devices → 开启注册窗口；仅窗口期内、带有效公钥的设备入池。
+- **注册新设备**：WebUI → Devices → 开启注册窗口；仅窗口期内、带有效 TPM AK 的设备入池。
 - **绑定**：Devices / Workers 页；设备与 Worker 一对一；已绑定设备需显式换绑。
 - **换绑（冷迁移）**：Devices 页 `force` 换绑；新绑定落盘后清旧绑定；系统盘留在原 Worker。
 - **解绑**：Devices 页；设备回池，Worker 保留系统盘。

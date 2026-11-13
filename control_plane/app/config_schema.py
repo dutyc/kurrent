@@ -211,7 +211,7 @@ class CredentialsSpec(BaseModel):
     """spec.credentials：DHHC-1 轮换与推送对账（0 = 关闭对应后台任务）。"""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    rotation_days: float = Field(90, alias="rotationDays", ge=0, le=3650)
+    rotation_hours: float = Field(24, alias="rotationHours", ge=0, le=8760)
     reconcile_interval_seconds: float = Field(
         60, alias="reconcileIntervalSeconds", ge=0, le=86400)
 

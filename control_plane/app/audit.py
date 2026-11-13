@@ -239,7 +239,7 @@ def note_auth_failure(client_ip: str, *, route: str, reason: str,
 
 def boot_credential_observed(*, injected: bool, verified: bool,
                              worker_id: str, mac: str) -> None:
-    """第 1 条：凭据已注入但验签未通过（目标架构下应恒为零）。"""
+    """第 1 条：凭据已注入但证明未通过（目标架构下应恒为零）。"""
     if injected and not verified:
         alarm("boot_credential_unverified", detail="injected=true verified=false",
               principal=worker_id or mac, mac=mac)

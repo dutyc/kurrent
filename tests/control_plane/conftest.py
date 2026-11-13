@@ -1,6 +1,6 @@
-"""控制面单测夹具：TestClient + 每用例状态隔离 + ECDSA 测试密钥与高层场景。"""
+"""控制面单测夹具：TestClient + 每用例状态隔离 + TPM 身份与高层场景。"""
 
-import base64
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -55,32 +55,69 @@ def auth_headers():
     return {"Authorization": f"Bearer {TEST_TOKEN}"}
 
 
-@pytest.fixture()
-def ec_keypair():
-    """ECDSA P-256 测试密钥对：pubkey_hex（未压缩点 130 hex 契约）+ sign(mac, nonce)。
+def _tpm2b(payload: bytes) -> bytes:
+    return len(payload).to_bytes(2, "big") + payload
 
-    签名数据 = nonce||mac（UTF-8 字节拼接），输出 base64(DER)，与控制面验签契约一致。
+
+def build_quote(extra_data: bytes, digest: bytes) -> bytes:
+    """按 TPMS_ATTEST 构造 quote（PCR 0/2/4/7，SHA-256）。"""
+    bitmap = bytes([0x95, 0x00, 0x00])
+    body = (0xFF544347).to_bytes(4, "big") + (0x8018).to_bytes(2, "big")
+    body += _tpm2b(b"\x00\x0b" + b"\xaa" * 32)
+    body += _tpm2b(extra_data)
+    body += bytes(17)
+    body += (0).to_bytes(8, "big")
+    body += (1).to_bytes(4, "big")
+    body += (0x000B).to_bytes(2, "big") + bytes([len(bitmap)]) + bitmap
+    body += _tpm2b(digest)
+    return body
+
+
+@pytest.fixture()
+def tpm_identity():
+    """TPM AK 测试身份：SPKI 公钥 + TPM2B_NAME + 按 TPM 2.0 结构构造的 quote 签名。
+
+    quote 用真实 ECDSA 密钥签名，结构按 TPMS_ATTEST 逐字节构造；真实 TPM 的端到端
+    验证在 swtpm 环境单独进行。
     """
     priv = ec.generate_private_key(ec.SECP256R1())
-    pubkey_hex = priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint).hex()
+    ak_public = priv.public_key().public_bytes(
+        Encoding.DER, PublicFormat.SubjectPublicKeyInfo).hex()
+    ak_name = (b"\x00\x0b" + hashlib.sha256(bytes.fromhex(ak_public)).digest()).hex()
+    default_digest = "ab" * 32
 
-    def sign(mac: str, nonce: str) -> str:
-        data = f"{nonce}{mac}".encode("utf-8")
-        return base64.b64encode(priv.sign(data, ec.ECDSA(hashes.SHA256()))).decode()
+    def quote(nonce: str, digest: str = default_digest) -> dict:
+        blob = build_quote(nonce.encode(), bytes.fromhex(digest))
+        signature = priv.sign(blob, ec.ECDSA(hashes.SHA256()))
+        return {"quote": blob.hex(), "quote_sig": signature.hex(), "pcr_digest": digest}
 
-    return {"pubkey_hex": pubkey_hex, "sign": sign}
+    return {
+        "ak_public": ak_public,
+        "ak_name": ak_name,
+        "ak_type": "ecc_p256",
+        "digest": default_digest,
+        "quote": quote,
+        "report_params": {
+            "ak_public": ak_public,
+            "ak_name": ak_name,
+            "ak_type": "ecc_p256",
+            "sb": "1",
+        },
+    }
 
 
 @pytest.fixture()
-def signed_boot_vars(client, ec_keypair):
-    """按真实引导链取 nonce → 私钥签名 → 请求 /boot-vars（凭据注入必须验签）。"""
-    def _get(mac: str, hostname: str | None = None, format_: str = "ipxe"):
+def signed_boot_vars(client, tpm_identity):
+    """按真实引导链取 nonce → TPM quote 签名 → 请求 /boot-vars（凭据注入必须验签）。"""
+    def _get(mac: str, hostname: str | None = None, format_: str = "ipxe",
+             digest: str | None = None):
         res = client.get("/devices/challenge", params={"mac": mac})
         assert res.status_code == 200, res.text
         nonce = next(l[len("set nonce "):] for l in res.text.splitlines()
                      if l.startswith("set nonce "))
-        sig = ec_keypair["sign"](mac, nonce)
-        params = {"mac": mac, "nonce": nonce, "sig": sig, "format": format_}
+        signed = tpm_identity["quote"](nonce, digest or tpm_identity["digest"])
+        params = {"mac": mac, "nonce": nonce, "quote": signed["quote"],
+                  "quote_sig": signed["quote_sig"], "format": format_}
         if hostname:
             params["hostname"] = hostname
         return client.get("/boot-vars", params=params)
@@ -88,20 +125,18 @@ def signed_boot_vars(client, ec_keypair):
 
 
 @pytest.fixture()
-def register_claimed_device(client, auth_headers, ec_keypair):
-    """高层场景：开注册窗口 → report 上报（带测试公钥）→ 设备认领入池。
-
-    返回 (mac, device_record)，device_record 含 key_hash/pubkey_hash（认领后）。
-    """
+def register_claimed_device(client, auth_headers, tpm_identity):
+    """高层场景：开注册窗口 → report 上报（带 TPM AK）→ 设备认领入池。"""
     def _register(mac: str) -> dict:
         res = client.post("/settings/registration-window", json={"ttl_minutes": 30}, headers=auth_headers)
         assert res.status_code == 201
-        res = client.get("/devices/report", params={"mac": mac, "pubkey": ec_keypair["pubkey_hex"]})
+        res = client.get("/devices/report",
+                         params={"mac": mac, **tpm_identity["report_params"]})
         assert res.status_code == 200
         dev = client.get(f"/devices/{mac}", headers=auth_headers)
         assert dev.status_code == 200
         assert dev.json()["state"] == "pooled"
-        assert dev.json()["key_hash"] == ec_keypair["pubkey_hex"]
+        assert dev.json()["identity"]["ak_public"] == tpm_identity["ak_public"]
         return dev.json()
     return _register
 

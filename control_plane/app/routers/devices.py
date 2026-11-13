@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, Query, Request
 
+from ..attestation import PCR_SELECTION
 from ..auth import authenticate, authorize_request
 from ..models import BatchBindRequest, BindPair, CreateDeviceRequest, ImportDevicesRequest
 from ..stores import dnsmasq, devices, record, store
@@ -65,7 +66,8 @@ def create_device(req: CreateDeviceRequest, request: Request):
             "uuid": clean_str(req.uuid),
             "state": "pooled",
             "bound_worker_id": None,
-            "key_hash": None,
+            "identity": None,
+            "attestation": {"state": "unproven", "last_at": None, "last_reason": None},
             "source": "manual",
             "fingerprint": {k: v for k, v in {
                 "manufacturer": clean_str(req.manufacturer),
@@ -110,7 +112,8 @@ def import_devices(req: ImportDevicesRequest, request: Request):
                 "uuid": clean_str(entry.uuid),
                 "state": "pooled",
                 "bound_worker_id": None,
-                "key_hash": None,
+                "identity": None,
+                "attestation": {"state": "unproven", "last_at": None, "last_reason": None},
                 "source": "manual",
                 "fingerprint": {k: v for k, v in {
                     "manufacturer": clean_str(entry.manufacturer),
@@ -365,6 +368,42 @@ def revoke_device(mac: str, request: Request):
     return copy.deepcopy(record_)
 
 
+@router.post("/devices/{mac}/approve-baseline")
+def approve_device_baseline(mac: str, request: Request):
+    """批准设备最近一次证明上报的 PCR 基线（管理员动作）。
+
+    固件或启动配置变化后，证明会因 pcr_mismatch 被拒并留下待批摘要；管理员核对变更后
+    批准，该摘要写为新的平台基线，设备下次启动重新证明。
+    """
+    mac = canonical_mac(mac)
+    with devices.locked():
+        data = devices.load()
+        device = data["devices"].get(mac)
+        if not device:
+            raise HTTPException(404, f"device not found: {mac}")
+        if device.get("state") == "revoked":
+            raise HTTPException(403, "device revoked")
+        attestation = device.get("attestation") or {}
+        pending = attestation.get("pending_digest")
+        if not pending:
+            raise HTTPException(409, "no pending PCR baseline to approve")
+        device["pcr_baseline"] = {
+            "selection": list(PCR_SELECTION),
+            "digest_sha256": pending,
+            "recorded_at": now_iso(),
+        }
+        device["attestation"] = {
+            "state": "unproven",
+            "last_at": attestation.get("last_at"),
+            "last_reason": "baseline_approved",
+        }
+        devices.save(data)
+        approved = copy.deepcopy(device)
+    record("device.pcr_baseline.approve", "ok", mac=mac,
+           digest=pending, client=client_host(request))
+    return approved
+
+
 def _device_record(mac: str) -> dict[str, Any]:
     """设备台账记录投影（含 mac 字段）。"""
     data = devices.load()
@@ -590,7 +629,8 @@ def migrate_legacy_devices() -> None:
                     "uuid": None,
                     "state": "bound",
                     "bound_worker_id": worker_id,
-                    "key_hash": None,
+                    "identity": None,
+                    "attestation": {"state": "unproven", "last_at": None, "last_reason": None},
                     "source": "manual",
                     "fingerprint": {},
                     "first_seen": now_iso(),

@@ -55,9 +55,9 @@
 ## 引导链路
 
 1. 设备通电 → DHCP（dnsmasq）→ TFTP 下载 iPXE 与 `boot.ipxe` 指针 → iPXE 启动，经 HTTPS 取回 `boot.ipxe.cfg`
-2. **设备身份**：`keygen` 首次生成 ECDSA P-256 私钥（持久化在 EFI NVRAM，不出机器）→ `pubkey` → `/devices/report` 上报指纹与公钥；未知 MAC **仅在注册窗口开启且带有效公钥时**入池
-3. **挑战-响应**：`/devices/challenge` 取一次性 nonce → `sign <nonce><mac>` → `/boot-vars?…&sig=`
-4. **`/boot-vars` 准入**：识别命中（MAC 经设备台账反查；未传 MAC 或台账未命中时用 hostname 兜底）→ **绑定即认证**（请求 MAC 必须属于命中 Worker 的绑定设备）→ 身份验签（强制开关开启时，无密钥 / 无签名 / 验签失败一律拒绝）→ 密钥库有条目才注入凭据（**nvmet 节点上，建系统盘时即自动签发**）；全部通过才投影 root-path、NQN 与密钥
+2. **设备身份**：`akgen` 在 TPM 内创建 AK（私钥不可导出）→ `akpub` 导出公钥与名称 → `/devices/report` 上报指纹、AK 与 Secure Boot 状态；未知 MAC **仅在注册窗口开启、携带有效 AK 且 Secure Boot 开启时**入池
+3. **挑战-证明**：`/devices/challenge` 取一次性 nonce → `quote ${nonce}` 对 PCR 0/2/4/7 生成 SHA-256 quote → `/boot-vars?…&quote=&quote_sig=`
+4. **`/boot-vars` 准入**：识别命中（MAC 经设备台账反查；未传 MAC 或台账未命中时用 hostname 兜底）→ **绑定即认证**（请求 MAC 必须属于命中 Worker 的绑定设备）→ TPM 证明（强制默认开启，无 AK / quote 无效 / nonce 重放 / PCR 与基线不符一律拒绝）→ 密钥库有条目才注入凭据（**nvmet 节点上，建系统盘时即自动签发**）；全部通过才投影 root-path、NQN 与密钥
 5. 池中未绑定设备：reboot 循环等待绑定
 6. **连接数据面**：root-path 为 `nvme://<storager>:4421/<盘 NQN>?secret=…&tls_psk=…&tls_trsvcid=4421`，以 **DH-HMAC-CHAP** 完成连接控制、以 **TLS 1.3** 完成传输加密；密钥按 Worker 跟盘、仅随本次引导会话存活，不落盘
 7. **交接给 OS**：固件在 sanboot 时安装 **NBCT** 凭据表（自定义 ACPI 表，iBFT 式注册，每条记录含 traddr / trsvcid / nqn / hostnqn / secret，控制面已下发时还带 TLS PSK 与 TLS 端口）；initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **NBCT**（凭据与 hostnqn 身份中继），带 PSK 时以 `--tls` 连 TLS 端口重连，并挂载根文件系统
@@ -87,9 +87,10 @@
 
 **② 设备身份信任根**——引导链上的设备认证：
 
-- 私钥在设备 NVRAM 内生成并持久化（ECDSA P-256），指纹上报不鉴权，但只喂设备池、不产生任何权限
-- 挑战-响应验签（nonce 一次性、绑定 MAC）证明"这台机器确实是它"；密钥轮换（`POST /devices/rotate`）用旧密钥签名 `rotate‖mac‖new_pubkey‖nonce`，成功后旧密钥立即失效；`report` / `challenge` / `boot-vars` 按来源 IP 限速（`boot-vars` 是最贵的验签路径）
-- TOFU 单锚：服务器自签证书的指纹在首次握手时落到设备 NVRAM，其后任何校验失败即中止
+- AK 在 TPM 内创建并持久化，私钥不可导出；指纹上报不鉴权，但只喂设备池、不产生任何权限
+- 挑战-证明（nonce 一次性、绑定 MAC、PCR 0/2/4/7 与平台基线）证明启动配置未漂移；AK 不可在线轮换，恢复走删除登记后重新入池；`report` / `challenge` / `boot-vars` 按来源 IP 限速（`boot-vars` 是最贵的证明路径）
+- 首跳依赖 Secure Boot 验证签名固件；设备入池要求 Secure Boot 开启
+- boot CA 单锚：构建时嵌入签名固件，引导 HTTPS 只接受该 CA 签发的证书，不回落首次连接信任
 - **绑定即认证**：`/boot-vars` 校验请求 MAC 是否属于命中 Worker 的绑定设备，防止其他设备冒领引导身份
 
 **认证 ≠ 加密——两者是彼此独立的层**：DH-HMAC-CHAP 回答"谁能连"，本身不保护数据面内容。内容保护由**数据面端口上的 TLS 1.3**承担（`4421`，`tsas=tls1.3`、`treq=required`），固件段与内核段共用该口：固件自己完成 TLS 1.3 PSK 握手，内核/initramfs 随后在同一端口以 `--tls` 重连（PSK 由 NBCT 表交接）。预共享密钥是**认证密钥的纯函数**（HMAC-SHA256，域分离派生）：不新增存储字段，因此轮换或吊销认证密钥即原子地轮换/吊销 PSK。存储节点侧由控制面推送落到内核全局 `.nvme` keyring。加密是默认行为且**无明文回退**：已无第二个端口可退，故数据面端口未就绪或密钥缺失时，控制面拒绝下发引导变量（记审计），`menu.ipxe` 同样 `goto failed`，不再拼明文 URI。

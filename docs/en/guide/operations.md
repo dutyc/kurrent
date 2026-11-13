@@ -126,11 +126,11 @@ kurrent workers credential set worker-01 --generate  # rotate without printing p
 kurrent workers credential revoke worker-01        # revoke: the next boot is refused
 ```
 
-The nvmet backend issues the credential at disk creation; these commands are for explicit rotation and revocation. Failed pushes are retried by background reconciliation; `spec.credentials.reconcileIntervalSeconds` controls the period and `rotationDays` controls scheduled rotation.
+The nvmet backend issues the credential at disk creation; these commands are for explicit rotation and revocation. Failed pushes are retried by background reconciliation; `spec.credentials.reconcileIntervalSeconds` controls the period and `rotationHours` controls scheduled rotation (default 24 hours; revocation is the primary remedy).
 
 ## Device and Worker Lifecycle
 
-- **Register a device** — WebUI → Devices → open registration window; only devices with a valid public key are admitted while the window is open.
+- **Register a device** — WebUI → Devices → open registration window; only devices with a valid TPM AK are admitted while the window is open.
 - **Bind** — Devices / Workers page; one-to-one; an already-bound device needs an explicit rebind.
 - **Rebind (cold migration)** — Devices page with `force`; new binding is written before the old one is cleared; system disks stay on the original Worker.
 - **Unbind** — Devices page; the device returns to the pool; the Worker keeps its system disks.

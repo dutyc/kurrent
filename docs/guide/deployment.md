@@ -12,12 +12,13 @@
 
 ### 网络规划
 
-控制面需要两条可达路径：
+控制面需要三条可达路径：
 
 - **管理面**：管理员浏览器与存储节点访问 443；控制面用这个地址签发 token、访问 Agent。
 - **引导面**：裸机设备访问 DHCP（67/UDP）与 TFTP（69/UDP）；`spec.networking.interface` 绑定这一侧，该接口必须持有 PXE 子网内的地址。
+- **引导 HTTPS**：设备访问 4443 上报、取挑战与引导变量；端口由 `KURRENT_BOOT_HTTPS_PORT` 调整，证书由独立 boot CA 签发，只向引导网段放通，见 [Secure Boot 引导](../firmware/secure-boot.md)。
 
-推荐用两张网卡或 VLAN 子接口把两侧分开。单网卡同时承载管理面与引导面时，PXE 网段必须独立隔离，不能与办公网混跑。引导客户端必须能路由到存储节点的 **4421** 数据面端口；跨网段时在路由与防火墙上显式放通。
+推荐用两张网卡或 VLAN 子接口把引导面与其他路径分开。单网卡同时承载管理面与引导面时，PXE 网段必须独立隔离，不能与办公网混跑。引导客户端必须能路由到存储节点的 **4421** 数据面端口；跨网段时在路由与防火墙上显式放通。
 
 按实际环境替换：
 
@@ -30,7 +31,7 @@
 - 存储数据面地址 `192.168.1.20`（或独立数据 IP）：客户端访问 4421，必须客户端可达
 - 存储节点主机名 `storage-01`：任意；节点身份由控制面在签发引导 token 时分配、join 写入状态文件，与主机名解耦
 
-端口与监听边界见[架构总览](../architecture/index.md#端口)与[部署前置参考](../reference/host-prerequisites.md#网络与端口)。控制面管理面不发布 TCP 端口；443 的引导链只反代三个引导端点，其余 `/devices/*` 管理接口不对外暴露。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
+端口与监听边界见[架构总览](../architecture/index.md#端口)与[部署前置参考](../reference/host-prerequisites.md#网络与端口)。控制面管理面不发布 TCP 端口；443 兼作管理与引导入口，4443 只反代三个引导端点（`/boot-vars`、`/devices/report`、`/devices/challenge`），其余路径直接 404。控制面交互式 API 文档（`/openapi.json`、`/docs`）默认关闭，仅调试时以 `KURRENT_CP_OPENAPI=1` 开启。
 
 ### 仓库与 CLI
 
@@ -109,13 +110,15 @@ sudo mount /dev/sdb /pool1
 
 ### 引导网络边界
 
-引导链的第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有可用的密码学锚：设备固件不会验证这段内容，iPXE 也尚未拿到控制面证书。部署必须把**引导网段本身作为信任边界**：
+引导链的第一跳（DHCP → TFTP `snponly.efi`）由 UEFI Secure Boot 校验：TFTP 交付的必须是用站点证书签名、且该证书已预置到目标机 `db` 的镜像；静态脚本、boot CA 与控制面地址都嵌在这个签名二进制里。之后的引导 HTTPS 只信任该 boot CA，不使用首次连接信任。
 
-- PXE 网段为独立 VLAN 或独立物理口，控制面是该网段唯一提供 DHCP 与 TFTP 的主机。
+引导网段仍要按隔离区部署，因为它决定设备能否被引导，也决定能否被拖入拒绝服务：
+
+- PXE 网段为独立 VLAN 或独立物理口，控制面是该网段唯一提供 DHCP、TFTP 与 4443 的主机。
 - 接入交换机启用 DHCP snooping（仅控制面上联口为 trusted）、Dynamic ARP Inspection、RA guard 与端口安全；有条件时用 802.1X 或 MAB 限定可接入端口。
 - 注册窗口按需开启并设放行额度，用后关闭；TFTP 根只挂载 `snponly.efi` 与 `boot.ipxe`。
 
-完整的威胁模型、残余风险与部署检查清单见[安全模型](../architecture/security.md#部署检查清单)。
+伪 DHCP/ARP 仍能让设备停住或反复重试，但不能让它执行未签名代码或连接非授权的引导服务器。完整的威胁模型、残余风险与部署检查清单见[安全模型](../architecture/security.md#部署检查清单)。
 
 ## 第 1 步：控制面服务器
 
@@ -360,28 +363,36 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ### 3.1 安装固件产物
 
-主仓库不包含固件二进制。设备固件由配套仓库 [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) 构建；使用与当前上游基线匹配的发布产物，或按[固件构建与部署](../firmware/build-deploy.md)自行构建。
+主仓库不包含固件二进制。设备固件由配套仓库 [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) 构建；本平台只接受签名产物，构建入口是固件仓的 `build/build-sb.sh`，完整输入、预置与复核步骤见 [Secure Boot 引导](../firmware/secure-boot.md)。
 
-设备只支持 x86_64 UEFI 引导，传统 BIOS（Legacy/CSM）不再支持；其余设备前提见[部署前置](../reference/host-prerequisites.md#主机角色)。
+设备只支持 x86_64 UEFI 引导，传统 BIOS（Legacy/CSM）不再支持；目标机必须开启 Secure Boot，并在 `db` 中预置站点签名证书。其余设备前提见[部署前置](../reference/host-prerequisites.md#主机角色)。
 
 ```bash
-mkdir -p /tmp/kurrent-fw/pxe-uefi && cd /tmp/kurrent-fw
-BASE=https://github.com/dutyc/kurrent-firmware/releases/latest/download
-curl -sLO "$BASE/SHA256SUMS"
-curl -sL -o pxe-uefi/snponly.efi "$BASE/pxe-uefi-snponly.efi"
-sha256sum -c SHA256SUMS --ignore-missing
+# 固件仓：boot CA 由控制面首次启动时生成，作为固定信任锚嵌入固件
+SB_KEY=/path/to/artifact-signing.key \
+SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 \
+./build/build-sb.sh
+```
 
-# 放回主仓库的 TFTP 根；替换后重启 dnsmasq 使文件级挂载指向新 inode
-sudo install -m 0644 pxe-uefi/snponly.efi \
+```bash
+# 主仓库：产物留在 tftp/secureboot/ 供 /boot-assets 校验，另复制一份作为 TFTP 首跳
+sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
+  /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi \
   /path/to/kurrent/tftp/snponly.efi
 cd /path/to/kurrent
 eval "$(kurrent deployment show -o env)"   # 状态根等插值变量
 docker compose restart kurrent-dnsmasq
 ```
 
-主仓库当前的 PXE 首跳固定为 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物；详见[固件构建与部署](../firmware/build-deploy.md#_2-选择产物)。
+`tftp/snponly.efi` 是文件级挂载，替换后必须重启容器，否则容器仍持有旧 inode。
 
-在 WebUI「引导链」页确认固件状态与六项能力（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定），或直接查询接口（在控制面仓库目录执行，使用 admin 证书）：
+主仓库当前的 PXE 首跳固定为 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物；产物形态与选择原则见[固件构建与部署](../firmware/build-deploy.md#_2-选择产物)。
+
+在 WebUI「引导链」页确认状态（Secure Boot 产物、HTTPS 引导、TPM AK 与 PCR quote），或直接查询接口（在控制面仓库目录执行，使用 admin 证书）：
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
@@ -389,21 +400,23 @@ curl -sS \
   --cert "$STATE/control-plane/state/pki/users/admin/client.crt" \
   --key "$STATE/control-plane/state/pki/users/admin/client.key" \
   --cacert "$STATE/control-plane/state/certs/server.crt" \
-  https://<控制面管理地址>/api/cp/boot-assets | jq '.firmware'
+  https://<控制面管理地址>/api/cp/boot-assets | jq '{firmware, secureboot}'
 ```
+
+`secureboot.status=ok` 表示镜像与 manifest 一致、4443 端口与固件构建一致、boot CA 存在且指纹匹配。
 
 ### 3.2 首次引导与入池
 
-先在 WebUI → **Devices** 开启注册窗口（TTL 按 `spec.registration.windowMaxTtlMinutes` 收敛，默认 60 分钟；可选放行额度 `max_devices`），再让裸机设备接入 PXE 网段并设为 UEFI 网络启动。窗口必须在设备上报前开启；关闭后上报只更新指纹，不再入池。
+先在 WebUI → **Devices** 开启注册窗口（TTL 按 `spec.registration.windowMaxTtlMinutes` 收敛，默认 60 分钟；可选放行额度 `max_devices`），再让裸机设备接入 PXE 网段、设为 UEFI 网络启动并开启 Secure Boot。窗口必须在设备上报前开启；关闭后上报只更新指纹，不再入池。
 
 ```bash
 # 控制面服务器：观察 DHCP/引导流
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-预期链路：设备 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM）→ `/devices/report` 上报指纹与公钥 → **设备出现在 Devices 页并完成密钥认领**。
+预期链路：设备 DHCP 获取地址 → TFTP 拉取签名首跳 → 首跳经 4443 上报设备信息并取得 nonce → TPM 创建 AK（私钥不可导出）→ `/devices/report` 上报指纹、AK 公钥与名称 → **设备出现在 Devices 页并完成 AK 认领**；此后每次引导按 PCR quote 证明后才下发引导变量。
 
-确认设备已入池后关闭注册窗口。全部设备认领完成后，再在 Devices 页开启**验签强制**：此后的 `/boot-vars` 只接受通过挑战-应答验签的已绑定设备。
+确认设备已入池后关闭注册窗口。TPM 证明强制默认开启，`/boot-vars` 只接受通过 PCR quote 证明的已绑定设备；仅在过渡或排障时临时关闭，完成后恢复。
 
 设备入池只表示平台侧与注册链路可用，此时设备还没有可启动的系统。真正启动还需要三步：存储节点上有目标发行版的母盘 → 为 Worker 克隆系统盘并设为默认盘 → 冷启动到登录提示符。母盘制作见[系统盘定制](./system-disk.md)，后两步见[首次交付](./usage.md)。
 

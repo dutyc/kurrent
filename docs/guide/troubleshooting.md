@@ -8,8 +8,8 @@
 - **能登录但 Agent 非 `ok`**：控制面 → Agent 4840；`kurrent agents list`；节点 `spec.agent.advertiseUrl`。
 - **设备没有 DHCP 应答**：dnsmasq / PXE 网段；设备网段、`interface=`、防火墙 67/69。
 - **有 DHCP 但无 TFTP 下载**：TFTP 根 / 69；TFTP 根文件与权限。
-- **iPXE 卡在 HTTPS**：443 / 证书 / TOFU；服务器证书、NVRAM 指纹。
-- **设备不入池**：注册窗口 / 公钥 / 吊销；Devices 页窗口状态；设备上报。
+- **iPXE 卡在 4443 HTTPS**：boot CA / 4443 证书 / 端口；固件构建的 boot CA、叶证书 SAN 与端口。
+- **设备不入池**：注册窗口 / TPM AK / Secure Boot / 吊销；Devices 页窗口状态与证明列；设备上报。
 - **菜单为空或循环重启**：绑定 / 系统盘 / 默认盘；Worker 详情；`/boot-vars` 投影。
 - **菜单后数据面连接失败**：4421 / tlshd / 凭据；`kurrent host check --role storage`；凭据推送状态。
 - **系统启动后认证失败**：凭据轮换 / 对账；`kurrent workers credential show`。
@@ -56,7 +56,7 @@ kurrent join https://<控制面地址> --token <token> --agent-id <agent_id>
 ## 设备不入池
 
 1. 确认 Devices 页的注册窗口处于开启状态，且未超过 TTL 与放行额度。
-2. 确认设备上报携带有效公钥：首次启动应执行 `keygen` 与 `pubkey`。
+2. 确认设备上报携带有效 TPM AK：首次启动应执行 `akgen` 与 `akpub`，且 Secure Boot 已开启。
 3. 确认设备未被吊销；`revoked` 条目不会因重新上报自动恢复。
 4. 检查控制面审计与日志中是否有 `/devices/report` 记录。
 
@@ -68,7 +68,7 @@ kurrent join https://<控制面地址> --token <token> --agent-id <agent_id>
 | --- | --- |
 | 设备是否已绑定 Worker | Devices 页；绑定权威是设备台账 |
 | Worker 是否有系统盘与默认盘 | Worker 详情；无默认盘时控制面返回 `menu-default=reboot` |
-| 验签强制是否开启 | 设置页；开启后只接受通过挑战-应答的已绑定设备 |
+| TPM 证明强制是否被关闭 | Devices 页注册窗口面板；默认开启，关闭后未通过证明的已绑定设备也可取得菜单变量（凭据仍不注入） |
 | `/boot-vars` 是否返回完整连接信息 | `GET /boot-vars`，核对 `disk-nqn`、`storager-ip`、端口与 PSK |
 | 设备 NVRAM 指纹是否与控制面证书一致 | 证书轮换后需重新预置 `server-fingerprint` |
 
@@ -105,15 +105,27 @@ kurrent cert list
 - 组件证书：`kurrent cert revoke-component <agent_id>`，写 nodes CRL 并删除该节点 bootstrap token。
 - 恢复节点：签发新 token 后重新 `join`，见「Agent 非 ok」。
 
-## 固件身份与 TOFU
+## 设备身份、TPM 证明与引导信任
 
-- **`keygen: device key already exists`**：密钥已存在；正常幂等路径；确需重置时清 NVRAM。
-- **`pubkey: no device key` / `sign: no device key`**：未生成密钥或 NVRAM 被清；先执行 `keygen`。
-- **HTTPS 下载被拒**：服务器证书与已固定指纹不一致；确认证书是否轮换；轮换后清除 `server-fingerprint`。
-- **访问第二个 HTTPS 主机被拒**：TOFU 为全局单锚；统一 HTTPS 入口与证书，其余流量走 TFTP/HTTP。
+设备身份是 TPM 2.0 AK，证明随 `/boot-vars` 提交。控制面把拒绝原因写入 `boot_vars.credential` 审计与设备记录的 `attestation.last_reason`，Devices 页的证明列与展开行显示状态和原因码。
+
+| 原因码 | 含义 | 处置 |
+| --- | --- | --- |
+| `no_tpm` | 上报未携带有效 AK（无 TPM 或固件未接入 TCG2） | 确认目标机有 TPM 2.0 且固件已开启；Secure Boot 状态见下一行 |
+| `sb_disabled` | 注册期上报 `sb=0`，Secure Boot 未开启 | 在固件设置中开启 Secure Boot，预置站点信任库后重新入池 |
+| `window_closed` | 未知 MAC 在窗口关闭或额度用尽时上报 | 按需开启注册窗口后重新上报 |
+| `ak_unregistered` | 设备尚无 AK 身份 | 在注册窗口内带 AK 上报完成认领 |
+| `missing_mac` | `/boot-vars` 未带 MAC，主机名也无法定位设备 | 引导脚本传 `mac=${net0/mac}` |
+| `nonce_invalid` | nonce 缺失、已使用、过期或与 MAC 不符 | 重新请求 `/devices/challenge` 后重试，不要复用旧 nonce |
+| `quote_invalid` | quote 结构、extraData 或签名不符 | 确认固件 quote 对 PCR 0/2/4/7 做 SHA-256，且 extraData 原样等于 nonce |
+| `pcr_mismatch` | PCR 摘要与平台基线不一致（固件或启动配置变更） | 核对变更后在设备详情点击「批准新基线」，设备下次启动重新证明 |
+| `baseline_approved` | 基线刚被批准，等待下次证明 | 重启设备完成一次证明 |
+
+- **引导 HTTPS 被拒**：服务器证书无法链到固件内嵌的 boot CA；核对固件构建用的 `BOOT_CA_CERT` 与控制面 `state/pki/ca/boot/ca.crt`，以及 4443 叶证书 SAN 是否覆盖设备访问的地址。
+- **访问第二个 HTTPS 主机被拒**：boot CA 为全局单锚；统一引导 HTTPS 入口与证书，其余流量走 TFTP/HTTP。
 - **TLS 握手失败**：服务端 TLS 高于 1.2 或套件不兼容；服务端限制到 TLS 1.2。
-- **`${pubkey}` / `${sig}` 为空**：命令失败或设置未写入；检查命令输出，两者仅当前启动内有效。
-- **裸 `clear device-key` 后密钥仍在**：未带 `nvo/` 前缀；使用 `clear nvo/device-key` 或 `nvclear`。
+- **`${quote}` / `${quote-sig}` 为空**：TPM 命令失败或设备没有 TPM；检查固件日志，无 TPM 设备不入池。
+- **`device.claim rejected reason=ak_mismatch`**：已登记的 AK 与本次上报不一致；AK 不可在线更换，删除登记后在注册窗口内重新入池。
 
 ## 收集证据
 

@@ -54,7 +54,7 @@ spec:
     windowMaxDevices: 1000
   # DHHC-1 periodic rotation and push reconciliation (0 disables the corresponding background task)
   credentials:
-    rotationDays: 90
+    rotationHours: 24
     reconcileIntervalSeconds: 60
   # Storage agent call timeout (seconds)
   agentTimeoutSec: 10

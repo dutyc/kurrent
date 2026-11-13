@@ -71,7 +71,7 @@ Remaining:
 - **Control plane** — Single host, file state.
 - **High availability** — Not provided.
 - **Post-boot orchestration** — Out of scope; can be provided by a layer above.
-- **Firmware signing** — Mainline unsigned; Secure Boot artifacts not in mainline.
+- **Firmware signing** — Deployment artifacts must be site-signed and enrolled in the target trust store; per-model validation on real hardware is not complete.
 - **Verified distributions** — See the [Distribution Matrix](../reference/distributions.md).
 
 ## How progress is judged

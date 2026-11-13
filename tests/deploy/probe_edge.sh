@@ -353,8 +353,6 @@ if [ "$PURGE_EMPTY" = "0" ]; then
 else
     fail "设备清除 dry_run 行为异常（count=${PURGE_EMPTY:-?}）"
 fi
-check_code 400 "轮换请求的非法公钥被拒" \
-    "$(code -X POST "$BASE/devices/rotate?mac=02:00:00:00:00:ff&pubkey=04$(printf 'ab%.0s' $(seq 64))&nonce=n&sig=s")"
 
 echo
 if [ "$FAILED" -ne 0 ]; then

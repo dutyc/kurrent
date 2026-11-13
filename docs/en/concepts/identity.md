@@ -9,37 +9,41 @@ The two chains use different trust roots and cannot substitute for each other. A
 
 ## Device Identity
 
-### Key
+### Trust Root
 
-On first boot, firmware generates an ECDSA P-256 private key and stores it in EFI NVRAM. The key never leaves the machine, and later boots refuse to overwrite it.
+Device identity is a TPM 2.0 attestation key (AK). On first boot the firmware creates a restricted signing key inside the local TPM (ECC P-256 or RSA-2048); the private key is non-exportable. Later boots reuse the same AK, and an existing AK is never recreated. The control plane records only the AK public key (SPKI DER), the AK name and the key type.
 
-Firmware provides three commands:
+The firmware provides three capabilities:
 
-| Command | Purpose |
+| Capability | Purpose |
 | --- | --- |
-| `keygen` | Generate the device key; refuses to overwrite an existing one |
-| `pubkey` | Export the public key (uncompressed point, hex) |
-| `sign <data>` | SHA-256 + ECDSA signature over the data, output as base64 DER |
+| `akgen` | Create or reuse the AK inside the TPM (restricted signing, ECC P-256 or RSA-2048); an existing AK is never overwritten |
+| `akpub` | Export the AK public key (SPKI DER), TPM2B_NAME and algorithm type for registration |
+| `quote <nonce>` | Read PCR 0/2/4/7 (SHA-256) and produce a quote in one TPM call; `extraData` is the ASCII bytes of the nonce string; outputs raw TPMS_ATTEST bytes (without the TPM2B length prefix) and the AK signature |
 
 ### Registration
 
-The device reports its fingerprint and public key to `/devices/report`. The control plane records it by MAC, but **registration grants no privilege**:
+The device reports its fingerprint, AK public key/name/type and Secure Boot state to `/devices/report`. The control plane records it by MAC, but **registration grants no privilege**:
 
-- only an unknown device arriving while the registration window is open, with a valid public key, is admitted;
+- only an unknown device arriving while the registration window is open, within the admission quota, carrying a valid AK and reporting `sb=1`, is admitted;
 - a pooled but unbound device has no boot credentials;
-- after the window closes, new devices are not accepted.
+- after the window closes, new devices are not accepted;
+- devices without a TPM, or with Secure Boot off, are not admitted.
 
-### Challenge-Response
+### Challenge-Attest
 
-`/devices/challenge` issues a one-shot nonce, and the device signs `nonce‖mac` with its private key. The result is used during `/boot-vars` admission. The nonce is single-use and bound to the MAC; related endpoints are rate-limited per source IP.
+`/devices/challenge` issues a one-shot nonce, and the device produces a quote over PCR 0/2/4/7 with its TPM AK, placing the nonce string's ASCII bytes in `extraData`. `/boot-vars` validates the quote structure, the AK signature, the nonce binding and single use, and finally the PCR digest against the platform baseline.
 
-The key can be rotated: the old key signs `rotate‖mac‖new_pubkey‖nonce`, and is invalidated on success.
+The baseline is recorded the first time attestation passes (TOFU). A later digest change is denied as `pcr_mismatch` and kept as a pending digest until an administrator reviews it and approves it with `POST /devices/{mac}/approve-baseline`. The nonce is single-use and bound to the MAC; related endpoints are rate-limited per source IP.
+
+The AK cannot be rotated online: device recovery or a mainboard swap goes through the administrator flow of deleting the inventory entry and re-enrolling during a registration window.
 
 ### Limits of Device Identity
 
-- Challenge-response proves "the caller holds this device key", not "the code running with this key is trustworthy".
+- Attestation proves "the caller holds this device's AK and can produce a valid quote over the selected PCRs", not that the running system is uncompromised; a compromised runtime can still obtain the current PSK within the rotation window.
 - TOFU pins the server certificate; it does not protect the first DHCP/TFTP hop.
-- The device key lives in NVRAM, so an operating system that can read firmware variables after boot can also use it. Mainline does not yet provide TPM or Secure Boot measurement to close this path.
+- The PCR baseline is TOFU as well: if the first attestation happens under attacker control, the baseline is contaminated; the initial enrollment should be verified against the installed environment.
+- Firmware behavior (PCR selection, AK creation) needs per-model verification; AMD fTPM and discrete TPMs behave differently.
 
 These boundaries are expanded in the [Security Model](../architecture/security.md).
 
@@ -149,7 +153,7 @@ With `KURRENT_CP_ALARM_WEBHOOK` set, alarm events are POSTed as JSON by a backgr
 
 ## Credential Ownership
 
-- **Device private key** — Device NVRAM; `POST /devices/rotate`.
+- **Device identity** — TPM AK (non-exportable private key); AK claim during the registration window and administrator baseline approval.
 - **User certificate** — User private key + users CA; CSR reissue / serial revocation.
 - **Management token** — Control-plane ledger (digest); TTL / revocation.
 - **Session** — Session ledger; Logout / per-session revoke / sign-out all.

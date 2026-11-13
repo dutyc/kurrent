@@ -47,6 +47,8 @@ services:
       - TZ=Asia/Shanghai
       # 宿主 HTTPS 端口：非 443 时写入 admin.conf 的 server（CLI 自检据此连接）
       - KURRENT_HTTPS_PORT=${KURRENT_HTTPS_PORT:-443}
+      # Secure Boot 引导端点端口（与 nginx 的 4443 映射、固件构建端口保持一致）
+      - KURRENT_BOOT_HTTPS_PORT=${KURRENT_BOOT_HTTPS_PORT:-4443}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -83,6 +85,8 @@ services:
       # HTTP（80）仅作 301 升级到 443（不承载任何内容/凭据）；WebUI 不再单独映射端口
       - "80:80"
       - "${KURRENT_HTTPS_PORT:-443}:443"
+      # Secure Boot 引导入口（独立 boot CA）：容器内固定 4443，宿主端口可配
+      - "${KURRENT_BOOT_HTTPS_PORT:-4443}:4443"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # ── Web UI 静态文件 (cd app && npm run build) ──

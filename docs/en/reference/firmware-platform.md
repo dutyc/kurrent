@@ -1,6 +1,6 @@
 # Firmware Platform Reference
 
-This page is the platform-side firmware reference: patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NVRAM, TOFU, challenge-response and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building, artifact selection and deployment are covered in [Firmware Build and Deployment](../firmware/build-deploy.md).
+This page is the platform-side firmware reference: patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NV, TOFU, challenge-attestation and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building, artifact selection and deployment are covered in [Firmware Build and Deployment](../firmware/build-deploy.md).
 
 ## Patch set
 
@@ -176,21 +176,21 @@ sanboot nvme://10.0.2.2:4420/nqn.2026-07.com.kurrent:worker-01.ubuntu.0123456789
 
 On success the log shows `sending Property Set (CC)`, `namespace 1: N blocks of 4096 bytes`, and `I/O queue established`, after which control passes to GRUB on the disk.
 
-Keys are never embedded in firmware. The control plane `/boot-vars` endpoint returns an iPXE script per device that sets boot variables:
+Keys are never embedded in firmware. Device identity is a TPM 2.0 AK whose private key cannot be exported: `akgen` creates and persists it on first boot, `akpub` exports the SPKI and TPM2B_NAME for `/devices/report` enrollment, and each subsequent boot uses `quote` to attest PCR 0/2/4/7 with SHA-256. The control plane injects credentials from `/boot-vars` only after verifying the signature, the nonce binding, and the PCR baseline:
 
 ```ipxe
 dhcp || goto failed
 chain --autofree https://<control-plane>/devices/challenge?mac=${net0/mac} || goto failed
 isset ${nonce} || goto failed
-sign ${nonce}${net0/mac} || goto failed
-chain --autofree https://<control-plane>/boot-vars?mac=${net0/mac}&hostname=${hostname}&nonce=${nonce}&sig=${sig} \
+quote ${nonce} || goto failed
+chain --autofree https://<control-plane>/boot-vars?mac=${net0/mac}&hostname=${hostname}&nonce=${nonce}&quote=${quote}&quote_sig=${quote-sig} \
   || goto failed
 sanboot nvme://<traddr>:<trsvcid>/<nqn>?secret=${nbft-secret}
 :failed
 shell
 ```
 
-When data-plane TLS is enabled, the control plane also issues `nbft-tls-psk` and `nbft-tls-port`; the script appends `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` to the URI. If the port or key is missing, the script must enter the failure branch and must not fall back to the plaintext port. `/boot-vars` does not require a login session; credentials are injected only after the one-time nonce and device signature verification. Unverified requests receive only non-credential variables.
+When data-plane TLS is enabled, the control plane also issues `nbft-tls-psk` and `nbft-tls-port`; the script appends `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` to the URI. If the port or key is missing, the script must enter the failure branch and must not fall back to the plaintext port. `/boot-vars` does not require a login session; credentials are injected only after the one-time nonce and a valid device quote (AK signature, `extraData` equal to the nonce, PCR matching the baseline). Unproven requests receive only non-credential variables.
 
 When the `sanboot` URI port equals `tls_trsvcid`, firmware performs a TLS 1.3 PSK handshake for that connection:
 

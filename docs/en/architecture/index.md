@@ -67,7 +67,7 @@ control plane
 
 ## Boot Chain
 
-Boot starts with the DHCP and TFTP first hop: the device fetches iPXE and its pointer, then retrieves the configuration over HTTPS. An ECDSA P-256 key generated and kept in NVRAM signs the challenge; an unknown MAC enters the pool only while the registration window is open and a valid public key is presented. `/boot-vars` checks the binding, the device signature and the key ledger in order, and only then projects root-path, NQN and credentials; the device connects with DH-HMAC-CHAP and encrypts with TLS 1.3. During sanboot the firmware installs the NBCT credential table, and initramfs consumes NBFT and NBCT to reconnect and mount the root filesystem — no machine identity is written into the disk.
+Boot starts with the DHCP and TFTP first hop: the device fetches iPXE and its pointer, then retrieves the configuration over HTTPS. Device identity is a non-exportable AK inside the TPM, which quotes PCR 0/2/4/7 on every boot; an unknown MAC enters the pool only while the registration window is open with a valid AK and Secure Boot enabled. `/boot-vars` checks the binding, quote signature, nonce and platform baseline in order, and only then projects root-path, NQN and credentials; the device connects with DH-HMAC-CHAP and encrypts with TLS 1.3. During sanboot the firmware installs the NBCT credential table, and initramfs consumes NBFT and NBCT to reconnect and mount the root filesystem — no machine identity is written into the disk.
 
 ```text
 device
@@ -83,7 +83,7 @@ The control plane participates only in the HTTPS segment; the data plane connect
 
 Management authentication tries three credentials in order — mTLS client certificate, management token and server-side session — and yields one `Identity` for principal-class and RBAC checks. Credential domains are split into three independent roots (users, nodes, control); nginx trusts only the users and nodes bundles, derives the principal class from the issuer, and every control-plane route declares the classes it accepts with deny-by-default. Every management request writes an audit record; if the write fails the request returns 503 (fail-closed).
 
-Device identity rests on the NVRAM private key, single-use nonce challenges, the TOFU anchor and binding-as-authentication; fingerprint reports grant no authority and only feed the device pool. Authentication and encryption are independent layers: DH-HMAC-CHAP answers who may connect, TLS 1.3 protects the content, and the PSK is a pure function of the authentication key with no plaintext fallback. The full threat model is in [Security Model](./security.md).
+Device identity rests on the TPM AK, single-use nonce PCR quotes, the platform baseline and binding-as-authentication; fingerprint reports grant no authority and only feed the device pool. Authentication and encryption are independent layers: DH-HMAC-CHAP answers who may connect, TLS 1.3 protects the content, and the PSK is a pure function of the authentication key with no plaintext fallback. The full threat model is in [Security Model](./security.md).
 
 ## State and Derived Artifacts
 

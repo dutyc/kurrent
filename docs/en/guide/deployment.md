@@ -12,12 +12,13 @@ The deployment units are a controller server plus one or more storage nodes; the
 
 ### Network planning
 
-The controller needs two reachable paths:
+The controller needs three reachable paths:
 
 - **Management plane**: administrator browsers and storage nodes reach 443; the controller uses this address to issue tokens and call Agents.
 - **Boot plane**: bare-metal devices reach DHCP (67/UDP) and TFTP (69/UDP); `spec.networking.interface` binds this side, and that interface must hold an address on the PXE subnet.
+- **Boot HTTPS**: devices reach 4443 to report, fetch challenges and boot variables; the port is set by `KURRENT_BOOT_HTTPS_PORT`, the certificate comes from a dedicated boot CA, and only the boot segment needs access. See [Secure Boot Boot](../firmware/secure-boot.md).
 
-Prefer two NICs or VLAN subinterfaces. If one NIC carries both planes, the PXE segment must be isolated and must not share the office network. Booting clients must be able to route to the storage node's **4421** data-plane port; add explicit routes and firewall rules when the segments differ.
+Prefer two NICs or VLAN subinterfaces to separate the boot plane from the other paths. If one NIC carries the management and boot planes, the PXE segment must be isolated and must not share the office network. Booting clients must be able to route to the storage node's **4421** data-plane port; add explicit routes and firewall rules when the segments differ.
 
 Replace these with the actual environment:
 
@@ -30,7 +31,7 @@ Replace these with the actual environment:
 - Storage data-plane address `192.168.1.20` (or a dedicated data IP): how booting clients reach 4421; must be client-reachable
 - Storage hostname `storage-01`: arbitrary; the control plane allocates the node identity at bootstrap-token issuance and join stores it in the node state file, independent of the hostname
 
-Ports and listener boundaries are in [Architecture](../architecture/index.md#ports) and [Deployment Prerequisites](../reference/host-prerequisites.md#network-and-ports). The control-plane management plane publishes no TCP port; the boot chain behind 443 proxies only three boot endpoints, and the remaining `/devices/*` management endpoints are not exposed. The interactive control-plane API docs (`/openapi.json`, `/docs`) are off by default and can be enabled for debugging with `KURRENT_CP_OPENAPI=1`.
+Ports and listener boundaries are in [Architecture](../architecture/index.md#ports) and [Deployment Prerequisites](../reference/host-prerequisites.md#network-and-ports). The control-plane management plane publishes no TCP port; 443 carries both management and boot traffic, while 4443 proxies only the three boot endpoints (`/boot-vars`, `/devices/report`, `/devices/challenge`) and returns 404 for everything else. The interactive control-plane API docs (`/openapi.json`, `/docs`) are off by default and can be enabled for debugging with `KURRENT_CP_OPENAPI=1`.
 
 ### Repository and CLI
 
@@ -109,13 +110,15 @@ Persist the data-disk mount in `/etc/fstab` (prefer the UUID from `blkid`) or an
 
 ### Boot network boundary
 
-The first hop of the boot chain (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`) has no cryptographic anchor: the device firmware does not verify it, and iPXE has not yet obtained the controller certificate. A deployment must treat the **boot segment itself as the trust boundary**:
+The first hop of the boot chain (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: TFTP must deliver an image signed with the site certificate that is enrolled in the target's `db`, and the static scripts, boot CA and controller address are embedded in that signed binary. The boot HTTPS that follows trusts only that boot CA; there is no first-contact trust.
 
-- The PXE segment is a dedicated VLAN or physical port; the controller is the only host serving DHCP and TFTP on it.
+The boot segment is still deployed as an isolated zone, because it decides whether devices can boot and whether they can be dragged into a denial of service:
+
+- The PXE segment is a dedicated VLAN or physical port; the controller is the only host serving DHCP, TFTP and 4443 on it.
 - Enable DHCP snooping (only the controller uplink is trusted), Dynamic ARP Inspection, RA guard and port security; use 802.1X or MAB to restrict attachable ports where available.
 - Open the registration window only when needed, set a quota, and close it afterwards; the TFTP root mounts only `snponly.efi` and `boot.ipxe`.
 
-The full threat model, residual risks and deployment checklist are in the [Security Model](../architecture/security.md#deployment-checklist).
+Forged DHCP/ARP can still stall a device or make it retry, but it cannot make the device run unsigned code or connect to an unauthorized boot server. The full threat model, residual risks and deployment checklist are in the [Security Model](../architecture/security.md#deployment-checklist).
 
 ## Step 1: Controller Server
 
@@ -362,29 +365,38 @@ See [System Disk Customization](./system-disk.md) for building and validating a 
 
 ### 3.1 Install the firmware artifact
 
-The platform repository does not contain firmware binaries. Device firmware is built by the companion repository [kurrent-firmware](https://github.com/dutyc/kurrent-firmware); use a release artifact matching the current upstream baseline, or build it per [Firmware Build and Deployment](../firmware/build-deploy.md).
+The platform repository does not contain firmware binaries. Device firmware is built by the companion repository [kurrent-firmware](https://github.com/dutyc/kurrent-firmware); the platform accepts signed artifacts only, produced by the firmware repository's `build/build-sb.sh`. Full inputs, provisioning and verification steps are in [Secure Boot Boot](../firmware/secure-boot.md).
 
-Devices support x86_64 UEFI boot only; Legacy BIOS (CSM) is no longer supported. See [Deployment Prerequisites](../reference/host-prerequisites.md#host-roles) for the remaining device requirements.
+Devices support x86_64 UEFI boot only; Legacy BIOS (CSM) is no longer supported. Secure Boot must be enabled and the site signing certificate enrolled in the target's `db`. See [Deployment Prerequisites](../reference/host-prerequisites.md#host-roles) for the remaining device requirements.
 
 ```bash
-mkdir -p /tmp/kurrent-fw/pxe-uefi && cd /tmp/kurrent-fw
-BASE=https://github.com/dutyc/kurrent-firmware/releases/latest/download
-curl -sLO "$BASE/SHA256SUMS"
-curl -sL -o pxe-uefi/snponly.efi "$BASE/pxe-uefi-snponly.efi"
-sha256sum -c SHA256SUMS --ignore-missing
+# Firmware repository: the boot CA is generated when the control plane first starts
+# and is embedded into the firmware as the fixed trust anchor.
+SB_KEY=/path/to/artifact-signing.key \
+SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 \
+./build/build-sb.sh
+```
 
-# Place it in the platform repository's TFTP root.
-# Restart dnsmasq so the file-level mount points at the new inode.
-sudo install -m 0644 pxe-uefi/snponly.efi \
+```bash
+# Platform repository: keep artifacts in tftp/secureboot/ for /boot-assets,
+# and install a copy as the TFTP first hop.
+sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
+  /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi \
   /path/to/kurrent/tftp/snponly.efi
 cd /path/to/kurrent
 eval "$(kurrent deployment show -o env)"   # state root and other interpolation variables
 docker compose restart kurrent-dnsmasq
 ```
 
-Mainline currently fixes the PXE first hop to `snponly.efi` and does not switch artifacts per device. Machines that need `pxe-uefi/ipxe.efi` cannot share the same PXE segment with the default first hop, so the first-hop artifact must be unified before deployment; see [Firmware Build and Deployment](../firmware/build-deploy.md#_2-select-artifacts).
+`tftp/snponly.efi` is a file-level mount; restart the container after replacing it, otherwise it keeps the old inode.
 
-Confirm firmware status and the six capabilities (HTTPS boot, NVS persistence, device key generation, public-key export, challenge signing, TOFU anchoring) in the WebUI **Boot Chain** page, or query the API from the controller repository with the admin certificate:
+Mainline currently fixes the PXE first hop to `snponly.efi` and does not switch artifacts per device. Machines that need `pxe-uefi/ipxe.efi` cannot share the same PXE segment with the default first hop, so the first-hop artifact must be unified before deployment; artifact forms and selection are in [Firmware Build and Deployment](../firmware/build-deploy.md#_2-select-artifacts).
+
+Confirm status (Secure Boot artifacts, HTTPS boot, TPM AK and PCR quote) in the WebUI **Boot Chain** page, or query the API from the controller repository with the admin certificate:
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
@@ -392,21 +404,23 @@ curl -sS \
   --cert "$STATE/control-plane/state/pki/users/admin/client.crt" \
   --key "$STATE/control-plane/state/pki/users/admin/client.key" \
   --cacert "$STATE/control-plane/state/certs/server.crt" \
-  https://<controller-management-address>/api/cp/boot-assets | jq '.firmware'
+  https://<controller-management-address>/api/cp/boot-assets | jq '{firmware, secureboot}'
 ```
+
+`secureboot.status=ok` means the image matches the manifest, the 4443 port matches the firmware build, and the boot CA is present with a matching fingerprint.
 
 ### 3.2 First boot and admission
 
-Open the registration window in WebUI → **Devices** first (TTL is bounded by `spec.registration.windowMaxTtlMinutes`, default 60 minutes; optional admission quota `max_devices`), then connect the bare-metal device to the PXE segment and enable UEFI network boot. The window must be open before the device reports; after it closes, reports only refresh the fingerprint and never admit the device.
+Open the registration window in WebUI → **Devices** first (TTL is bounded by `spec.registration.windowMaxTtlMinutes`, default 60 minutes; optional admission quota `max_devices`), then connect the bare-metal device to the PXE segment, enable UEFI network boot and enable Secure Boot. The window must be open before the device reports; after it closes, reports only refresh the fingerprint and never admit the device.
 
 ```bash
 # On the controller: watch the DHCP/boot flow
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-Expected chain: the device gets an address via DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM) → `/devices/report` sends the fingerprint and public key → **the device appears under Devices and completes key claim**.
+Expected chain: the device gets an address via DHCP → TFTP pulls the signed first hop → the first hop reports device information and obtains a nonce over 4443 → the TPM creates an AK (the private key cannot be exported) → `/devices/report` sends the fingerprint, AK public key and name → **the device appears under Devices and completes AK claim**; every later boot receives boot variables only after passing a PCR quote.
 
-Close the registration window after the device is admitted. Once every device has claimed its key, enable **signature enforcement** on the Devices page: `/boot-vars` then serves only bound devices that pass challenge-response verification.
+Close the registration window after the device is admitted. TPM attestation enforcement is on by default: `/boot-vars` serves only bound devices that pass PCR quote attestation. Disable it only temporarily for migration or troubleshooting, then restore it.
 
 Admission only proves that the platform side and the registration path work; the device has no bootable system yet. A real boot takes three steps: a master image for the target distribution on a storage node → clone a system disk for the Worker and make it the default → cold boot to a login prompt. See [System Disk Customization](./system-disk.md) for the master image and [First Delivery](./usage.md) for the last two.
 

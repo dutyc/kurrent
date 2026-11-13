@@ -9,10 +9,13 @@ export default function ConfirmAction({
   onConfirm,
   extraFields,
   details,
+  confirmLabel,
+  requireExtra,
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const [extra, setExtra] = useState({})
+  const gated = (requireExtra || []).some((name) => !extra[name])
 
   // 按钮 disabled 时不弹窗（trigger 内 Button 可能带 disabled）
   const handleOpen = (e) => {
@@ -59,8 +62,8 @@ export default function ConfirmAction({
               </div>
             )}
             <div className="confirm-actions">
-              <Button variant="danger" onClick={handleConfirm}>
-                {t('workerDetail.confirm')}
+              <Button variant="danger" onClick={handleConfirm} disabled={gated}>
+                {confirmLabel || t('workerDetail.confirm')}
               </Button>
               <Button variant="ghost" onClick={handleClose}>
                 {t('workers.cancel')}

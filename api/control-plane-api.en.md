@@ -6,7 +6,7 @@ This document describes the HTTP endpoints currently implemented by the Control 
 
 The Control Plane is a persistent HTTP service on the control-plane host, responsible for:
 
-- Device inventory and the registration window: reporting, challenge-response, key rotation, and binding
+- Device inventory and the registration window: reporting, challenge-response, TPM attestation, and binding
 - Worker identity, system disks, and default boot disk inventory
 - Agent registration, probing, draining, and storage placement
 - Boot-chain projection (`/boot-vars`, `/boot-assets`)
@@ -126,7 +126,7 @@ The current Control Plane state and configuration are divided as follows (contai
 | File | Meaning |
 |---|---|
 | `config/agents.yml` | Agent node inventory and scheduling roles |
-| `state/devices.yml` | Device ledger (pool / bindings / fingerprint / public key) — the **single authority for bindings** (`bound_worker_id`) |
+| `state/devices.yml` | Device ledger (pool / bindings / fingerprint / TPM AK and PCR baseline) — the **single authority for bindings** (`bound_worker_id`) |
 | `state/workers.yml` | Worker ledger (compute identity / system disks / default boot) |
 | `state/credentials.yml` | NVMe-oF key store (DHHC-1, key follows the Worker) |
 | `state/credential-push.yml` | Credential push-state ledger (per-Agent delivery results, for reconciliation and projection, see 7.7) |
@@ -179,9 +179,9 @@ artifact is out of sync; it does not change binding authority.
 | `DELETE` | `/sessions/{session_id}` | Revoke one session (admin, see 6.7) |
 | `DELETE` | `/sessions` | Sign out all: clear the registry and bump epoch (admin, see 6.7) |
 | `GET` | `/boot-vars` | Dynamic iPXE boot variable injection, no auth required |
-| `GET` | `/devices/report` | iPXE device info reporting (no auth, 11 fields, see 16.6) |
+| `GET` | `/devices/report` | iPXE device info reporting (no auth, 11 fingerprint fields + TPM AK, see 16.6) |
 | `GET` | `/devices/challenge` | One-time nonce issuance (no auth, challenge-response, see 5.2) |
-| `POST` | `/devices/rotate` | Device key rotation (no auth, signed by the old key, see 5.3) |
+| `POST` | `/devices/{mac}/approve-baseline` | Approve the device's most recently reported PCR baseline (admin, see 5.3) |
 | `GET` | `/devices` | Device pool list (state filter, see 16.1) |
 | `GET` | `/devices/{mac}` | Single device detail (see 16.2) |
 | `POST` | `/devices` | Manually register a device into the pool (see 16.3) |
@@ -195,8 +195,8 @@ artifact is out of sync; it does not change binding authority.
 | `GET` | `/settings/registration-window` | Get registration window status (see 5.1) |
 | `POST` | `/settings/registration-window` | Open the registration window (TTL hard cap 1-60 min; optional admission quota `max_devices` 1-1000, see 5.1) |
 | `DELETE` | `/settings/registration-window` | Close the registration window early (see 5.1) |
-| `GET` | `/settings/enforcement` | Get the device signature enforcement switch (see 5.1) |
-| `PUT` | `/settings/enforcement` | Toggle the device signature enforcement switch (see 5.1) |
+| `GET` | `/settings/enforcement` | Get the TPM attestation enforcement switch (see 5.1) |
+| `PUT` | `/settings/enforcement` | Toggle the TPM attestation enforcement switch (see 5.1) |
 | `GET` | `/config` | Runtime declaration configuration and derived-artifact consistency (see 5.4) |
 | `GET` | `/agents` | List Agents and their capabilities |
 | `POST` | `/agents` | Register a new Agent (writes agents.yml; 409 if id exists) |
@@ -277,8 +277,9 @@ Boot-chain status (requires management authentication: `human` or `automation`).
 | `firmware[]` | UEFI firmware declared by `dhcp-boot=tag:efi64`: `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
 | `stage2[]` | Script-chain files (`boot.ipxe`, `boot.ipxe.cfg`, `menu.ipxe`): `file`, `path`, `host_path`, `status`, `size`, `mtime` |
 | `menu` | `status` (ok/unavailable) and `items` (selectable item count, skipping `--gap` lines) |
+| `secureboot` | Optional Secure Boot artifacts: `present`, `status` (ok/incomplete/missing), `artifact`, `path`, `artifact_sha256`, `artifact_size`, `manifest_present`, `manifest_matches`, `signer`, `built_at`, `boot_https_port`, `port_matches`, `boot_ca_present`, `boot_ca_sha256`, `boot_ca_matches` |
 
-`status=incomplete` means the firmware file exists but lacks any of `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` — stock iPXE cannot complete device authentication either. `status=empty` is a zero-byte file, `missing` means the file does not exist, and `rejected` means the path escapes the tftp root (the control plane refuses it and never reads it). `host_path` is the host path relative to the deployment root (`tftp/...`), used when adding a missing file. `menu.status=ok` requires at least one `menu` section and one non-`--gap` `item`.
+`status=incomplete` means the firmware file exists but lacks any of `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` — stock iPXE cannot complete TPM attestation either. `status=empty` is a zero-byte file, `missing` means the file does not exist, and `rejected` means the path escapes the tftp root (the control plane refuses it and never reads it). `host_path` is the host path relative to the deployment root (`tftp/...`), used when adding a missing file. `menu.status=ok` requires at least one `menu` section and one non-`--gap` `item`. `secureboot.status=ok` requires the signed image, a matching manifest hash, a boot HTTPS port baked into the image that equals the deployed `KURRENT_BOOT_HTTPS_PORT`, a present boot CA certificate, and a manifest CA fingerprint that matches the current control-plane boot CA (a wrong port cannot be reached, a wrong anchor is refused by the firmware); without `tftp/secureboot/` artifacts `present=false` and the other checks are unaffected.
 
 ### curl
 
@@ -292,11 +293,11 @@ curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
 
 ### Description
 
-Provides per-worker boot variables for iPXE boot scripts. This endpoint does not require authentication and only exposes variables needed for booting within a controlled network. NVMe-oF credentials (`nbft_secret` / `nbft_tls_psk`) are **injected only after the device identity is verified by signature** (`mac` + one-time `nonce` + a valid signature, see 5.1).
+Provides per-worker boot variables for iPXE boot scripts. This endpoint does not require authentication and only exposes variables needed for booting within a controlled network. NVMe-oF credentials (`nbft_secret` / `nbft_tls_psk`) are **injected only after TPM attestation passes** (`mac` + one-time `nonce` + a PCR quote bound to that nonce, see 5.1).
 
-> **Note**: This endpoint is **read-only** (a projection of boot variables, no write side effects). Registration-window enrollment (new MACs entering the device pool with a public key) has been consolidated into `GET /devices/report` (see 16.6), which `boot.ipxe.cfg` chains **before** `/boot-vars`.
+> **Note**: This endpoint is **read-only** (a projection of boot variables, no write side effects). Registration-window enrollment (new MACs entering the device pool with a TPM AK) has been consolidated into `GET /devices/report` (see 16.6), which `boot.ipxe.cfg` chains **before** `/boot-vars`.
 
-**Rate limit**: sliding window per source IP (240 requests/minute by default; override with `KURRENT_CP_RATE_LIMIT_BOOT_VARS`, `<=0` disables). Over the limit returns `429` with `Retry-After` and emits a `boot_rate_limited` alarm. Signature verification is the most expensive work here; the limit only suppresses scanning and is not an identity boundary.
+**Rate limit**: sliding window per source IP (240 requests/minute by default; override with `KURRENT_CP_RATE_LIMIT_BOOT_VARS`, `<=0` disables). Over the limit returns `429` with `Retry-After` and emits a `boot_rate_limited` alarm. Attestation verification is the most expensive work here; the limit only suppresses scanning and is not an identity boundary.
 
 The Control Plane identifies the device and projects boot variables in the following order:
 
@@ -319,8 +320,8 @@ The response of `/boot-vars` is a projection of the inventory:
 | `base_iqn` | The IQN of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk) with the last colon-and-following part stripped — the disk NQN is the authoritative identifier, the IQN is derived from it. **Not returned** if the Worker has no system disk (iPXE falls back to the static default in `boot.ipxe.cfg`). |
 | `storager_ip` | The `storager_ip` of the Agent that hosts the default boot disk (same disk selection rule as above) — the data-plane address used by NVMe-oF boot. Not returned when there is no system disk. |
 | `iscsi_sep` | The iSCSI root **separator** (the part between `${storager-ip}` and `${base-iqn}`). **Returned for stgt / LIO backends only**: `:::1:` for stgt backends (lun placeholder 1), `::::` for LIO backends (empty placeholder). The backend type is resolved by **querying the Agent’s `/capabilities` `backend` field in real time** (the node reports its own capability — capability is truth); if the agent is unregistered / the query fails / the value is invalid, the backend is treated as unknown, a warning is logged, and this field is omitted (it no longer falls back to stgt format). It is **not derived from the Agent’s `tags`** in `agents.yml` (tags are human annotations only — otherwise a drifting tag would assemble a wrong separator). **Not sent for nvmet backends**. Not returned when there is no system disk. The current boot scripts do not consume this field; it is retained for API clients of the iSCSI compatibility backend. |
-| `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected only when the Worker is bound, has a key entry, and the device identity is verified by signature**; not returned when there is no key / the Worker is unbound / the request is unverified / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (on nvmet backends a missing key withholds the whole `/boot-vars` payload and the menu refuses to boot) |
-| `nbft_tls_psk` | Pre-shared key for NVMe/TCP TLS: a **pure function of the authentication key** (`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex, see 7.7; no separate storage field — rotating or revoking the key rotates or revokes the PSK atomically). Returned **only when all four hold: the Worker is bound with a key, the device identity is verified by signature, the backend is nvmet, and the Agent reports a ready data-plane port**; otherwise the whole boot-variable payload is withheld (boot refused, audited) — encryption is the default and there is no plaintext fallback. The firmware uses it for its own handshake on that port and hands it to the initramfs via the NBCT table, which reconnects with `--tls` on the same port |
+| `nbft_secret` | The Worker’s NVMe-oF authentication key (DHHC-1, `state/credentials.yml` indexed by worker_id, see 7.7). **Injected only when the Worker is bound, has a key entry, and TPM attestation passes**; not returned when there is no key / the Worker is unbound / the request is unverified / the request is denied. Consumed by the firmware as `nvme://...?secret=${nbft-secret}` (on nvmet backends a missing key withholds the whole `/boot-vars` payload and the menu refuses to boot) |
+| `nbft_tls_psk` | Pre-shared key for NVMe/TCP TLS: a **pure function of the authentication key** (`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex, see 7.7; no separate storage field — rotating or revoking the key rotates or revokes the PSK atomically). Returned **only when all four hold: the Worker is bound with a key, TPM attestation passes, the backend is nvmet, and the Agent reports a ready data-plane port**; otherwise the whole boot-variable payload is withheld (boot refused, audited) — encryption is the default and there is no plaintext fallback. The firmware uses it for its own handshake on that port and hands it to the initramfs via the NBCT table, which reconnects with `--tls` on the same port |
 | `nbft_tls_port` | Data-plane port (shared by the firmware and kernel boot segments; read live from the Agent’s `/capabilities.port.trsvcid` — capability is truth, same live-query rule as `iscsi_sep`/`backend`); returned under the same conditions as `nbft_tls_psk`. The menu appends `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` to the sanboot URI |
 | `hostnqn` | The Worker’s initiator Host NQN (disk NQN prefix + `:host.<worker_id>`, in the same namespace as the disk NQN and matching the host entry registered in nvmet-host); **injected when the default disk carries an NQN**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch `0005` supports the `hostnqn` setting) |
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
@@ -337,8 +338,8 @@ mac not found and hostname not found -> dnsmasq projection (legacy / no-inventor
 not identified and mac provided ->
   - device in pool (pooled) -> reboot loop (menu-default=reboot + short timeout), waiting for binding
   - device revoked -> empty script (menu stays)
-  - unknown MAC + registration window open + quota left + a valid public key -> enter the device pool (see “Registration-Window Enrollment” below), return reboot loop
-  - unknown MAC + window closed / quota used up / no public key -> empty script (menu stays; report only records the fingerprint, no pool entry)
+  - unknown MAC + registration window open + quota left + a valid AK + sb=1 -> enter the device pool (see “Registration-Window Enrollment” below), return reboot loop
+  - unknown MAC + window closed / quota used up / no AK / Secure Boot off -> empty script (menu stays; report only records the fingerprint, no pool entry)
 ```
 
 ### Default Boot Item Rules
@@ -359,13 +360,13 @@ default_disk (the first disk is set as default automatically; use 7.3 for multi-
 
 ### Registration-Window Enrollment (Zero-touch Provisioning)
 
-When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11-field report plus optional `pubkey`, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window**: only when the window is open, the admission quota is not used up, and the report carries a valid ECDSA P-256 public key does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level).
+When a new device boots without an identity, iPXE first `chain`s `/devices/report` (11 fingerprint fields + TPM AK and Secure Boot state, see 16.6) and then requests `/boot-vars`. **Enrollment only happens during the registration window**: only when the window is open, the admission quota is not used up, the report carries a valid TPM AK (`ak_public` / `ak_name` / `ak_type`), and it self-reports `sb=1` does an unknown MAC enter the device pool; once the window closes, reports only update the fingerprint without pool entry (there is no enrollment channel outside the window, and a permanent window cannot be configured at the code level). Devices without a TPM, or with Secure Boot off, are not admitted.
 
-1. `GET /devices/report`: unknown MAC + window open + quota left + `pubkey` present → written to `state/devices.yml` (`state=pooled`, fingerprint stored, `key_hash` filled, `source=ipxe`)
+1. `GET /devices/report`: unknown MAC + window open + quota left + valid AK + `sb=1` → written to `state/devices.yml` (`state=pooled`, fingerprint stored, `identity` records the AK, `source=ipxe`); otherwise audited as `device.register rejected` (`no_tpm` / `sb_disabled` / `window_closed`)
 2. `GET /boot-vars`: MAC in the pool and unbound → returns `menu-default=reboot` + short timeout, rebooting in a loop until the admin binds it
 3. After the admin binds the device to a Worker (WebUI / API; single bind 16.7, batch bind preview/execution 16.9/16.10), the next boot follows the Worker configuration normally
 
-Key claim for existing devices: an already-pooled device reporting with a public key during the window gets its `key_hash` filled in (claim complete); a key mismatch is rejected (revoke/re-register by deleting the inventory entry). A claim depends only on the window being open and is not constrained by the admission quota. After all devices have claimed their keys, enable signature enforcement (see 5.1).
+AK claim for existing devices: an already-pooled device reporting with an AK during the window gets its `identity` written (claim complete); an AK mismatch is rejected (only audited as `device.claim rejected`; recovery is the delete-and-re-register flow). A claim depends only on the window being open and is not constrained by the admission quota. Once claimed, the device must pass TPM attestation once; the first success records the PCR baseline (see 5.2).
 
 Controls:
 
@@ -373,14 +374,14 @@ Controls:
 |---|---:|---|
 | Registration window | Closed | Open it with `POST /settings/registration-window` during deployment (TTL hard cap 1-60 min, auto-closes on expiry), see 5.1 |
 | Admission quota | Unlimited | Optional `max_devices` when opening (1-1000 devices); once that many devices have auto-joined within the window, admission stops, see 5.1 |
-| Signature enforcement | Off | `GET/PUT /settings/enforcement`: when on, `/boot-vars` is only served to bound devices that pass signature verification, see 5.1 |
+| Attestation enforcement | On | `GET/PUT /settings/enforcement`: on by default, so `/boot-vars` is only served to bound devices that pass TPM attestation; turning it off is for transition/troubleshooting only, see 5.1 |
 | `spec.boot.autoBootTimeoutMs` | `1` | Menu timeout in milliseconds during the reboot loop. |
 
-The entire enrollment process is logged as operations (`device.register` / `device.claim`). On failure, the inventory is rolled back and an empty script is returned, so the next request will retry without affecting the iPXE boot process.
+Enrollment and claiming are logged as operations (`device.register` / `device.claim` / `device.ak.register`). On failure nothing is written and an empty script is returned, so the next request will retry without affecting the iPXE boot process.
 
 ### Anti-Impersonation (Binding as Authentication)
 
-When a request carries a `mac`, the Control Plane verifies the Worker that the device is **bound to** (`bound_worker_id`, the binding authority); if it does not match (device bound to another Worker / unbound / unknown), the request is **denied** — an empty script is returned and the boot vars are not leaked. Requests without a `mac` (hostname only) cannot be verified: with signature enforcement on they are **rejected** (`missing_mac`); during the transition period only menu/navigation variables are served and credentials are never injected. This makes the device↔Worker binding and the device signature the boot-time authentication boundary: only the bound device, after signature verification, can receive the Worker's boot configuration and data-plane credentials (e.g., `disk_nqn` / `nbft_secret` / `nbft_tls_psk`).
+When a request carries a `mac`, the Control Plane verifies the Worker that the device is **bound to** (`bound_worker_id`, the binding authority); if it does not match (device bound to another Worker / unbound / unknown), the request is **denied** — an empty script is returned and the boot vars are not leaked. Requests without a `mac` (hostname only) cannot be verified: with attestation enforcement on (the default) they are **rejected** (`missing_mac`); when it is explicitly off, only menu/navigation variables are served and credentials are never injected. This makes the device↔Worker binding and TPM attestation the boot-time authentication boundary: only the bound device, after attestation passes, can receive the Worker's boot configuration and data-plane credentials (e.g., `disk_nqn` / `nbft_secret` / `nbft_tls_psk`).
 
 ### Query Parameters
 
@@ -389,8 +390,9 @@ When a request carries a `mac`, the Control Plane verifies the Worker that the d
 | `mac` | No | None | MAC address. The backend normalizes it by stripping `:` / `-` / `.`. Both colon-separated (`00:0c:29:b9:8b:2d`) and `mac:hexraw` (`000c29b98b2d`) formats are supported. |
 | `hostname` | No | None | Hostname, e.g., `worker-01`. |
 | `format` | No | `ipxe` | `ipxe` or `json`. |
-| `nonce` | No | None | One-time challenge-response nonce (issued by `/devices/challenge`, see 5.2); when enforcement is on, missing → `missing_sig` rejected |
-| `sig` | No | None | ECDSA P-256 signature as base64(DER) over `nonce‖mac` (no separator, see 5.2); when enforcement is on, missing → `missing_sig` rejected. **Compatibility restore**: iPXE builds URLs without percent-encoding, so the `+` of base64 enters the query verbatim and is decoded as a space under form-urlencoded rules; the server restores spaces to `+` before verifying |
+| `nonce` | No | None | One-time challenge-response nonce (issued by `/devices/challenge`, see 5.2); with enforcement on (the default), missing → `quote_invalid` rejected |
+| `quote` | No | None | Raw TPMS_ATTEST bytes as hex (without the 2-byte TPM2B_ATTEST length prefix): a quote over PCR 0/2/4/7 (SHA-256) whose extraData must equal the ASCII bytes of the `nonce` string (see 5.2); missing or malformed → `quote_invalid` rejected |
+| `quote_sig` | No | None | Signature over the quote by the AK private key (hex; DER for ECC P-256, PKCS#1 v1.5 for RSA-2048); a bad signature → `quote_invalid` rejected |
 
 It is recommended to pass at least one of `mac` or `hostname`. From iPXE, it is best to pass both:
 
@@ -432,7 +434,7 @@ set menu-default reboot
 set menu-timeout 1
 ```
 
-New MAC (window enrollment) or completely unrecognized, and if the window is closed or no public key is carried, returns an empty script:
+New MAC (window enrollment) or completely unrecognized, and if the window is closed or no AK is carried, returns an empty script:
 
 ```ipxe
 #!ipxe
@@ -482,7 +484,7 @@ A device in the pool but unbound to a Worker receives menu variables only (no `w
 }
 ```
 
-Unrecognized and not enrolled (window closed / no public key):
+Unrecognized and not enrolled (window closed / no AK):
 
 ```json
 {}
@@ -493,17 +495,18 @@ Unrecognized and not enrolled (window closed / no public key):
 In `tftp/boot.ipxe.cfg`, the trust chain fetches this endpoint over HTTPS (nginx 443, TOFU anchor) after the challenge-respond handshake (see 5.2):
 
 ```ipxe
-# Stage 3: challenge-respond — signed request carries nonce+sig
+# Stage 3: challenge-attest — a non-secret nonce binds this boot
 :challenge
-chain --autofree ${https-url}devices/challenge?mac=${mac} && goto signed || goto bootvars
+chain --autofree ${https-url}devices/challenge?mac=${mac} && goto quoted || goto bootvars
 
-:signed
-sign ${nonce}${mac} || goto bootvars
-chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname}&nonce=${nonce}&sig=${sig} || goto vars-done
+:quoted
+quote ${nonce} || goto bootvars
+chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname}&nonce=${nonce}&quote=${quote}&quote_sig=${quote-sig} || goto vars-done
 goto vars-done
 
-# Degraded path (challenge failed: not registered/claimed, or legacy firmware):
-# served while signature enforcement is off — missing_sig is denied once enforcement is on
+# Degraded path (challenge failed: no registered AK, or legacy firmware):
+# enforcement is on by default, so a missing quote is rejected as quote_invalid;
+# served only when enforcement is explicitly off
 :bootvars
 chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname} || goto vars-done
 
@@ -512,7 +515,7 @@ isset ${iscsi-sep} || set iscsi-sep :::1:
 isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-iqn ${base-iqn}:${mac}
 ```
 
-On success, the returned `disk-nqn` / `storager-ip` may override the static defaults; derived variables are re-built at `:vars-done`. `base-iqn` is used to derive `initiator-iqn`; the default `iscsi-sep` does not participate in menu assembly.
+`${quote}` / `${quote-sig}` are iPXE variables written by the firmware (hyphenated names); the request parameters are `quote` / `quote_sig`. On success, the returned `disk-nqn` / `storager-ip` may override the static defaults; derived variables are re-built at `:vars-done`. `base-iqn` is used to derive `initiator-iqn`; the default `iscsi-sep` does not participate in menu assembly.
 
 In `menu.ipxe`, the main boot entry assembles the NVMe-oF root-path (`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`, with `?secret=` appended when `nbft-secret` is injected and `&tls_psk=…&tls_trsvcid=…` appended from the injected TLS variables; `nbft-tls-port` / `nbft-tls-psk` are required — their absence means the target is not encryption-ready, and the entry drops to `failed` instead of assembling a plaintext URI).
 
@@ -529,13 +532,13 @@ agents:
 
 If `storager_ip` is not configured, the Control Plane falls back to the host portion of `base_url`. However, when `base_url` is `host.docker.internal`, this value is not suitable for physical Workers.
 
-### 5.1 Registration Window & Enforcement (/settings/registration-window, /settings/enforcement)
+### 5.1 Registration Window & Attestation Enforcement (/settings/registration-window, /settings/enforcement)
 
 #### Description
 
-The registration window is the controlled enrollment channel for the deployment phase: only while the window is open can new devices report with their public key (`GET /devices/report`) to auto-join the pool and complete key claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL and quota caps come from the `spec.registration` declaration (`windowMaxTtlMinutes` defaults to 60, `windowMaxDevices` to 1000; a permanent window cannot be configured), and the window auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — key claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
+The registration window is the controlled enrollment channel for the deployment phase: only while the window is open can new devices report with their TPM AK (`GET /devices/report`) to auto-join the pool and complete AK claim; once it closes, reports only record fingerprints without pool entry (no enrollment channel outside the window). The TTL and quota caps come from the `spec.registration` declaration (`windowMaxTtlMinutes` defaults to 60, `windowMaxDevices` to 1000; a permanent window cannot be configured), and the window auto-closes on expiry (lazy computation; query for the actual state). An **admission quota** (`max_devices`, in devices) may be set as well: once that many devices have auto-joined within the window, admission stops (the window record is not cleared). The quota constrains only the automatic admission of unknown devices — AK claims and manual registration/import by the admin are unaffected; the admitted count is derived from the device ledger, with no stored counter. All endpoints require `Authorization: Bearer`.
 
-The signature enforcement switch (transition-period compatibility): when off, keyless devices may still receive menu variables but **credentials are never injected** (credentials require a verified signature); when on, `/boot-vars` applies the 4th injection condition to bound devices — missing `mac` → rejected as `missing_mac`; no `key_hash` → rejected as `no_key`; missing `nonce`/`sig` → rejected as `missing_sig`; replay or invalid signature → rejected. Claimed devices carrying an invalid signature are rejected during the transition period as well (forged signatures are never served). It is recommended to turn enforcement on only after all existing devices have completed key claim.
+The attestation enforcement switch is on by default: `/boot-vars` applies the 4th injection condition to bound devices — missing `mac` → rejected as `missing_mac`; no AK in the ledger → rejected as `ak_unregistered`; missing `nonce`/`quote`/`quote_sig` → rejected as `quote_invalid`; malformed quote or invalid signature → rejected as `quote_invalid`; nonce replay or extraData mismatch → rejected as `nonce_invalid`; PCR digest differing from the baseline → rejected as `pcr_mismatch`. Turning it off is for transition/troubleshooting only: devices without an AK may then receive menu variables, but **credentials are never injected** (credentials require attestation), and invalid proofs are never served in either mode.
 
 #### GET /settings/registration-window
 
@@ -554,7 +557,7 @@ Queries the registration window status (no record / already expired → `open=fa
 | `quota_exhausted` | bool | Whether the quota is used up (no further devices join the pool; the window record is not cleared) |
 | `limits` | object | Declared caps: `ttl_minutes_min` / `ttl_minutes_max` / `max_devices` (the WebUI constrains inputs by it) |
 
-`admitted` is a **derived** value with no stored counter: it counts device-ledger entries with `source == "ipxe"` and `first_seen >= opened_at`. Manual registration (`POST /devices`, `source=manual`) and manifest import therefore do not consume quota, and devices that existed before the window opened (including key-only claims) are not counted.
+`admitted` is a **derived** value with no stored counter: it counts device-ledger entries with `source == "ipxe"` and `first_seen >= opened_at`. Manual registration (`POST /devices`, `source=manual`) and manifest import therefore do not consume quota, and devices that existed before the window opened (including AK-only claims) are not counted.
 
 ```json
 {"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false, "limits": {"ttl_minutes_min": 1, "ttl_minutes_max": 60, "max_devices": 1000}}
@@ -598,13 +601,13 @@ curl -X DELETE "$BASE_URL/settings/registration-window" \
 
 #### GET/PUT /settings/enforcement
 
-Gets/toggles the device signature enforcement switch (persisted to `state/settings.json`, survives restarts).
+Gets/toggles the TPM attestation enforcement switch (persisted to `state/settings.json`, survives restarts).
 
 **Request body (PUT)**:
 
 | Field | Required | Type | Description |
 |---|---|---|---|
-| `enabled` | Yes | bool | `true` = enforce (keyless / signature-less devices are denied boot) |
+| `enabled` | Yes | bool | `true` = enforce (devices without an AK, or failing attestation, are denied boot) |
 
 ```bash
 curl -X PUT "$BASE_URL/settings/enforcement" \
@@ -616,7 +619,7 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 
 ### 5.2 GET /devices/challenge
 
-Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to MAC, replay protection; the nonce itself holds no secret) for the `/boot-vars` signature verification chain. Device missing, unclaimed (no `key_hash`), or revoked → **404** (cannot take the signature path, and revoked devices get no nonce).
+Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to MAC, replay protection; the nonce itself holds no secret) for the `/boot-vars` attestation chain. Device missing, without a registered AK, or revoked → **404** (cannot take the attestation path, and revoked devices get no nonce).
 
 **Query parameters**:
 
@@ -631,34 +634,34 @@ Challenge endpoint (**no auth**): issues a one-time nonce (short TTL, bound to M
 set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-**Errors**: `400` (invalid MAC); `404` (device missing/unclaimed); `429` (source IP above the per-minute threshold, carries `Retry-After`).
+**Errors**: `400` (invalid MAC); `404` (device missing / no registered AK); `429` (source IP above the per-minute threshold, carries `Retry-After`).
 
 **Rate limit**: like `/devices/report`, limited per source IP in a sliding window (120 requests/minute by default; override with `KURRENT_CP_RATE_LIMIT_CHALLENGE`, `<=0` disables). Exceeding it emits a `boot_rate_limited` alarm.
 
-**Challenge-response chain (with `/boot-vars`, device identity verification)**:
+**Challenge-attest chain (with `/boot-vars`, TPM attestation)**:
 
 1. `GET /devices/challenge?mac=<mac>` → obtain `${nonce}` by executing the response script
-2. iPXE signs `nonce‖mac` (UTF-8, no separator; MAC in lowercase colon form) with the device key (ECDSA P-256) → `sig` (base64(DER)); hostname does not participate in the signature (identity is guaranteed by MAC → device-ledger binding)
-3. `GET /boot-vars?mac=&hostname=&nonce=&sig=` → credentials are served only after verification passes (injection condition #4, see 5.1); verification failure → empty script (deny, audited as `boot_vars.credential`, reasons see 5.1)
+2. The firmware quotes PCR 0/2/4/7 (SHA-256) with the TPM AK, placing the ASCII bytes of the `${nonce}` string (64 hex characters) in `extraData`, with no hex decoding or other encoding transform, and outputs `quote` (raw TPMS_ATTEST bytes as hex, without the TPM2B length prefix) and `quote_sig` (AK private-key signature over the quote bytes, hex). Reading the PCRs and producing the quote happen in one TPM call.
+3. `GET /boot-vars?mac=&hostname=&nonce=&quote=&quote_sig=` → the quote structure is checked (magic `0xFF544347`, type `TPM_ST_ATTEST_QUOTE`, PCR selection fixed to 0/2/4/7 with SHA-256 only), then the AK signature, then `extraData == nonce` and nonce consumption, and finally the PCR digest against the platform baseline; credentials are served only when all pass (injection condition #4, see 5.1). Any failure → empty script (deny, audited as `boot_vars.credential` and `device.attest`, reasons see 5.1).
 
-### 5.3 POST /devices/rotate
+Quote validation runs before the nonce is consumed: a malformed quote or bad signature does not burn the nonce, so the device can correct and retry; replaying a consumed nonce returns `nonce_invalid`.
 
-Device key rotation (**no auth**; proves itself with a signature from the old key; does not reopen the registration window and issues no certificate). The device must be claimed (has `key_hash`) and not revoked.
+### 5.3 POST /devices/{mac}/approve-baseline
 
-1. `GET /devices/challenge?mac=` to obtain a one-time nonce
-2. Sign `rotate‖mac‖new_pubkey‖nonce` with the **old private key** (UTF-8, no separator; `new_pubkey` is a 130-hex uncompressed point, `mac` is lowercase colon form)
-3. `POST /devices/rotate?mac=&pubkey=&nonce=&sig=` (`sig` = base64(DER))
+Approves the device's most recently reported PCR baseline (**admin**, requires `Authorization: Bearer`). After a firmware or boot-configuration change, the quote's PCR digest no longer matches the stored baseline, `/boot-vars` denies with `pcr_mismatch`, and that digest is kept in `attestation.pending_digest` awaiting approval. After reviewing the change, the admin calls this endpoint to write the pending digest as the new `pcr_baseline`; the device's next boot is validated against it.
 
-On success the ledger's `key_hash` becomes the new public key and `key_rotated_at` is recorded; the old key **fails immediately** on the `/boot-vars` verification path. The nonce is one-time (replay `401`); revoked device `403`; unclaimed (no `key_hash`) `409`; unknown device `404`; invalid `pubkey` `400`. Rate limit: 10/minute per source IP (override with `KURRENT_CP_RATE_LIMIT_ROTATE`).
+No request body: the approved value is always the latest pending digest reported by the device, so the admin never types a digest by hand.
+
+**Errors**: unknown device `404`; revoked device `403`; no pending digest (no mismatch has occurred yet) `409`.
 
 ```bash
-# sig must be produced by the device's old private key: ECDSA-P256(rotate + mac + new_pubkey + nonce)
-curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>&nonce=<64-hex>&sig=<base64-DER>"
+curl -s -X POST "$BASE_URL/devices/00:0c:29:b9:8b:2d/approve-baseline" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-```json
-{ "mac": "00:0c:29:b9:8b:2d", "rotated": true }
-```
+**Success (200)**: the updated device record (`pcr_baseline` holds the new digest; `attestation.state=unproven`, `last_reason=baseline_approved`, `pending_digest` cleared). Recorded as operation `device.pcr_baseline.approve` (with digest and source address).
+
+The AK itself cannot be rotated online (its private key is non-exportable): recovery or a mainboard swap goes through the admin flow of deleting the inventory entry and re-enrolling during a registration window.
 
 ---
 
@@ -2047,7 +2050,7 @@ setting/deleting credentials, device bind/unbind/rebind
 
 **Periodic rotation**: each reconciliation cycle first checks the DHHC-1 key age
 (`rotated_at`, falling back to `updated_at` / `created_at`). Past
-`KURRENT_CP_CREDENTIAL_ROTATION_DAYS` (default 90 days, `<=0` disables it) the key is rotated:
+`KURRENT_CP_CREDENTIAL_ROTATION_HOURS` (default 24 hours, `<=0` disables it) the key is rotated:
 a new key is generated and pushed to every target Agent of that Worker, and the ledger
 `state/credentials.yml` is switched **only after all pushes succeed** (`rotated_at` /
 `updated_at` refreshed, `credential.rotate` audited). If any target fails or is degraded (TLS not
@@ -2066,9 +2069,9 @@ and kernel boot segments sharing port `4421`) is described in section 5.
 
 Credential boundary (who distributes, who self-holds): the stateless boot chain distributes exactly
 two credentials — the DHHC-1 authentication key and the TLS PSK derived from it — plus a non-secret
-one-time nonce (`GET /devices/challenge`). The device identity private key (ECDSA P-256) is **never
-distributed**: it is generated on the device, stays in NVRAM, and the control plane only collects the
-public key (`key_hash`/`pubkey_hash`). The firmware's TOFU fingerprint for the control-plane HTTPS
+one-time nonce (`GET /devices/challenge`). The device identity private key is **never distributed**:
+it lives in the TPM as a non-exportable AK, and the control plane only records the AK public key
+(`identity.ak_public`) and the PCR baseline. The firmware's TOFU fingerprint for the control-plane HTTPS
 endpoint is pinned on first connect, not pushed. Component bootstrap credentials — the bootstrap
 token and mTLS certificates — travel over `/enroll` (management plane) and share no channel with the
 boot-chain credentials described here. iSCSI/stgt backends authenticate via CHAP, which is not on
@@ -2894,7 +2897,19 @@ devices:
     uuid: "4c4c4544-..."          # SMBIOS UUID (dual factor, optional)
     state: pooled                 # pooled | bound | revoked
     bound_worker_id: null         # authoritative here; worker side only projects
-    key_hash: null                # device public-key fingerprint (filled by a pubkey report/claim; required by signature enforcement)
+    identity:                     # TPM identity (filled by an AK report/claim; required by attestation enforcement)
+      kind: tpm_ak
+      ak_public: 3059301306072a8648ce3d0201...   # AK public key, SPKI DER hex
+      ak_name: 000b6f2a...                        # TPM2B_NAME hex (alg + public-key digest)
+      ak_type: ecc_p256                           # ecc_p256 | rsa2048
+    pcr_baseline:                 # recorded on the first successful attestation (TOFU)
+      selection: [0, 2, 4, 7]
+      digest_sha256: 9f2c...7b1d
+      recorded_at: 2026-08-15T10:05:00+08:00
+    attestation:                  # result of the latest attestation
+      state: proven               # unproven | proven | mismatch
+      last_at: 2026-08-15T12:00:00+08:00
+      last_reason: null           # ak_unregistered | quote_invalid | nonce_invalid | pcr_mismatch | baseline_approved
     source: ipxe                  # ipxe (auto) | manual (manual entry/import)
     fingerprint:                  # reported values; updated by device reports
       manufacturer: ASUSTeK COMPUTER INC.
@@ -2993,28 +3008,31 @@ curl -s -X DELETE "$BASE_URL/devices/revoked?mac=02:00:00:00:00:01&mac=02:00:00:
 
 ### 16.6 GET /devices/report
 
-iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open, the admission quota is not used up, and a valid public key is carried. For an existing device, `uuid` can only fill an empty value and is never overwritten by a reported value (the binding comparison basis is not writable through an unauthenticated endpoint). **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
+iPXE device info reporting endpoint (**no auth**; `boot.ipxe.cfg` chains it before `/boot-vars`): updates the fingerprint + `last_seen`; an unknown MAC enters the pool only while the registration window is open, the admission quota is not used up, a valid TPM AK is carried, and Secure Boot is on. For an existing device, `uuid` can only fill an empty value and is never overwritten by a reported value (the binding comparison basis is not writable through an unauthenticated endpoint). **Returns an empty script body** (`#!ipxe\n`; consumable directly by `chain`, no script side effects; an empty body is reported as EOF by some iPXE builds, so a legal empty script is returned uniformly).
 
 | Parameter | Required | Description |
 |---|---|---|
 | `mac` | Yes | MAC; accepts colon format (`${mac}`) and compact hex (`${netX/mac}`) |
 | `uuid` / `manufacturer` / `product` / `serial` / `cpumodel` / `mem-type` / `chip` / `busid` | No | String fields; empty values tolerated |
 | `mem-total` / `mem-speed` | No | Integer; accepts `0x` hex and decimal; stored normalized as decimal |
-| `pubkey` | No | ECDSA P-256 public key (130-hex uncompressed point), used for enrollment/claim; absent or invalid → ignored |
+| `ak_public` | No | AK public key, SPKI DER hex (`ecc_p256` or `rsa2048`), used for enrollment/claim; absent or invalid → no identity |
+| `ak_name` | No | TPM2B_NAME hex (68 hex: algorithm prefix + public-key digest), paired with `ak_public`; absent or invalid → no identity |
+| `ak_type` | No | `ecc_p256` (default) / `rsa2048`; mismatched against the actual `ak_public` algorithm → no identity |
+| `sb` | No | Self-reported Secure Boot state, `1` = on; an unknown MAC is admitted only with `sb=1` (the boot-time decision relies on attestation, never on this self-report) |
 
 Behavior:
 
-- Registered device: updates the fingerprint (non-empty fields overwrite) + `last_seen`; `state` unchanged; while the window is open, a valid public key fills in `key_hash` (key claim, not constrained by the admission quota); a key mismatch is rejected (only audited as `device.claim rejected`)
+- Registered device: updates the fingerprint (non-empty fields overwrite) + `last_seen`; `state` unchanged; while the window is open, a valid AK fills in `identity` (AK claim, not constrained by the admission quota); an AK mismatch is rejected (only audited as `device.claim rejected`)
 - Revoked device: ignored (not updated, not resurrected)
-- Unknown MAC + window open + quota left + valid public key: enters the pool (`state=pooled`, `key_hash` filled, `source=ipxe`)
-- Unknown MAC + window closed / quota used up / no public key: fingerprint only, no pool entry (enrollment only during the window and bounded by the admission quota, see 5.1)
+- Unknown MAC + window open + quota left + valid AK + `sb=1`: enters the pool (`state=pooled`, `identity` written, `source=ipxe`, audited as `device.ak.register`)
+- Unknown MAC + window closed / quota used up / no valid AK / `sb!=1`: fingerprint only, no pool entry (audited as `device.register rejected` with reason `window_closed` / `no_tpm` / `sb_disabled`; enrollment only during the window and bounded by the admission quota, see 5.1)
 
 **Rate limit**: sliding window per source IP (`X-Real-IP`, overwritten by nginx), 120 requests/minute by default; over the limit returns `429` (with `Retry-After`) and emits a `boot_rate_limited` alarm. Override with `KURRENT_CP_RATE_LIMIT_REPORT`, `<=0` disables. This is scan suppression, not an identity boundary.
 
 **curl** (simulating an iPXE report; the boot chain uses the **bare path** — no `/api/cp` prefix — and requires no authentication):
 
 ```bash
-curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
+curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125&ak_public=<SPKI-DER-hex>&ak_name=<TPM2B-NAME-hex>&ak_type=ecc_p256&sb=1"
 ```
 
 ### 16.7 POST /devices/{mac}/bind
