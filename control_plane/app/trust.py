@@ -1,10 +1,9 @@
-"""信任根域（T3/T4，2026-08-21）：注册窗口、强制验签开关、挑战 nonce、设备公钥/签名验证。
+"""信任根域（T3/T4）：注册窗口、证明强制开关、挑战 nonce、TPM 证明验证。
 
-被 boot（引导链验签）与 settings（窗口/开关管理端点）两个域共用，独立成域。
+被 boot（引导链证明）与 settings（窗口/开关管理端点）两个域共用，独立成域。
 契约见 .local/blueprint/ipxe-stateless-handoff.md（§5.2 变量与接口契约）。
 """
 
-import base64
 import datetime as _dt
 import hashlib
 import re
@@ -13,13 +12,25 @@ import threading
 import time
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, EllipticCurvePublicKey
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.serialization import load_der_public_key
 
+from .attestation import (
+    AK_TYPES,
+    AK_TYPE_ECC_P256,
+    AK_TYPE_RSA2048,
+    AK_UNREGISTERED,
+    NONCE_INVALID,
+    PCR_MISMATCH,
+    PCR_SELECTION,
+    QUOTE_INVALID,
+    QuoteError,
+    baseline_matches,
+    verify_quote,
+)
 from .config import CHALLENGE_NONCE_TTL_SECONDS
 from .stores import devices, record, runtime_settings
-from .utils import normalize_boot_mac
+from .utils import normalize_boot_mac, now_iso
 
 # 挑战 nonce 存储：进程内存（单容器单进程），绑定 mac、短 TTL、一次性（消费即删）。
 # 每个 MAC 可同时有多个未消费 nonce（上限见 NONCE_MAX_OUTSTANDING_PER_MAC），
@@ -27,6 +38,9 @@ from .utils import normalize_boot_mac
 _nonce_store: dict[str, dict[str, float]] = {}
 _nonce_lock = threading.Lock()
 NONCE_MAX_OUTSTANDING_PER_MAC = 8
+
+AK_NAME_HEX_LEN = 68  # TPM2B_NAME: 2 字节算法前缀 + 32 字节 SHA-256 摘要
+AK_PUBLIC_MAX_HEX = 4096
 
 
 def device_for_boot(mac: str | None) -> dict[str, Any] | None:
@@ -75,7 +89,7 @@ def _count_admitted(devices_map: dict[str, Any], opened_at: str) -> int:
     """统计窗口期内已放行的设备数（派生自设备台账，不另存计数器）。
     口径：source == "ipxe" 且 first_seen >= 窗口开启时刻——即本窗口期内经 PXE 上报自动入池的条目；
     管理员手动登记 / 清单导入（source=manual）是显式动作，不占额度；
-    窗口开启前的存量设备（认领 key_hash 者亦然）不计入。"""
+    窗口开启前的存量设备（认领 AK 者亦然）不计入。"""
     try:
         opened = _dt.datetime.fromisoformat(opened_at)
     except (ValueError, TypeError):
@@ -108,7 +122,7 @@ def window_quota_left(devices_map: dict[str, Any] | None = None) -> int | None:
 
 def admission_allowed(devices_map: dict[str, Any] | None = None) -> bool:
     """入池放行判定：窗口开启 且 额度未用尽（额度缺省 = 不限）。
-    仅约束未知设备自动入池；密钥认领（存量补 key_hash）只看 window_open()。"""
+    仅约束未知设备自动入池；AK 认领（存量补身份）只看 window_open()。"""
     if not window_open():
         return False
     left = window_quota_left(devices_map)
@@ -153,8 +167,11 @@ def window_status() -> dict[str, Any]:
 
 
 def enforcement_enabled() -> bool:
-    """设备身份验签强制开关（显式开关，2026-08-21 裁定）：开启后无密钥设备拒绝引导。"""
-    return bool(runtime_settings.get("enforce_device_auth", False))
+    """设备身份验签强制开关（2026-08-21 裁定）：默认开启，无密钥设备拒绝引导。
+
+    显式关闭仅用于过渡/排障（存量无密钥设备临时引导），凭据在任何模式下都不注入。
+    """
+    return bool(runtime_settings.get("enforce_device_auth", True))
 
 
 def issue_nonce(mac: str) -> str:
@@ -194,68 +211,83 @@ def consume_nonce(mac: str, nonce: str) -> bool:
         return expires is not None and time.time() <= expires
 
 
-def parse_pubkey(value: str | None) -> str | None:
-    """校验 ECDSA P-256 公钥（未压缩点 0x04||X||Y，65B，130 hex 字符；契约见 ipxe-stateless-handoff §5.2）。
+def parse_ak_public(value: str | None, ak_type: str | None) -> str | None:
+    """校验 AK 公钥：SPKI DER 的 hex，类型须与 ak_type 匹配。
     合法 → 规范化 hex；无参数/非法 → None（注册/认领拒绝，不阻断上报）。"""
+    if not value or ak_type not in AK_TYPES:
+        return None
+    compact = value.strip().lower()
+    if not compact or len(compact) > AK_PUBLIC_MAX_HEX:
+        return None
+    if len(compact) % 2 or not re.fullmatch(r"[0-9a-f]+", compact):
+        return None
+    try:
+        key = load_der_public_key(bytes.fromhex(compact))
+    except Exception:
+        return None
+    if ak_type == AK_TYPE_ECC_P256:
+        return compact if isinstance(key, ec.EllipticCurvePublicKey) else None
+    if ak_type == AK_TYPE_RSA2048:
+        return compact if isinstance(key, rsa.RSAPublicKey) else None
+    return None
+
+
+def parse_ak_name(value: str | None) -> str | None:
+    """校验 TPM2B_NAME：2 字节算法前缀 + 32 字节摘要，共 68 hex。"""
     if not value:
         return None
     compact = value.strip().lower()
-    if len(compact) != 130 or not re.fullmatch(r"[0-9a-f]{130}", compact):
-        return None
-    try:
-        EllipticCurvePublicKey.from_encoded_point(SECP256R1(), bytes.fromhex(compact))
-    except Exception:
+    if len(compact) != AK_NAME_HEX_LEN or not re.fullmatch(r"[0-9a-f]+", compact):
         return None
     return compact
 
 
-def verify_device_signature(mac: str, nonce: str, sig_b64: str, pubkey_hex: str) -> bool:
-    """ECDSA P-256 验签：签名数据 = nonce||mac（UTF-8 字节拼接，契约见 ipxe-stateless-handoff §5.2）；
-    签名 = base64(DER)；公钥 = 未压缩点 hex（key_hash）。任何异常 → False。
-
-    签名不包含 hostname：hostname 由客户端自报且服务端不与台账比对，放进签名串不增加身份约束；
-    身份由 MAC → 设备台账绑定与一次性 nonce 保证。"""
-    try:
-        pub = EllipticCurvePublicKey.from_encoded_point(SECP256R1(), bytes.fromhex(pubkey_hex))
-        data = f"{nonce}{mac}".encode("utf-8")
-        pub.verify(base64.b64decode(sig_b64), data, ec.ECDSA(hashes.SHA256()))
-        return True
-    except Exception:
-        return False
-
-
-def verify_rotate_signature(mac: str, nonce: str, new_pubkey_hex: str,
-                            sig_b64: str, old_pubkey_hex: str) -> bool:
-    """设备密钥轮换验签：签名数据 = rotate||mac||new_pubkey||nonce（无分隔拼接，
-    与引导验签同一约定），签名者是旧密钥。任何异常 → False。"""
-    try:
-        pub = EllipticCurvePublicKey.from_encoded_point(
-            SECP256R1(), bytes.fromhex(old_pubkey_hex))
-        data = f"rotate{mac}{new_pubkey_hex}{nonce}".encode("utf-8")
-        pub.verify(base64.b64decode(sig_b64), data, ec.ECDSA(hashes.SHA256()))
-        return True
-    except Exception:
-        return False
-
-
-def sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _commit_attestation(mac: str, state: str, reason: str | None,
+                        digest: str | None = None,
+                        pending_digest: str | None = None) -> None:
+    """写回证明状态；首次通过时记录 PCR 基线，基线不符时留下待批摘要。"""
+    now = now_iso()
+    with devices.locked():
+        data = devices.load()
+        device = data["devices"].get(mac)
+        if not device:
+            return
+        attestation = {
+            "state": state,
+            "last_at": now,
+            "last_reason": reason,
+        }
+        if pending_digest:
+            attestation["pending_digest"] = pending_digest
+        device["attestation"] = attestation
+        if digest:
+            device["pcr_baseline"] = {
+                "selection": list(PCR_SELECTION),
+                "digest_sha256": digest,
+                "recorded_at": now,
+            }
+        devices.save(data)
+    record("device.attest", "ok" if state == "proven" else "failed",
+           mac=mac, state=state, **({"reason": reason} if reason else {}))
 
 
-def verify_boot_identity(
+def verify_attestation(
     mac: str | None,
     nonce: str | None,
-    sig: str | None,
+    quote: str | None,
+    quote_sig: str | None,
     worker_id: str,
 ) -> tuple[bool, bool]:
-    """设备身份签名验证（挑战-响应，trust-root-blueprint §6.1）。
+    """TPM quote 验证：结构、签名、nonce 绑定、PCR 基线。
 
     返回 (allowed, verified)：
-    - allowed=False：拒绝下发引导变量。强制开启时无 mac / 无 key_hash / 无签名一律拒绝；
-      带 nonce+sig 但重放或验签失败，任何模式下都拒绝。
-    - verified=True：仅当 mac 在册、nonce 一次性且签名有效。只有该状态允许注入 NVMe-oF
-      凭据（nbft_secret / nbft_tls_psk）；过渡期允许下发非凭据变量，但绝不注入凭据。
-    无 mac 无法验证身份（仅 hostname 的识别链）：强制开启 → 拒绝，过渡期 → 允许但未验签。
+    - allowed=False：拒绝下发引导变量。强制开启（默认）时无 mac / 无 AK / 无 quote 一律拒绝；
+      重放、签名错误、PCR 不符在任何模式下都拒绝。
+    - verified=True：AK 在册、nonce 一次性、quote 签名有效且 PCR 与基线一致。
+      只有该状态允许注入 NVMe-oF 凭据。
+
+    顺序：先做无副作用的 quote 校验，再消费 nonce，避免格式错误也烧掉 nonce；
+    最后比对基线，首次通过时记录基线（TOFU）。
     """
     normalized = normalize_boot_mac(mac) if mac else None
     if not normalized:
@@ -263,22 +295,53 @@ def verify_boot_identity(
             record("boot_vars.credential", "rejected", mac="", worker_id=worker_id, reason="missing_mac")
             return False, False
         return True, False
+
     device = device_for_boot(normalized)
-    key_hash = device.get("key_hash") if device else None
-    if not key_hash:
+    identity = (device or {}).get("identity") or {}
+    ak_public = identity.get("ak_public")
+    ak_type = identity.get("ak_type")
+
+    if not ak_public or not ak_type:
         if enforcement_enabled():
-            record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="no_key")
+            record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id,
+                   reason=AK_UNREGISTERED)
             return False, False
         return True, False
-    if not nonce or not sig:
+
+    if not nonce or not quote or not quote_sig:
         if enforcement_enabled():
-            record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="missing_sig")
+            record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id,
+                   reason=QUOTE_INVALID)
             return False, False
         return True, False
+
+    try:
+        result = verify_quote(ak_public, ak_type, quote, quote_sig, nonce)
+    except QuoteError as exc:
+        record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id,
+               reason=exc.reason)
+        _commit_attestation(normalized, "unproven", exc.reason)
+        return False, False
+
     if not consume_nonce(normalized, nonce):
-        record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="nonce_invalid")
+        record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id,
+               reason=NONCE_INVALID)
+        _commit_attestation(normalized, "unproven", NONCE_INVALID)
         return False, False
-    if not verify_device_signature(normalized, nonce, sig, key_hash):
-        record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id, reason="verify_failed")
-        return False, False
+
+    baseline = ((device or {}).get("pcr_baseline") or {}).get("digest_sha256")
+    if baseline:
+        if not baseline_matches(result["pcr_digest"], baseline):
+            record("boot_vars.credential", "rejected", mac=normalized, worker_id=worker_id,
+                   reason=PCR_MISMATCH)
+            _commit_attestation(normalized, "mismatch", PCR_MISMATCH,
+                                pending_digest=result["pcr_digest"])
+            return False, False
+        _commit_attestation(normalized, "proven", None)
+    else:
+        _commit_attestation(normalized, "proven", None, digest=result["pcr_digest"])
     return True, True
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()

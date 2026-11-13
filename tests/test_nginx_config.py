@@ -68,7 +68,7 @@ def test_identity_headers_default_to_none_and_opt_in():
     proxying = {path: body for path, body in blocks.items() if "proxy_pass" in body}
     assert set(proxying) == {
         "/healthz", "/boot-vars", "/devices/report", "/devices/challenge",
-        "/devices/rotate", "/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl",
+        "/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl",
     }
 
     for path, body in proxying.items():

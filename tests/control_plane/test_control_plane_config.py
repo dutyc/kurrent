@@ -60,7 +60,7 @@ def test_minimal_accepts_and_injects_defaults(tmp_path):
     assert cfg.spec.auth.token_max_ttl_hours == 720
     assert cfg.spec.registration.window_max_ttl_minutes == 60
     assert cfg.spec.registration.window_max_devices == 1000
-    assert cfg.spec.credentials.rotation_days == 90
+    assert cfg.spec.credentials.rotation_hours == 24
     assert cfg.spec.credentials.reconcile_interval_seconds == 60
 
 
@@ -199,10 +199,16 @@ def test_crl_refresh_must_be_below_next_update(tmp_path):
 
 
 def test_credentials_zero_disables(tmp_path):
-    body = MINIMAL + "  credentials:\n    rotationDays: 0\n    reconcileIntervalSeconds: 0\n"
+    body = MINIMAL + "  credentials:\n    rotationHours: 0\n    reconcileIntervalSeconds: 0\n"
     cfg = _load(tmp_path, body)
-    assert cfg.spec.credentials.rotation_days == 0
+    assert cfg.spec.credentials.rotation_hours == 0
     assert cfg.spec.credentials.reconcile_interval_seconds == 0
+
+
+def test_rotation_hours_upper_bound(tmp_path):
+    body = MINIMAL + "  credentials:\n    rotationHours: 8761\n"
+    with pytest.raises(RuntimeError, match="rotationHours"):
+        _load(tmp_path, body)
 
 
 def test_config_hash_is_stable_and_sensitive(tmp_path):
@@ -224,15 +230,15 @@ def test_settings_reflect_declaration(tmp_path, monkeypatch):
     windowMaxTtlMinutes: 15
     windowMaxDevices: 7
   credentials:
-    rotationDays: 0
+    rotationHours: 0
     reconcileIntervalSeconds: 0
 '''
     loaded = _load(tmp_path, body)
     monkeypatch.setattr(cfg, "CONFIG", loaded)
-    monkeypatch.delenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS", raising=False)
+    monkeypatch.delenv("KURRENT_CP_CREDENTIAL_ROTATION_HOURS", raising=False)
     monkeypatch.delenv("KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL", raising=False)
     assert cfg.settings.session_ttl_seconds == 7200
     assert cfg.settings.registration_window_max_ttl_minutes == 15
     assert cfg.settings.registration_window_max_devices == 7
-    assert cfg.settings.credential_rotation_days == 0
+    assert cfg.settings.credential_rotation_hours == 0
     assert cfg.settings.credential_reconcile_interval == 0

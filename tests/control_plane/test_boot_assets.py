@@ -27,8 +27,8 @@ set menu-url ${https-url}tftp/menu.ipxe
 
 FIRMWARE = (
     b"iPXE 2.0.0+ (ge6e51)\x00HTTPS\x00efi_nvs\x00"
-    b"keygen: device key already exists\x00pubkey: no device key\x00"
-    b"Usage: sign\x00Trusted server certificate fingerprint (TOFU)\x00"
+    b"Usage: akgen\x00Usage: akpub\x00Usage: quote\x00"
+    b"Trusted server certificate fingerprint (TOFU)\x00"
 )
 
 MENU = """\
@@ -77,11 +77,11 @@ def test_inventory_reports_uefi_firmware_chain_and_menu(tmp_path):
 def test_firmware_capability_gap_is_flagged(tmp_path):
     """文件存在但缺少 boot.ipxe 依赖的命令时必须标出来，不能只看文件在不在。"""
     conf, tftp = _tree(tmp_path)
-    (tftp / "snponly.efi").write_bytes(FIRMWARE.replace(b"Usage: sign\x00", b""))
+    (tftp / "snponly.efi").write_bytes(FIRMWARE.replace(b"Usage: quote\x00", b""))
 
     uefi = boot_assets.inventory(conf, tftp)["firmware"][0]
     assert uefi["status"] == "incomplete"
-    assert [cap["id"] for cap in uefi["capabilities"] if not cap["present"]] == ["sign"]
+    assert [cap["id"] for cap in uefi["capabilities"] if not cap["present"]] == ["quote"]
 
 
 def test_missing_firmware_and_empty_script_are_reported(tmp_path):
@@ -153,6 +153,22 @@ def test_repo_boot_chain_keeps_tftp_to_pointer():
     assert "boot-dir" not in cfg_code
     assert "set https-port 443" in boot_code
     assert "set https-port 443" in cfg_code
+
+    # 设备身份随引导脚本一起交付：缺任一步都会让设备拿不到凭据
+    for token in ("akgen", "akpub", "quote ${nonce}",
+                  "ak_public=${ak-public}", "ak_name=${ak-name}", "sb=${sb}",
+                  "quote_sig=${quote-sig}"):
+        assert token in cfg_code, token
+    for stale in ("keygen", "sign ${nonce}", "sig=${sig}"):
+        assert stale not in cfg_code, stale
+
+    # 无 TPM 也要上报（控制面记 no_tpm），但不带 AK 参数
+    assert ":report-fingerprint" in cfg_code
+    reports = [line for line in cfg_code.splitlines() if "devices/report?" in line]
+    assert len(reports) == 2
+    assert "ak_public=" in reports[0]
+    assert "ak_public=" not in reports[1]
+    assert "sb=${sb}" in reports[1]
 
 
 def test_boot_assets_endpoint(tmp_path, client, auth_headers, monkeypatch):

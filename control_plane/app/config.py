@@ -126,7 +126,7 @@ class Settings:
 
     测试重定向 DEFAULT_* 常量或替换 KURRENT_CONFIG_FILE 后无需重建实例即生效。
     两个凭据后台参数保留 env 覆盖（KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL /
-    KURRENT_CP_CREDENTIAL_ROTATION_DAYS），供测试与临时运维；声明值是缺省来源。
+    KURRENT_CP_CREDENTIAL_ROTATION_HOURS），供测试与临时运维；声明值是缺省来源。
     """
 
     def __getattr__(self, name: str):
@@ -149,14 +149,14 @@ class Settings:
                 return float(raw)
             except ValueError:
                 return float(CONFIG.spec.credentials.reconcile_interval_seconds)
-        if name == "credential_rotation_days":
-            raw = os.getenv("KURRENT_CP_CREDENTIAL_ROTATION_DAYS")
+        if name == "credential_rotation_hours":
+            raw = os.getenv("KURRENT_CP_CREDENTIAL_ROTATION_HOURS")
             if raw is None:
-                return float(CONFIG.spec.credentials.rotation_days)
+                return float(CONFIG.spec.credentials.rotation_hours)
             try:
                 return float(raw)
             except ValueError:
-                return float(CONFIG.spec.credentials.rotation_days)
+                return float(CONFIG.spec.credentials.rotation_hours)
         if name == "insecure":
             # 开发模式开关（唯一放行口；生产严禁）：KURRENT_CP_INSECURE=1 显式开启
             return os.getenv("KURRENT_CP_INSECURE", "") == "1"

@@ -1250,14 +1250,14 @@ _reconcile_thread_started = False
 
 def _rotation_due(entry: dict, now: dt.datetime) -> bool:
     """密钥条目是否到达轮换周期（rotated_at > updated_at > created_at 取最新可用基准）。"""
-    days = settings.credential_rotation_days
-    if days <= 0:
+    hours = settings.credential_rotation_hours
+    if hours <= 0:
         return False
     for key in ("rotated_at", "updated_at", "created_at"):
         raw = str(entry.get(key) or "")
         if raw:
             try:
-                return (now - dt.datetime.fromisoformat(raw)).total_seconds() >= days * 86400
+                return (now - dt.datetime.fromisoformat(raw)).total_seconds() >= hours * 3600
             except ValueError:
                 continue
     return False

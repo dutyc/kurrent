@@ -1,6 +1,6 @@
-"""设置管理端点（Bearer 鉴权）：注册窗口开启/查询/关闭、设备身份验签强制开关。
+"""设置管理端点（Bearer 鉴权）：注册窗口开启/查询/关闭、TPM 证明强制开关。
 
-窗口/开关状态逻辑在 trust 域（被 boot 验签链路共用），本模块仅 HTTP 壳。
+窗口/开关状态逻辑在 trust 域（被 boot 证明链路共用），本模块仅 HTTP 壳。
 """
 
 from fastapi import Depends, HTTPException, Request
@@ -79,14 +79,14 @@ def close_registration_window(request: Request):
 
 @router.get("/settings/enforcement")
 def get_enforcement():
-    """查询设备身份验签强制开关（过渡期兼容：关闭时无密钥设备照现状放行）。"""
+    """查询 TPM 证明强制开关（默认开启；显式关闭仅用于过渡/排障）。"""
     return {"enabled": enforcement_enabled()}
 
 
 @router.put("/settings/enforcement")
 def set_enforcement(req: SetEnforcementRequest, request: Request):
-    """切换设备身份验签强制开关：开启后无 key_hash 设备 /boot-vars 直接拒绝下发
-    （注入四条件第 4 条硬性，已绑定也不放行）；存量设备认领完成后由管理员开启。"""
+    """切换 TPM 证明强制开关（默认开启）：开启后无 AK 设备 /boot-vars 直接拒绝下发
+    （注入四条件第 4 条硬性，已绑定也不放行）；关闭仅用于过渡/排障（存量无密钥设备）。"""
     enabled = bool(runtime_settings.set("enforce_device_auth", req.enabled))
     record("settings.enforcement", "ok", enabled=enabled, client=client_host(request))
     return {"enabled": enabled}

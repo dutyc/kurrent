@@ -3,7 +3,7 @@
 只回答状态，不展开菜单项：固件是否就位且具备 boot.ipxe 依赖的命令、脚本链是否齐全、
 菜单是否可解析。工具菜单（Memtest/WinPE）不属于 NVMe-oF 主路径，不检查。
 
-固件能力按二进制中的命令/配置字符串判定——文件存在但缺 keygen/pubkey/sign 的 stock iPXE
+固件能力按二进制中的命令/配置字符串判定——文件存在但缺 TPM 身份命令的 stock iPXE
 同样无法完成设备认证，不能只看文件是否存在。
 """
 
@@ -23,9 +23,9 @@ _STAGE2_TAG = "ipxe"
 _FIRMWARE_MARKERS = {
     "https": ("HTTPS 引导", b"HTTPS"),
     "nvs": ("NVS 持久化", b"efi_nvs"),
-    "keygen": ("设备密钥生成", b"keygen: device key already exists"),
-    "pubkey": ("公钥导出", b"pubkey: no device key"),
-    "sign": ("挑战签名", b"Usage: sign"),
+    "akgen": ("TPM AK 创建", b"Usage: akgen"),
+    "akpub": ("AK 公钥导出", b"Usage: akpub"),
+    "quote": ("PCR quote", b"Usage: quote"),
     "tofu": ("TOFU 锚定", b"Trusted server certificate fingerprint (TOFU)"),
 }
 _HOST_ROOT = "tftp"

@@ -13,13 +13,11 @@ from ..config import settings
 from ..stores import agents, credentials, devices, dnsmasq, record, store
 from ..trust import (
     admission_allowed,
-    consume_nonce,
     device_for_boot,
     issue_nonce,
-    parse_pubkey,
-    sha256_hex,
-    verify_boot_identity,
-    verify_rotate_signature,
+    parse_ak_name,
+    parse_ak_public,
+    verify_attestation,
     window_open,
 )
 from ..utils import (
@@ -67,18 +65,15 @@ def boot_vars(
     mac: str | None = None,
     hostname: str | None = None,
     nonce: str | None = None,
-    sig: str | None = None,
+    quote: str | None = None,
+    quote_sig: str | None = None,
     output_format: str = Query("ipxe", alias="format"),
 ):
     _enforce_rate("boot_vars", request, route="/boot-vars")
     if output_format not in {"ipxe", "json"}:
         raise HTTPException(400, "format must be ipxe or json")
-    # iPXE 脚本拼 URL 时不做百分号编码：base64 签名（DER）中的 '+' 原样进入 query，
-    # Starlette 按 form-urlencoded 规则把 '+' 解码为空格导致验签失败（verify_failed）。
-    # base64 字符集不含空格，将空格还原为 '+' 即可同时兼容 %2B 显式编码与未编码两种传递。
-    if sig:
-        sig = sig.replace(" ", "+")
-    payload = _boot_vars_payload(mac=mac, hostname=hostname, nonce=nonce, sig=sig)
+    payload = _boot_vars_payload(mac=mac, hostname=hostname, nonce=nonce,
+                                 quote=quote, quote_sig=quote_sig)
     if output_format == "json":
         return JSONResponse(_boot_vars_json(payload))
     return Response(_boot_vars_ipxe(payload), media_type="text/plain")
@@ -99,12 +94,15 @@ def device_report(
     mem_speed: str | None = Query(None, alias="mem-speed"),
     chip: str | None = Query(None),
     busid: str | None = Query(None),
-    pubkey: str | None = Query(None),
+    ak_public: str | None = Query(None),
+    ak_name: str | None = Query(None),
+    ak_type: str | None = Query(None),
+    sb: str | None = Query(None),
 ):
-    """iPXE 设备信息上报（不鉴权）：11 字段指纹 + 可带 pubkey（ECDSA P-256 公钥，注册/认领用），
-    宽松解析（空值容忍，mem 兼容 0x hex/十进制），更新指纹 + last_seen。
-    注册只在窗口期（2026-08-21 裁定）：未知 MAC 仅在窗口开启、额度未用尽且带有效公钥时入池；
-    存量设备窗口期内带公钥上报 = 密钥认领（key_hash 填充，不占放行额度）。
+    """iPXE 设备信息上报（不鉴权）：11 字段指纹 + TPM AK 身份（ak_public/ak_name/ak_type）
+    与 Secure Boot 状态（sb=1/0），宽松解析，更新指纹 + last_seen。
+    注册只在窗口期：未知 MAC 仅在窗口开启、额度未用尽、AK 有效且 sb=1 时入池；
+    存量设备窗口期内带 AK 上报 = 身份认领（不占放行额度）。
     返回空响应（chain 无脚本副作用）。"""
     _enforce_rate("report", request)
     normalized = normalize_boot_mac(mac)
@@ -122,8 +120,19 @@ def device_report(
         "busid": clean_str(busid),
     }.items() if v is not None}
     now = now_iso()
-    key_hex = parse_pubkey(pubkey)  # 合法 → 规范化 hex；无参数/非法 → None
-    window_open_ = window_open()  # 密钥认领条件：只看窗口期，不看额度
+    ak_type_norm = clean_str(ak_type)
+    ak_hex = parse_ak_public(ak_public, ak_type_norm)
+    ak_name_hex = parse_ak_name(ak_name)
+    identity = None
+    if ak_hex and ak_name_hex:
+        identity = {
+            "kind": "tpm_ak",
+            "ak_public": ak_hex,
+            "ak_name": ak_name_hex,
+            "ak_type": ak_type_norm,
+        }
+    sb_ok = clean_str(sb) == "1"
+    window_open_ = window_open()  # AK 认领条件：只看窗口期，不看额度
     updated = False
     claimed = False
     with devices.locked():
@@ -139,30 +148,38 @@ def device_report(
             if clean_uuid and not existing.get("uuid"):
                 existing["uuid"] = clean_uuid
             existing["last_seen"] = now
-            if window_open_ and key_hex:
-                old_key = existing.get("key_hash")
-                if old_key:
-                    if old_key != key_hex:
-                        # 密钥不一致：拒绝覆盖（吊销/重注册走删登记流程），仅审计
-                        record("device.claim", "rejected", mac=normalized, reason="key_mismatch")
+            if window_open_ and identity:
+                old_ak = (existing.get("identity") or {}).get("ak_public")
+                if old_ak:
+                    if old_ak != ak_hex:
+                        # AK 不一致：拒绝覆盖（恢复走删登记流程），仅审计
+                        record("device.claim", "rejected", mac=normalized, reason="ak_mismatch")
                 else:
-                    existing["key_hash"] = key_hex
-                    existing["pubkey_hash"] = sha256_hex(bytes.fromhex(key_hex))
+                    existing["identity"] = identity
+                    existing["attestation"] = {
+                        "state": "unproven", "last_at": None, "last_reason": None,
+                    }
                     claimed = True
             devices.save(data)
             updated = True
         else:
-            # 入池放行：窗口期 + 额度未用尽 + 带有效公钥。额度在锁内以本次加载的台账复核，
-            # 避免并发上报各自读到余量 1 而超额放行（已放行数派生自台账，不另存计数器）。
-            if not (key_hex and admission_allowed(devs)):
+            # 入池放行：窗口期 + 额度未用尽 + 有效 AK + Secure Boot 开启。额度在锁内以本次加载的
+            # 台账复核，避免并发上报各自读到余量 1 而超额放行（已放行数派生自台账，不另存计数器）。
+            if not (identity and sb_ok and admission_allowed(devs)):
+                reason = ("no_tpm" if not identity
+                          else "sb_disabled" if not sb_ok else "window_closed")
+                record("device.register", "rejected", mac=normalized, reason=reason,
+                       client=client_host(request))
                 return Response("#!ipxe\n", media_type="text/plain", status_code=200)
             devs[normalized] = {
                 "mac": normalized,
                 "uuid": clean_str(uuid),
                 "state": "pooled",
                 "bound_worker_id": None,
-                "key_hash": key_hex,
-                "pubkey_hash": sha256_hex(bytes.fromhex(key_hex)),
+                "identity": identity,
+                "attestation": {
+                    "state": "unproven", "last_at": None, "last_reason": None,
+                },
                 "source": "ipxe",
                 "fingerprint": fingerprint,
                 "first_seen": now,
@@ -178,8 +195,10 @@ def device_report(
         record("device.report", "ok", mac=normalized, client=client_host(request), updated=True)
         if claimed:
             record("device.claim", "ok", mac=normalized)
+            record("device.ak.register", "ok", mac=normalized)
     else:
         record("device.register", "ok", mac=normalized, source="ipxe", client=client_host(request))
+        record("device.ak.register", "ok", mac=normalized)
     return Response("#!ipxe\n", media_type="text/plain", status_code=200)
 
 
@@ -187,76 +206,36 @@ def device_report(
 @principal("anonymous")
 def device_challenge(mac: str, request: Request):
     """挑战端点（不鉴权）：一次性 nonce，短 TTL、绑定 mac。nonce 本身无秘密，仅防重放。
-    设备不存在/未认领/已吊销 → 404（吊销设备不得进入验签链路，也不给 nonce）。
+    设备不存在/未认领/已吊销 → 404（吊销设备不得进入证明链路，也不给 nonce）。
     响应 #!ipxe 脚本体 set nonce <64hex>（iPXE chain 直接消费为 ${nonce}）。"""
     _enforce_rate("challenge", request)
     normalized = normalize_boot_mac(mac)
     if not normalized:
         raise HTTPException(400, "invalid mac")
     device = device_for_boot(normalized)
-    if not device or not device.get("key_hash") or device.get("state") == "revoked":
+    identity = (device or {}).get("identity") or {}
+    if not device or not identity.get("ak_public") or device.get("state") == "revoked":
         raise HTTPException(404, "device not registered or not claimed")
     nonce = issue_nonce(normalized)
     return Response(f"#!ipxe\nset nonce {nonce}\n", media_type="text/plain")
-
-
-@router.post("/devices/rotate")
-@principal("anonymous")
-def device_rotate(request: Request, mac: str, pubkey: str, nonce: str, sig: str):
-    """设备密钥轮换（不鉴权，凭旧密钥签名）：签名串 = rotate||mac||new_pubkey||nonce。
-
-    nonce 由 /devices/challenge 签发（一次性消费）。成功后 key_hash 换成新公钥，
-    旧密钥在 /devices/boot-vars 的验签链路上立即失效；不发新证书、不重开注册窗口。
-    """
-    _enforce_rate("rotate", request)
-    normalized = normalize_boot_mac(mac)
-    if not normalized:
-        raise HTTPException(400, "invalid mac")
-    new_key = parse_pubkey(pubkey)
-    if not new_key:
-        raise HTTPException(400, "invalid pubkey")
-    if not nonce or not sig:
-        raise HTTPException(400, "nonce and sig required")
-    with devices.locked():
-        data = devices.load()
-        device = data["devices"].get(normalized)
-        if not device:
-            raise HTTPException(404, "device not found")
-        if device.get("state") == "revoked":
-            raise HTTPException(403, "device revoked")
-        old_key = device.get("key_hash")
-        if not old_key:
-            raise HTTPException(409, "device has no key; claim it during the registration window first")
-        if not consume_nonce(normalized, nonce):
-            raise HTTPException(401, "nonce invalid, expired, or replayed")
-        if not verify_rotate_signature(normalized, nonce, new_key, sig, old_key):
-            raise HTTPException(401, "invalid signature for the current device key")
-        device["key_hash"] = new_key
-        device["key_rotated_at"] = now_iso()
-        devices.save(data)
-    record("device.key.rotate", "ok", mac=normalized)
-    audit.emit("credential", principal_class="device", principal=normalized,
-               route="POST /devices/rotate", decision="allow", reason="key_rotated",
-               client_ip=client_source(request),
-               fingerprint_sha256=sha256_hex(new_key.encode()))
-    return {"mac": normalized, "rotated": True}
 
 
 def _boot_vars_payload(
     mac: str | None,
     hostname: str | None,
     nonce: str | None = None,
-    sig: str | None = None,
+    quote: str | None = None,
+    quote_sig: str | None = None,
 ) -> dict[str, Any]:
     """启动变量投影。识别链：mac→设备台账→绑定 worker；hostname 仅作兜底。
     防冒领（D2）：带 mac 的请求须来自该 worker 绑定的设备（绑定即认证），不符 → 拒绝下发空脚本。
-    注入四条件第 4 条（2026-08-21）：设备身份签名验证——强制开关开启后，无 key_hash / 无签名 /
-    验签失败一律拒绝（已绑定也不放行）；过渡期无密钥设备照现状放行（防冒领）。
+    注入四条件第 4 条：TPM 证明——开关默认开启，无 AK / 无 quote / 证明失败 / PCR 不符 /
+    重放一律拒绝（已绑定也不放行）；显式关闭仅用于过渡/排障，无 AK 设备照现状放行（防冒领）。
     注册语义：注册只在窗口期（走 /devices/report），boot-vars 无写副作用、无注册通道。"""
     match = _find_worker_for_boot(mac=mac, hostname=hostname)
     if match:
         if _boot_binding_ok(match[0], mac):
-            allowed, verified = verify_boot_identity(mac, nonce, sig, match[0])
+            allowed, verified = verify_attestation(mac, nonce, quote, quote_sig, match[0])
             if not allowed:
                 return {}  # 第 4 条不通过 → 拒绝下发
             payload = _worker_boot_payload(match, include_credentials=verified)
@@ -282,7 +261,7 @@ def _worker_boot_payload(
     *,
     include_credentials: bool,
 ) -> dict[str, Any]:
-    """按已识别 worker 投影启动变量。凭据仅在设备身份验签通过后注入。"""
+    """按已识别 worker 投影启动变量。凭据仅在设备 TPM 证明通过后注入。"""
     worker_id, record_ = match
     disk = default_disk_for(record_)
     agent_id = disk.get("agent") if disk else None

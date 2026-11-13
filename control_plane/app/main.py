@@ -1,7 +1,7 @@
 """控制面组装入口：装配共享存储（stores）、信任根域（trust）与资源域路由。
 
 业务逻辑按域拆分到 app/utils.py（纯工具）、app/stores.py（全局单例 + 审计）、
-app/auth.py（认证器链/RBAC/会话）、app/trust.py（注册窗口/强制/验签）与 app/routers/ 各域。
+app/auth.py（认证器链/RBAC/会话）、app/trust.py（注册窗口/证明强制）与 app/routers/ 各域。
 本模块仅负责：创建 FastAPI 应用、按序挂载路由、启动时执行一次旧数据迁移与凭据自举。
 """
 

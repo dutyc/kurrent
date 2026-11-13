@@ -52,10 +52,10 @@ class TestRegistrationWindowSmoke:
 class TestEnforcementSmoke:
     """设备身份验签强制开关（t4 端点）。"""
 
-    def test_enforcement_default_off(self, client, auth_headers):
+    def test_enforcement_default_on(self, client, auth_headers):
         res = client.get("/settings/enforcement", headers=auth_headers)
         assert res.status_code == 200
-        assert res.json() == {"enabled": False}
+        assert res.json() == {"enabled": True}
 
     def test_enforcement_toggle(self, client, auth_headers):
         res = client.put("/settings/enforcement", json={"enabled": True}, headers=auth_headers)
