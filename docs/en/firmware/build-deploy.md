@@ -23,7 +23,21 @@ Prerequisites:
 ```bash
 git clone https://github.com/dutyc/kurrent-firmware
 cd kurrent-firmware
+SB_KEY=/path/to/artifact-signing.key \
+SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 \
+./build/build-sb.sh
+```
+
+`build-sb.sh` embeds the static scripts, pins the boot CA and controller address on top of the regular build, and produces a first hop signed with `sbsign`. Signing inputs, the manifest and provisioning are in [Secure Boot Boot](./secure-boot.md).
+
+The regular `./build/build.sh` does not sign anything and its artifacts are only for local debugging and research; targets with Secure Boot enabled reject them.
+
+```bash
 ./build/build.sh
+UPSTREAM_COMMIT=<sha> ./build/build.sh   # alternate upstream baseline; patches must still apply
+JOBS=8 ./build/build.sh                  # parallelism
 ```
 
 The pipeline:
@@ -34,16 +48,7 @@ The pipeline:
 4. Build the UEFI targets and copy them to `dist/`.
 5. Generate `dist/SHA256SUMS`.
 
-Optional parameters:
-
-```bash
-UPSTREAM_COMMIT=<sha> ./build/build.sh   # alternate upstream baseline; patches must still apply
-JOBS=8 ./build/build.sh                  # parallelism
-```
-
 See `patches/README` in the firmware repository for the patch baseline and upgrade procedure. Before upgrading upstream, confirm every patch still applies and rerun QEMU and whole-machine validation.
-
-Deployments use the signed artifact `dist/secureboot/snponly-sb.efi` from `build-sb.sh`; unsigned `build.sh` artifacts are rejected by firmware on targets with Secure Boot enabled. Signing inputs, artifacts and provisioning are in [Secure Boot Boot](./secure-boot.md).
 
 Verify the artifacts:
 
@@ -51,6 +56,8 @@ Verify the artifacts:
 cd dist
 sha256sum -c SHA256SUMS
 ```
+
+For signed artifacts the reference digest is `artifact_sha256` in `dist/secureboot/manifest.json`, which `/boot-assets` compares against the actual image hash.
 
 Release assets use flat names (for example `pxe-uefi-snponly.efi`), while the checksum file keeps the `pxe-uefi/` directory layout. Place files in that layout before checking, or compare only the target file digest.
 

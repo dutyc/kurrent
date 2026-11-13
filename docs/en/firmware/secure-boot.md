@@ -43,7 +43,7 @@ Required inputs:
 - `BOOT_CA_CERT`: the control plane's boot CA certificate (`state/pki/ca/boot/ca.crt`), pinned into the firmware as `TRUST=` / `CERT=`.
 - `CONTROLLER_IP`: set it when the control-plane address is fixed; leave it empty to use DHCP `next-server`.
 
-The script embeds `auto.ipxe`, `sb-boot.ipxe.cfg` (port and controller address), and `sb-menu.ipxe`, then signs the result with `sbsign`. Artifacts land in `dist/secureboot/`: `snponly-sb.efi`, `manifest.json`, `SHA256SUMS`; the manifest records the signer, build time, port, and boot CA fingerprint.
+The script embeds `auto.ipxe`, `sb-boot.ipxe.cfg` (port and controller address), and `sb-menu.ipxe`, then signs the result with `sbsign`. Artifacts land in `dist/secureboot/`: `snponly-sb.efi` and `manifest.json`; the manifest records the artifact hash, signer, build time, port, and boot CA fingerprint.
 
 The script is the only entry point for the static boot logic: changing the menu, a variable, or a jump requires a rebuild and a new signature; the logic cannot be replaced on its own.
 

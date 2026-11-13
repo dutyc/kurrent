@@ -43,7 +43,7 @@ BOOT_HTTPS_PORT=4443 \
 - `BOOT_CA_CERT`：控制面的 boot CA 证书（`state/pki/ca/boot/ca.crt`），构建时作为 `TRUST=` / `CERT=` 固定进固件。
 - `CONTROLLER_IP`：控制面地址固定时填写；留空则使用 DHCP `next-server`。
 
-脚本把 `auto.ipxe`、`sb-boot.ipxe.cfg`（含端口与控制面地址）与 `sb-menu.ipxe` 一并嵌入，再由 `sbsign` 签名。产物在 `dist/secureboot/`：`snponly-sb.efi`、`manifest.json`、`SHA256SUMS`；manifest 记录签名者、构建时间、端口与 boot CA 指纹。
+脚本把 `auto.ipxe`、`sb-boot.ipxe.cfg`（含端口与控制面地址）与 `sb-menu.ipxe` 一并嵌入，再由 `sbsign` 签名。产物在 `dist/secureboot/`：`snponly-sb.efi` 与 `manifest.json`；manifest 记录产物哈希、签名者、构建时间、端口与 boot CA 指纹。
 
 脚本是静态引导逻辑的唯一入口：改菜单、变量或跳转都必须重新构建并签名，不能单独替换。
 

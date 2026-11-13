@@ -23,7 +23,21 @@
 ```bash
 git clone https://github.com/dutyc/kurrent-firmware
 cd kurrent-firmware
+SB_KEY=/path/to/artifact-signing.key \
+SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 \
+./build/build-sb.sh
+```
+
+`build-sb.sh` 在普通构建之上嵌入静态脚本、固定 boot CA 与控制面地址，产出经 `sbsign` 签名的首跳。构建输入、manifest 与预置步骤见 [Secure Boot 引导](./secure-boot.md)。
+
+普通构建 `./build/build.sh` 不签名，产物只用于本地调试与研究；开启 Secure Boot 的目标机会拒绝加载。
+
+```bash
 ./build/build.sh
+UPSTREAM_COMMIT=<sha> ./build/build.sh   # 指定上游基线，补丁须兼容
+JOBS=8 ./build/build.sh                  # 并行度
 ```
 
 构建流水线：
@@ -34,16 +48,7 @@ cd kurrent-firmware
 4. 构建 UEFI 目标，复制到 `dist/`。
 5. 生成 `dist/SHA256SUMS`。
 
-可选参数：
-
-```bash
-UPSTREAM_COMMIT=<sha> ./build/build.sh   # 指定上游基线，补丁须兼容
-JOBS=8 ./build/build.sh                  # 并行度
-```
-
 补丁基线与升级流程见固件仓库 `patches/README`。升级上游前需逐个确认补丁仍可应用，并重新执行 QEMU 与整机验证。
-
-部署使用 `build-sb.sh` 产出的签名产物 `dist/secureboot/snponly-sb.efi`；`build.sh` 的未签名产物在开启 Secure Boot 的目标机上会被固件拒绝。签名的输入、产物与预置步骤见 [Secure Boot 引导](./secure-boot.md)。
 
 校验产物：
 
@@ -51,6 +56,8 @@ JOBS=8 ./build/build.sh                  # 并行度
 cd dist
 sha256sum -c SHA256SUMS
 ```
+
+签名产物的哈希以 `dist/secureboot/manifest.json` 的 `artifact_sha256` 为准，`/boot-assets` 会与镜像实际哈希核对。
 
 发布页资产使用扁平命名（如 `pxe-uefi-snponly.efi`），校验文件内保留 `pxe-uefi/` 目录结构；下载后按目录放置再校验，或只比对目标文件摘要。
 
