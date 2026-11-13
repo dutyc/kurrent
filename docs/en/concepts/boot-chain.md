@@ -8,7 +8,7 @@ This page describes the main path (NVMe/TCP with TLS 1.3). Firmware build and pr
 
 ![Boot chain: first hop, device identity and data plane](/diagrams/boot-chain.svg)
 
-The split is explicit: firmware provides protocol drivers, device-key commands, NVRAM and TOFU; the platform repository owns boot scripts and admission decisions.
+The split is explicit: firmware provides protocol drivers, TPM AK and quote commands, NV storage and TOFU; the platform repository owns boot scripts and admission decisions.
 
 ## 1. Network Boot
 
@@ -23,30 +23,36 @@ The TFTP root exposes only these two files. Restart the dnsmasq container after 
 
 ## 2. Device Identity
 
-On first boot, firmware runs `keygen`, generating an ECDSA P-256 private key in EFI NVRAM; the key never leaves the machine. Later boots refuse to overwrite an existing key.
+On first boot, firmware creates an attestation key (AK, a restricted signing key; ECC P-256 or RSA-2048) inside the local TPM; the private key is non-exportable. Later boots reuse the same AK, and an existing AK is never recreated. The control plane records only the AK public key (SPKI DER), the AK name and the key type.
 
-`pubkey` exports the public key, and firmware reports to `/devices/report`:
+Firmware reports to `/devices/report`:
 
 - the 11-field fingerprint (MAC, UUID, SMBIOS, CPU, memory, NIC and others);
-- the device public key.
+- the AK public key, AK name and type;
+- the Secure Boot state (self-reported; used only for admission during enrollment).
 
 The control plane records the device in the pool by MAC. **Reporting is not authorization**:
 
-- an unknown MAC is admitted only while the registration window is open and a valid public key is present;
+- an unknown MAC is admitted only while the registration window is open, within the admission quota, with a valid AK and `sb=1`;
 - a pooled but unbound device receives no boot credentials;
-- once the window closes, reports only update fingerprints and add no entries.
+- once the window closes, reports only update fingerprints and add no entries;
+- devices without a TPM, or with Secure Boot off, are not admitted.
 
-The device key can be rotated online: the old key signs `rotate‖mac‖new_pubkey‖nonce`, and is invalidated immediately on success.
+The AK cannot be rotated online: device recovery or a mainboard swap goes through the administrator flow of deleting the entry and re-enrolling during a registration window.
 
-## 3. Challenge-Response
+## 3. Challenge-Attest
 
-With binding and signature enforcement in place, knowing a MAC is not enough to obtain credentials. The device requests a one-shot nonce from `/devices/challenge` and signs:
+With binding and attestation enforcement on (the default), knowing a MAC is not enough to obtain credentials. The device requests a one-shot nonce from `/devices/challenge` and produces an SHA-256 quote over PCR 0/2/4/7 with its TPM AK:
 
 ```text
-nonce ‖ mac          (no separator; ECDSA P-256 / SHA-256)
+extraData = nonce    (verbatim; no encoding transform)
+qualifiedSigner = AK
+pcrDigest = SHA-256( PCR 0 / 2 / 4 / 7 )
 ```
 
-The nonce is single-use and bound to the MAC; `report`, `challenge` and `boot-vars` are rate-limited per source IP. The signature is submitted with `/boot-vars`, and the control plane verifies it against the device public key.
+Reading the PCRs and producing the quote happen in one TPM call, so no state can change between the two reads. The nonce is single-use and bound to the MAC; `report`, `challenge` and `boot-vars` are rate-limited per source IP. The quote and signature are submitted with `/boot-vars`; the control plane verifies them against the registered AK public key and compares the PCR digest with the platform baseline.
+
+The baseline is recorded the first time attestation passes (TOFU); a digest change is denied as `pcr_mismatch` and kept as a pending digest until an administrator approves it.
 
 ## 4. Admission and Variable Projection
 
@@ -54,10 +60,10 @@ The nonce is single-use and bound to the MAC; `report`, `challenge` and `boot-va
 
 1. **Resolution**: the request MAC is resolved to a Worker through the device ledger; hostname is only a fallback when no MAC is supplied or the ledger has no hit.
 2. **Binding is authentication**: the requesting MAC must belong to the matched Worker's bound device; another device cannot claim the Worker's boot identity.
-3. **Signature verification**: with enforcement on, no key, no signature or a bad signature is rejected.
+3. **TPM attestation**: enforcement is on by default, and a missing AK, an invalid quote, a replayed nonce or a PCR mismatch is rejected.
 4. **Credential conditions**: the Worker is bound and a key entry exists; the nvmet backend also requires the storage node's data-plane port to be ready. If an nvmet condition fails, the payload is withheld; non-nvmet backends project no NVMe-oF credentials.
 
-After these checks, projection depends on whether the device completed signature verification: credentials go only to verified devices, while non-credential variables may be served in transitional mode.
+After these checks, projection depends on the attestation result: credentials go only to devices that passed attestation, and non-credential variables are served only when attestation enforcement is explicitly disabled.
 
 | Variable | Content |
 | --- | --- |
@@ -111,10 +117,11 @@ No machine identity is written into the disk: identity, credentials and connecti
 
 ## Failure Paths
 
-- **Device never enters the pool** — Registration window closed; report lacks a valid public key; device revoked.
+- **Device never enters the pool** — Registration window closed; report lacks a valid AK or `sb!=1`; device revoked.
 - **Device pooled but cannot boot** — No Worker binding; or the Worker has no system disk.
 - **Device reboots repeatedly** — The Worker has no default disk; or the pooled device is not yet bound.
-- **"No key / no signature" after enforcement** — Device has not claimed its key; boot script did not obtain a nonce.
+- **`ak_unregistered` / `quote_invalid` under enforcement (the default)** — Device has not claimed its AK; the boot script did not obtain a nonce or produce a quote.
+- **`pcr_mismatch`** — Firmware, Secure Boot or boot configuration changed; an administrator approves the new baseline from the device detail page.
 - **Boot variables withheld** — Worker has no credential; backend is not nvmet; data-plane port is not ready.
 - **Reboot after the menu timeout** — No default disk set.
 - **Data-plane connect fails** — PSK not in the storage node keyring; `tlshd` version or kernel TLS support missing.
@@ -124,9 +131,9 @@ No machine identity is written into the disk: identity, credentials and connecti
 
 The first hop (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`) has no cryptographic protection: device firmware does not verify it, and iPXE has not yet obtained the server certificate. Deployments treat the PXE network itself as the trust boundary, while retaining:
 
-- device-identity TOFU (NVRAM key + registration window + binding);
+- device identity (TPM AK + PCR baseline TOFU + registration window + binding);
 - server TOFU;
-- challenge-response and binding-as-authentication;
+- PCR attestation and binding-as-authentication;
 - data-plane encryption with no plaintext fallback.
 
 Attackers on the same Layer 2, a compromised host or physical access are outside this boundary. See the [Security Model](../architecture/security.md) for the full threat model and upgrade paths.
@@ -135,8 +142,8 @@ Attackers on the same Layer 2, a compromised host or physical access are outside
 
 | Capability | Provided by |
 | --- | --- |
-| DHCP/TFTP client, HTTPS, TOFU, NVRAM | Firmware |
-| `keygen` / `pubkey` / `sign` | Firmware |
+| DHCP/TFTP client, HTTPS, TOFU | Firmware |
+| TPM AK creation and PCR quote | Firmware |
 | NVMe/TCP driver, DH-HMAC-CHAP, NBCT | Firmware |
 | Boot scripts, registration window, `/boot-vars` admission | Platform control plane |
 | System disks, credentials, menu generation | Platform control plane |

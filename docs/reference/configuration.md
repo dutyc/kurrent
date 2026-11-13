@@ -97,7 +97,7 @@ SAN 或天数变化默认只报告漂移；`rotateOnChange: true` 才会自动�
 
 | 字段 | 默认值 | 范围 | 说明 |
 | --- | --- | --- | --- |
-| `rotationDays` | `90` | 0–3650 | DHHC-1 定期轮换周期；`0` 关闭 |
+| `rotationHours` | `24` | 0–8760 | DHHC-1 定期轮换周期（小时）；`0` 关闭 |
 | `reconcileIntervalSeconds` | `60` | 0–86400 | 凭据推送对账周期；`0` 关闭 |
 
 ### `spec.agentTimeoutSec`
@@ -145,7 +145,7 @@ spec:
     windowMaxTtlMinutes: 60
     windowMaxDevices: 1000
   credentials:
-    rotationDays: 90
+    rotationHours: 24
     reconcileIntervalSeconds: 60
   agentTimeoutSec: 10
 ```
@@ -230,7 +230,7 @@ kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 | 服务器证书 | `spec.serverCert` | 默认只报告；`rotateOnChange` 开启后重签 |
 | 组件 PKI | `spec.pki` | 启动时校验；缺失或损坏导致健康检查失败 |
 
-注册窗口、验签强制开关等运行时设置存放于 `state/settings.json`，不进入声明，也不参与 `configHash`。
+注册窗口、TPM 证明强制开关等运行时设置存放于 `state/settings.json`，不进入声明，也不参与 `configHash`。
 
 ## 环境变量
 
@@ -240,7 +240,7 @@ kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 | `KURRENT_CP_INSECURE` | 开发模式放行所有请求 | 仅本地开发，生产禁用 |
 | `KURRENT_CP_OPENAPI` | 开启 OpenAPI 文档端点 | 默认关闭 |
 | `KURRENT_CP_ALARM_WEBHOOK` | 告警外投 URL | 可选 |
-| `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` | 临时覆盖轮换周期 | 运维与测试 |
+| `KURRENT_CP_CREDENTIAL_ROTATION_HOURS` | 临时覆盖轮换周期（小时） | 运维与测试 |
 | `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` | 临时覆盖对账周期 | 运维与测试 |
 | `KURRENT_CP_CRL_REFRESH_INTERVAL` | 临时覆盖 CRL 重签周期 | 运维与测试 |
 

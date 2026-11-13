@@ -46,7 +46,7 @@ const zh = {
     sub: '一个系统由四件事共同定义。它们一起移动、一起存在、一起被替换；拆开任何一件，都不是同一个系统。',
     head: ['对象', '内容', '归属'],
     rows: [
-      ['身份', 'Worker 标识、主机名、绑定的设备公钥', '设备台账 / 控制面'],
+      ['身份', 'Worker 标识、主机名、绑定的设备 AK', '设备台账 / 控制面'],
       ['系统盘', '完整盘 NQN、<code>os_tag</code>、镜像版本', '存储节点'],
       ['声明', '<code>kurrent.yaml</code>：网络、后端、数据目录、NQN 命名域', '版本库 / 节点'],
       ['凭据', 'DHHC-1 认证密钥；由它派生的 TLS PSK', '控制面 / 目标端'],
@@ -121,7 +121,7 @@ const en = {
     sub: 'A system is defined by four things. They move, exist and are replaced together; remove any one and it is no longer the same system.',
     head: ['Object', 'Content', 'Owner'],
     rows: [
-      ['Identity', 'Worker id, hostname, bound device public key', 'Device ledger / control plane'],
+      ['Identity', 'Worker id, hostname, bound device AK', 'Device ledger / control plane'],
       ['System disk', 'Full disk NQN, <code>os_tag</code>, image version', 'Storage node'],
       ['Declaration', '<code>kurrent.yaml</code>: network, backend, data directory, NQN namespace', 'Repository / node'],
       ['Credentials', 'DHHC-1 authentication key; TLS PSK derived from it', 'Control plane / target'],

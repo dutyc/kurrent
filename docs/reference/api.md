@@ -13,7 +13,7 @@ outline: 2
 
 Control Plane 是控制面宿主上的常驻 HTTP 服务，负责：
 
-- 设备台账与注册窗口：设备上报、挑战-应答、密钥轮换与绑定
+- 设备台账与注册窗口：设备上报、挑战-应答、TPM 证明与绑定
 - Worker 身份、系统盘与默认启动盘台账
 - Agent 登记、探测、排空与存储编排调度
 - 引导链投影（`/boot-vars`、`/boot-assets`）
@@ -121,12 +121,12 @@ curl -s "$BASE_URL/workers" \
 | 文件 | 含义 |
 |---|---|
 | `config/agents.yml` | Agent 节点清单与调度角色 |
-| `state/devices.yml` | 设备台账（设备池 / 绑定 / 指纹 / 公钥）——**绑定关系唯一权威**（`bound_worker_id`） |
+| `state/devices.yml` | 设备台账（设备池 / 绑定 / 指纹 / TPM AK 与 PCR 基线）——**绑定关系唯一权威**（`bound_worker_id`） |
 | `state/workers.yml` | Worker 台账（计算身份 / 系统盘 / 默认启动） |
 | `state/credentials.yml` | NVMe-oF 认证密钥库（DHHC-1，按 Worker 跟盘） |
 | `state/credential-push.yml` | 凭据推送状态台账（逐 Agent 送达结果，对账与投影用，见 7.7） |
 | `state/masters.yml` | 母盘标签登记台账（os / os_version 备注，见 6.4） |
-| `state/settings.json` | 运行时设置（注册窗口 / 验签强制开关） |
+| `state/settings.json` | 运行时设置（注册窗口 / 证明强制开关） |
 | `state/users.yml` | 管理面用户组映射（CN → groups；首次启动自举 admin 条目，之后随证书 CN 查组） |
 | `state/sessions.yml` | 服务端会话登记（key = `sha256(jti)`；删条目即失效，`epoch` 用于全部下线） |
 | `state/audit.jsonl` | 认证/授权/凭据审计与告警（见 1.3；与 `operations.jsonl` 分离） |
@@ -172,9 +172,9 @@ curl -s "$BASE_URL/workers" \
 | `DELETE` | `/sessions/{session_id}` | 逐个吊销会话（管理员，见 6.7） |
 | `DELETE` | `/sessions` | 全部下线：清空登记并递增 epoch（管理员，见 6.7） |
 | `GET` | `/boot-vars` | iPXE 启动变量动态注入，不鉴权 |
-| `GET` | `/devices/report` | iPXE 设备信息上报（不鉴权，11 字段，见 16.6） |
+| `GET` | `/devices/report` | iPXE 设备信息上报（不鉴权，11 字段指纹 + TPM AK，见 16.6） |
 | `GET` | `/devices/challenge` | 一次性 nonce 签发（不鉴权，挑战-响应，见 5.2） |
-| `POST` | `/devices/rotate` | 设备密钥轮换（不鉴权，旧密钥签名，见 5.3） |
+| `POST` | `/devices/{mac}/approve-baseline` | 批准设备最近一次上报的 PCR 基线（管理员，见 5.3） |
 | `GET` | `/devices` | 设备池列表（state 过滤，见 16.1） |
 | `GET` | `/devices/{mac}` | 单设备详情（见 16.2） |
 | `POST` | `/devices` | 手动注册设备入池（见 16.3） |
@@ -188,8 +188,8 @@ curl -s "$BASE_URL/workers" \
 | `GET` | `/settings/registration-window` | 查询注册窗口状态（见 5.1） |
 | `POST` | `/settings/registration-window` | 开启注册窗口（TTL/额度上限来自声明 `spec.registration`，见 5.1） |
 | `DELETE` | `/settings/registration-window` | 提前关闭注册窗口（见 5.1） |
-| `GET` | `/settings/enforcement` | 查询设备身份验签强制开关（见 5.1） |
-| `PUT` | `/settings/enforcement` | 切换设备身份验签强制开关（见 5.1） |
+| `GET` | `/settings/enforcement` | 查询 TPM 证明强制开关（见 5.1） |
+| `PUT` | `/settings/enforcement` | 切换 TPM 证明强制开关（见 5.1） |
 | `GET` | `/config` | 运行态声明配置与派生件一致性（见 5.4） |
 | `GET` | `/agents` | 查询 Agent 列表与能力 |
 | `POST` | `/agents` | 注册新 Agent（写入 agents.yml，重复 id 返回 409） |
@@ -271,7 +271,7 @@ curl -s "$BASE_URL/healthz"
 | `stage2[]` | 脚本链文件（`boot.ipxe`、`boot.ipxe.cfg`、`menu.ipxe`）：`file`、`path`、`host_path`、`status`、`size`、`mtime` |
 | `menu` | `status`（ok/unavailable）与 `items`（可选项计数，跳过 `--gap` 行） |
 
-`status=incomplete` 表示固件文件存在但缺少 `HTTPS` / `efi_nvs` / `keygen` / `pubkey` / `sign` / `TOFU` 中的任一项——stock iPXE 同样无法完成设备认证。`status=empty` 是零字节文件，`missing` 是文件不存在，`rejected` 表示路径越出 tftp 根（控制面拒绝且不会读取该路径）。`host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。
+`status=incomplete` 表示固件文件存在但缺少 `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` 中的任一项——stock iPXE 同样无法完成设备认证与 TPM 证明。`status=empty` 是零字节文件，`missing` 是文件不存在，`rejected` 表示路径越出 tftp 根（控制面拒绝且不会读取该路径）。`host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。
 
 ### curl
 
@@ -285,11 +285,11 @@ curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
 
 ### 说明
 
-给 iPXE 启动脚本读取 per-worker 启动变量。该接口不鉴权，只暴露受控内网启动所需变量；其中 NVMe-oF 凭据（`nbft_secret` / `nbft_tls_psk`）**只在设备身份验签通过后注入**（`mac` + 一次性 `nonce` + 有效签名，见 5.1）。
+给 iPXE 启动脚本读取 per-worker 启动变量。该接口不鉴权，只暴露受控内网启动所需变量；其中 NVMe-oF 凭据（`nbft_secret` / `nbft_tls_psk`）**只在 TPM 证明通过后注入**（`mac` + 一次性 `nonce` + 对该 nonce 的 PCR quote，见 5.1）。
 
-> **注意**：该端点**只读**（启动变量投影，无写副作用）。注册窗口期注册（新 MAC 携公钥入设备池）已收敛到 `GET /devices/report`（见 16.6），由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`。
+> **注意**：该端点**只读**（启动变量投影，无写副作用）。注册窗口期注册（新 MAC 携 TPM AK 入设备池）已收敛到 `GET /devices/report`（见 16.6），由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`。
 
-**限速**：按来源 IP 滑窗限速（默认 240 次/分钟，`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 可覆盖，`<=0` 关闭）；超限 `429` + `Retry-After` 并写 `boot_rate_limited` 告警。验签是这里最贵的操作，限速只抑制扫描，不作身份边界。
+**限速**：按来源 IP 滑窗限速（默认 240 次/分钟，`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 可覆盖，`<=0` 关闭）；超限 `429` + `Retry-After` 并写 `boot_rate_limited` 告警。证明校验是这里最贵的操作，限速只抑制扫描，不作身份边界。
 
 Control Plane 按以下顺序识别设备并投影启动变量：
 
@@ -312,8 +312,8 @@ Control Plane 按以下顺序识别设备并投影启动变量：
 | `base_iqn` | `workers.yml` 中该 Worker 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 `iqn` 去掉最后一个 `:` 后的前缀——盘标识权威 = NQN，IQN 由盘 NQN 派生；Worker 无系统盘时**不返回**（iPXE 沿用 `boot.ipxe.cfg` 静态默认值） |
 | `storager_ip` | 默认启动盘（同上选盘规则）的 `agent` -> `agents.yml` 中该 Agent 的 `storager_ip`（数据面地址，供 NVMe-oF 引导使用）；无系统盘时不返回 |
 | `iscsi_sep` | iSCSI root **连接符**（`${storager-ip}` 与 `${base-iqn}` 之间的分隔字段）。**仅 stgt / LIO 后端返回**：stgt 后端为 `:::1:`（lun 占位 1），LIO 后端为 `::::`（空占位）；后端类型**实时查询 Agent `/capabilities` 的 `backend` 字段**（节点自报，能力即真相），未登记 / 查询失败 / 取值非法时后端视为未知并记录 warning，不返回该字段（不按 stgt 兜底）；**不由 `agents.yml` 的 `tags` 推导**（tags 只作人工标签，否则标签与实况漂移时会按过期值拼出错连接符）；**nvmet 后端不下发**；无系统盘时不返回。当前引导脚本不消费该字段，保留给 iSCSI 兼容后端的 API 客户端 |
-| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker、密钥库有条目且设备身份验签通过时注入**，无密钥 / 未绑定 / 未验签 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（nvmet 后端下无密钥即 `/boot-vars` 整体不下发，menu 因缺变量而拒绝引导） |
-| `nbft_tls_psk` | NVMe/TCP TLS 的预共享密钥：**认证密钥的纯函数**（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex，见 7.7，无独立存储字段——轮换/吊销认证密钥即原子轮换/吊销 PSK）。**须同时满足「已绑定且有密钥」「设备身份验签通过」「后端为 nvmet」「该 Agent 上报的数据面端口就绪」才下发**，任一不满足即整个引导变量不下发（拒绝引导并记审计）——加密是默认行为，无明文回退。固件用它在该端口完成自身握手，并随 NBCT 表交给 initramfs，由其在同一端口以 `--tls` 重连 |
+| `nbft_secret` | 该 Worker 的 NVMe-oF 认证密钥（DHHC-1，`state/credentials.yml` 按 worker_id 索引，见 7.7）；**已绑定 Worker、密钥库有条目且 TPM 证明通过时注入**，无密钥 / 未绑定 / 未证明 / 请求被拒时不返回。固件侧消费：menu 拼 `nvme://...?secret=${nbft-secret}`（nvmet 后端下无密钥即 `/boot-vars` 整体不下发，menu 因缺变量而拒绝引导） |
+| `nbft_tls_psk` | NVMe/TCP TLS 的预共享密钥：**认证密钥的纯函数**（`HMAC-SHA256(raw_key, b"kurrent-nvme-tls-psk-v1")` → 64 hex，见 7.7，无独立存储字段——轮换/吊销认证密钥即原子轮换/吊销 PSK）。**须同时满足「已绑定且有密钥」「TPM 证明通过」「后端为 nvmet」「该 Agent 上报的数据面端口就绪」才下发**，任一不满足即整个引导变量不下发（拒绝引导并记审计）——加密是默认行为，无明文回退。固件用它在该端口完成自身握手，并随 NBCT 表交给 initramfs，由其在同一端口以 `--tls` 重连 |
 | `nbft_tls_port` | 数据面端口（固件段与内核段共用；实时取 Agent `/capabilities.port.trsvcid`——能力即真相，同 `iscsi_sep`/`backend` 的实时判定口径）；与 `nbft_tls_psk` 同条件下发。menu 在 sanboot URI 上拼 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}` |
 | `hostnqn` | 该 Worker 的发起端 Host NQN（盘 NQN 前缀 + `:host.<worker_id>`，与盘 NQN 同域、与 nvmet-host 登记的 host 条目一致）；**默认盘带 NQN 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件补丁 `0005` 支持 `hostnqn` 设置） |
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
@@ -330,8 +330,8 @@ mac 未命中且 hostname 也未命中 -> dnsmasq 投影（仅存量/无台账�
 未识别且 mac 已传 ->
   - 设备在池中（pooled）-> reboot 循环（menu-default=reboot + 短超时），等待绑定
   - 设备已吊销（revoked）-> 空脚本（菜单停留）
-  - 未知 MAC + 注册窗口开启 + 额度未用尽 + 带有效公钥 -> 入设备池（见下「注册窗口期注册」），返回 reboot 循环
-  - 未知 MAC + 窗口关闭 / 额度用尽 / 无公钥 -> 空脚本（菜单停留；上报只记指纹不入池）
+  - 未知 MAC + 注册窗口开启 + 额度未用尽 + 携带有效 AK 且 sb=1 -> 入设备池（见下「注册窗口期注册」），返回 reboot 循环
+  - 未知 MAC + 窗口关闭 / 额度用尽 / 无 AK / Secure Boot 未开启 -> 空脚本（菜单停留；上报只记指纹不入池）
 ```
 
 ### 默认启动项规则
@@ -355,13 +355,13 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 
 ### 注册窗口期注册（Zero-touch Provisioning）
 
-新设备开机时没有身份，iPXE 先 `chain` `/devices/report`（11 字段上报 + 可选 `pubkey`，见 16.6）再请求 `/boot-vars`。**注册只在窗口期**：仅当注册窗口开启、放行额度未用尽且上报携带有效 ECDSA P-256 公钥时，未知 MAC 才被收进设备池；窗口关闭后上报只更新指纹、不入池（无窗口外注册通道，代码层不可配永久）。
+新设备开机时没有身份，iPXE 先 `chain` `/devices/report`（11 字段指纹 + TPM AK 与 Secure Boot 状态，见 16.6）再请求 `/boot-vars`。**注册只在窗口期**：仅当注册窗口开启、放行额度未用尽、上报携带有效 TPM AK（`ak_public` / `ak_name` / `ak_type`）且自报 `sb=1` 时，未知 MAC 才被收进设备池；窗口关闭后上报只更新指纹、不入池（无窗口外注册通道，代码层不可配永久）。无 TPM 或 Secure Boot 未开启的设备不入池。
 
-1. `GET /devices/report`：未知 MAC + 窗口开启 + 额度未用尽 + 带 `pubkey` → 写入 `state/devices.yml`（`state=pooled`，指纹入库，`key_hash` 填充，`source=ipxe`）
+1. `GET /devices/report`：未知 MAC + 窗口开启 + 额度未用尽 + 有效 AK + `sb=1` → 写入 `state/devices.yml`（`state=pooled`，指纹入库，`identity` 记录 AK，`source=ipxe`）；不满足时只记审计 `device.register rejected`（`no_tpm` / `sb_disabled` / `window_closed`）
 2. `GET /boot-vars`：MAC 在池中未绑定 → 返回 `menu-default=reboot` + 短超时，循环重启等待管理员绑定
 3. 管理员将设备绑定到 Worker（WebUI / API，单绑 16.7、批量预览/执行 16.9/16.10）后，下次启动即按 Worker 配置正常引导
 
-存量设备密钥认领：已入池设备在窗口期内带公钥上报即填充 `key_hash`（认领完成）；密钥不一致拒绝覆盖（吊销/重注册走删登记流程）。认领只看窗口期、不受放行额度约束。认领完成后建议开启验签强制（见 5.1）。
+存量设备 AK 认领：已入池设备在窗口期内带 AK 上报即写入 `identity`（认领完成）；AK 不一致拒绝覆盖（仅审计 `device.claim rejected`，恢复走删登记流程）。认领只看窗口期、不受放行额度约束。认领完成后设备须再通过一次 TPM 证明，首次成功即记录 PCR 基线（见 5.2）。
 
 控制项：
 
@@ -369,14 +369,14 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 |---|---:|---|
 | 注册窗口 | 关闭 | 部署期用 `POST /settings/registration-window` 开启（TTL 1-60 分钟硬上限，到期自动关闭），见 5.1 |
 | 放行额度 | 不限 | 开窗时可选 `max_devices`（1-1000 台），窗口期内自动入池设备数达到上限即停止放行，见 5.1 |
-| 验签强制 | 关闭 | `GET/PUT /settings/enforcement`：开启后 `/boot-vars` 只向验签通过的已绑定设备下发，见 5.1 |
+| 证明强制 | 开启 | `GET/PUT /settings/enforcement`：默认开启，`/boot-vars` 只向 TPM 证明通过的已绑定设备下发；显式关闭仅用于过渡/排障，见 5.1 |
 | `spec.boot.autoBootTimeoutMs` | `1` | reboot 循环的菜单超时（毫秒） |
 
-注册全程有操作日志（`device.register` / `device.claim`），失败回滚台账并返回空脚本，下次请求重试，不影响 iPXE 引导。
+注册与认领有操作日志（`device.register` / `device.claim` / `device.ak.register`），失败不写台账并返回空脚本，下次请求重试，不影响 iPXE 引导。
 
 ### 防冒领（绑定即认证）
 
-请求带 `mac` 时，Control Plane 按设备台账校验该设备**绑定到的 Worker**（`bound_worker_id`，绑定权威）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份：**验签强制开启时直接拒绝**（`missing_mac`）；过渡期只下发菜单/导航变量，绝不注入凭据。这使设备↔Worker 绑定与设备验签共同成为开机时的认证边界：只有绑定的设备、并在验签通过后，才能拿到该 Worker 的启动配置与数据面凭据（如 `disk_nqn` / `nbft_secret` / `nbft_tls_psk`）。
+请求带 `mac` 时，Control Plane 按设备台账校验该设备**绑定到的 Worker**（`bound_worker_id`，绑定权威）；不符合（绑定其他 Worker / 未绑定 / 未知设备）→ **拒绝下发**：返回空脚本，不泄露启动变量。不带 `mac`（仅 hostname）的请求无法校验身份：**证明强制（默认开启）下直接拒绝**（`missing_mac`）；显式关闭时只下发菜单/导航变量，绝不注入凭据。这使设备↔Worker 绑定与 TPM 证明共同成为开机时的认证边界：只有绑定的设备、并在证明通过后，才能拿到该 Worker 的启动配置与数据面凭据（如 `disk_nqn` / `nbft_secret` / `nbft_tls_psk`）。
 
 ### Query 参数
 
@@ -385,8 +385,9 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 | `mac` | 否 | 无 | MAC 地址。后端自动剥离 `:` / `-` / `.` 后归一化，带冒号（`00:0c:29:b9:8b:2d`）与 `mac:hexraw`（`000c29b98b2d`）格式都支持 |
 | `hostname` | 否 | 无 | 主机名，如 `worker-01` |
 | `format` | 否 | `ipxe` | `ipxe` 或 `json` |
-| `nonce` | 否 | 无 | 挑战-响应一次性 nonce（`/devices/challenge` 签发，见 5.2）；验签强制开启时缺失 → `missing_sig` 拒绝 |
-| `sig` | 否 | 无 | ECDSA P-256 签名 base64(DER)，签名数据 `nonce‖mac` 无分隔拼接（见 5.2）；验签强制开启时缺失 → `missing_sig` 拒绝。**兼容还原**：iPXE 拼 URL 不做百分号编码，base64 的 `+` 原样进入 query 后被按 form-urlencoded 解码为空格，服务端将空格还原为 `+` 再验签 |
+| `nonce` | 否 | 无 | 挑战-响应一次性 nonce（`/devices/challenge` 签发，见 5.2）；证明强制（默认开启）下缺失 → `quote_invalid` 拒绝 |
+| `quote` | 否 | 无 | TPMS_ATTEST 原始字节 hex（不含 TPM2B_ATTEST 的 2 字节长度前缀）：对 PCR 0/2/4/7（SHA-256）的 quote，extraData 必须等于 `nonce` 字符串的 ASCII 字节（见 5.2）；缺失或格式非法 → `quote_invalid` 拒绝 |
+| `quote_sig` | 否 | 无 | AK 私钥对 quote 的签名（hex；ECC P-256 为 DER，RSA-2048 为 PKCS#1 v1.5）；验签失败 → `quote_invalid` 拒绝 |
 
 `mac` 和 `hostname` 至少建议传一个。iPXE 端推荐两个都传：
 
@@ -428,7 +429,7 @@ set menu-default reboot
 set menu-timeout 1
 ```
 
-新 MAC（窗口期注册）与完全无法识别时，窗口关闭或无公钥则返回空脚本：
+新 MAC（窗口期注册）与完全无法识别时，窗口关闭或无 AK 则返回空脚本：
 
 ```ipxe
 #!ipxe
@@ -478,7 +479,7 @@ curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01&format=json"
 }
 ```
 
-无法识别且未注册（窗口关闭 / 无公钥）时返回：
+无法识别且未注册（窗口关闭 / 无 AK）时返回：
 
 ```json
 {}
@@ -489,17 +490,17 @@ curl -s "$BASE_URL/boot-vars?mac=000c29b98b2d&hostname=worker-01&format=json"
 `tftp/boot.ipxe.cfg` 中，信任根链在挑战-应答握手后**经 HTTPS（nginx 443，TOFU 信任锚）**拉取该端点（见 5.2）：
 
 ```ipxe
-# 阶段 3：挑战-应答——签名请求携带 nonce+sig
+# 阶段 3：挑战-证明——非秘密 nonce 绑定本次引导
 :challenge
-chain --autofree ${https-url}devices/challenge?mac=${mac} && goto signed || goto bootvars
+chain --autofree ${https-url}devices/challenge?mac=${mac} && goto quoted || goto bootvars
 
-:signed
-sign ${nonce}${mac} || goto bootvars
-chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname}&nonce=${nonce}&sig=${sig} || goto vars-done
+:quoted
+quote ${nonce} || goto bootvars
+chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname}&nonce=${nonce}&quote=${quote}&quote_sig=${quote-sig} || goto vars-done
 goto vars-done
 
-# 降级路径（challenge 失败：未注册/未认领，或旧固件）：
-# 验签强制关闭期间放行；强制开启后 missing_sig 拒绝
+# 降级路径（challenge 失败：设备未登记 AK，或旧固件）：
+# 证明强制默认开启，无 quote 会被 quote_invalid 拒绝；仅在显式关闭时放行
 :bootvars
 chain --autofree ${https-url}boot-vars?mac=${mac}&hostname=${hostname} || goto vars-done
 
@@ -508,7 +509,7 @@ isset ${iscsi-sep} || set iscsi-sep :::1:
 isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-iqn ${base-iqn}:${mac}
 ```
 
-成功后返回的 `disk-nqn` / `storager-ip` 可能覆盖静态默认值，派生变量在 `:vars-done` 重建；`base-iqn` 用于派生 `initiator-iqn`，`iscsi-sep` 的默认值当前不参与菜单拼装。
+`${quote}` / `${quote-sig}` 是固件写入的 iPXE 变量（变量名用连字符），对应请求参数 `quote` / `quote_sig`。成功后返回的 `disk-nqn` / `storager-ip` 可能覆盖静态默认值，派生变量在 `:vars-done` 重建；`base-iqn` 用于派生 `initiator-iqn`，`iscsi-sep` 的默认值当前不参与菜单拼装。
 
 `menu.ipxe` 主引导项用 NVMe-oF 拼装：`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`，已注入 `nbft-secret` 时附加 `?secret=`，再附上 `&tls_psk=…&tls_trsvcid=…`；`nbft-tls-port` / `nbft-tls-psk` 为必需项——缺失即目标端加密未就绪，该项直接 `goto failed`，不再拼明文 URI。
 
@@ -525,13 +526,13 @@ agents:
 
 如果没有配置 `storager_ip`，Control Plane 会退回使用 `base_url` 的 host 部分；但当 `base_url` 是 `host.docker.internal` 时，这个值不适合给物理 Worker 使用。
 
-### 5.1 注册窗口与验签强制（/settings/registration-window、/settings/enforcement）
+### 5.1 注册窗口与证明强制（/settings/registration-window、/settings/enforcement）
 
 #### 说明
 
-注册窗口是部署期的受控注册通道：仅窗口开启期间，新设备上报（`GET /devices/report`）可携公钥自动注册入池并完成密钥认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 与额度上限来自声明 `spec.registration`（`windowMaxTtlMinutes` 默认 60、`windowMaxDevices` 默认 1000；不可配置为永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——密钥认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
+注册窗口是部署期的受控注册通道：仅窗口开启期间，新设备上报（`GET /devices/report`）可携 TPM AK 自动注册入池并完成 AK 认领；窗口关闭后上报只记指纹不入池（无窗口外注册通道）。TTL 与额度上限来自声明 `spec.registration`（`windowMaxTtlMinutes` 默认 60、`windowMaxDevices` 默认 1000；不可配置为永久），到期自动关闭（懒计算，状态以查询结果为准）。可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录），额度只约束未知设备自动入池——AK 认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。全部端点需 `Authorization: Bearer`。
 
-验签强制开关（过渡期兼容）：关闭时无密钥设备仍可拿到菜单变量，但**凭据一律不注入**（凭据只认验签）；开启后 `/boot-vars` 对已绑定设备执行注入四条件第 4 条——缺 `mac` → `missing_mac` 拒绝；无 `key_hash` → `no_key` 拒绝；缺 `nonce`/`sig` → `missing_sig` 拒绝；重放或签名无效 → 拒绝。已认领设备带无效签名在过渡期同样拒绝（伪造签名不放行）。建议全部存量设备完成密钥认领后再开启。
+证明强制默认开启：`/boot-vars` 对已绑定设备执行注入四条件第 4 条——缺 `mac` → `missing_mac` 拒绝；台账无 AK → `ak_unregistered` 拒绝；缺 `nonce`/`quote`/`quote_sig` → `quote_invalid` 拒绝；quote 结构或签名无效 → `quote_invalid` 拒绝；nonce 重放或 extraData 不匹配 → `nonce_invalid` 拒绝；PCR 摘要与平台基线不符 → `pcr_mismatch` 拒绝。显式关闭仅用于过渡/排障：此时无 AK 设备可拿到菜单变量，但**凭据一律不注入**（凭据只认证明），无效 proof 任何模式下都不放行。
 
 #### GET /settings/registration-window
 
@@ -550,7 +551,7 @@ agents:
 | `quota_exhausted` | bool | 额度是否已用尽（用尽后新设备不再入池，窗口记录不主动清除） |
 | `limits` | object | 当前声明的上限：`ttl_minutes_min` / `ttl_minutes_max` / `max_devices`（WebUI 按它收敛输入） |
 
-`admitted` 为**派生值**，不存计数器：窗口期内设备台账中 `source == "ipxe"` 且 `first_seen >= opened_at` 的条目数。因此管理员手动登记（`POST /devices`，`source=manual`）与清单导入不占额度，窗口开启前的存量设备（含仅认领密钥者）也不计入。
+`admitted` 为**派生值**，不存计数器：窗口期内设备台账中 `source == "ipxe"` 且 `first_seen >= opened_at` 的条目数。因此管理员手动登记（`POST /devices`，`source=manual`）与清单导入不占额度，窗口开启前的存量设备（含仅认领 AK 者）也不计入。
 
 ```json
 {"open": true, "opened_at": "2026-08-21T10:00:00+08:00", "ttl_minutes": 30, "closes_at": "2026-08-21T10:30:00+08:00", "remaining_seconds": 1799, "max_devices": 20, "admitted": 3, "remaining_devices": 17, "quota_exhausted": false, "limits": {"ttl_minutes_min": 1, "ttl_minutes_max": 60, "max_devices": 1000}}
@@ -594,13 +595,13 @@ curl -X DELETE "$BASE_URL/settings/registration-window" \
 
 #### GET/PUT /settings/enforcement
 
-查询/切换设备身份验签强制开关（持久化到 `state/settings.json`，重启保留）。
+查询/切换 TPM 证明强制开关（持久化到 `state/settings.json`，重启保留）。
 
 **请求体（PUT）**：
 
 | 字段 | 必填 | 类型 | 说明 |
 |---|---|---|---|
-| `enabled` | 是 | bool | `true` = 开启强制（无密钥/无签名设备拒绝引导） |
+| `enabled` | 是 | bool | `true` = 开启强制（无 AK / 无 quote / 证明失败设备拒绝引导） |
 
 ```bash
 curl -X PUT "$BASE_URL/settings/enforcement" \
@@ -612,7 +613,7 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 
 ### 5.2 GET /devices/challenge
 
-挑战端点（**不鉴权**）：为 `/boot-vars` 验签链路签发一次性 nonce（短 TTL、绑定 MAC、防重放，nonce 本身无秘密）。设备不存在、未认领（无 `key_hash`）或已吊销 → **404**（无法走验签链路，且不给吊销设备签发 nonce）。
+挑战端点（**不鉴权**）：为 `/boot-vars` 证明链路签发一次性 nonce（短 TTL、绑定 MAC、防重放，nonce 本身无秘密）。设备不存在、未登记 AK 或已吊销 → **404**（无法走证明链路，且不给吊销设备签发 nonce）。
 
 **Query 参数**：
 
@@ -627,34 +628,34 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-**错误**：`400`（非法 MAC）；`404`（设备不存在/未认领）；`429`（同一来源 IP 每分钟超过阈值，带 `Retry-After`）。
+**错误**：`400`（非法 MAC）；`404`（设备不存在/未登记 AK）；`429`（同一来源 IP 每分钟超过阈值，带 `Retry-After`）。
 
 **限速**：与 `/devices/report` 一样按来源 IP 滑窗限速（默认 120 次/分钟，`KURRENT_CP_RATE_LIMIT_CHALLENGE` 可覆盖，`<=0` 关闭）；超限写 `boot_rate_limited` 告警。
 
-**挑战-响应链路（与 `/boot-vars` 配合，设备身份验签）**：
+**挑战-证明链路（与 `/boot-vars` 配合，TPM 证明）**：
 
 1. `GET /devices/challenge?mac=<mac>` → 执行响应脚本后取得 `${nonce}`
-2. iPXE 用设备密钥对 `nonce‖mac`（UTF-8 无分隔拼接，mac 小写冒号格式）做 ECDSA P-256 签名 → `sig`（base64(DER)）；hostname 不参与签名（由 MAC → 设备台账绑定保证身份）
-3. `GET /boot-vars?mac=&hostname=&nonce=&sig=` → 验签通过才下发凭据（注入四条件第 4 条，见 5.1）；验签失败 → 空脚本（拒绝下发，审计 `boot_vars.credential`，reason 见 5.1）
+2. 固件用 TPM AK 对 PCR 0/2/4/7（SHA-256）做 quote，`extraData` 原样填入 `${nonce}` 字符串的 ASCII 字节（64 个 hex 字符），不做 hex 解码或其他编码变换；输出 `quote`（TPMS_ATTEST 原始字节 hex，不含 TPM2B 长度前缀）与 `quote_sig`（AK 私钥对 quote 字节的签名 hex）。PCR 读取与 quote 在同一次 TPM 调用内完成。
+3. `GET /boot-vars?mac=&hostname=&nonce=&quote=&quote_sig=` → 校验 quote 结构（magic `0xFF544347`、type `TPM_ST_ATTEST_QUOTE`、PCR 选择固定为 0/2/4/7 且仅 SHA-256）、AK 签名、`extraData == nonce`、nonce 未被消费，最后比对 PCR 摘要与平台基线；全部通过才下发凭据（注入四条件第 4 条，见 5.1）。任何一步失败 → 空脚本（拒绝下发，审计 `boot_vars.credential` 与 `device.attest`，reason 见 5.1）。
 
-### 5.3 POST /devices/rotate
+quote 校验先于 nonce 消费：格式或签名错误不会烧掉本次 nonce，设备可修正后重试；nonce 被消费后重放返回 `nonce_invalid`。
 
-设备密钥轮换（**不鉴权**，凭旧密钥签名自证；不重开注册窗口、不发证书）。设备须已认领（有 `key_hash`）且未吊销。
+### 5.3 POST /devices/{mac}/approve-baseline
 
-1. `GET /devices/challenge?mac=` 取一次性 nonce
-2. 用**旧私钥**签名 `rotate‖mac‖new_pubkey‖nonce`（UTF-8 无分隔拼接；`new_pubkey` 为 130 hex 未压缩点，`mac` 为小写冒号格式）
-3. `POST /devices/rotate?mac=&pubkey=&nonce=&sig=`（`sig` = base64(DER)）
+批准设备最近一次证明上报的 PCR 基线（**管理员**，需 `Authorization: Bearer`）。固件或启动配置变化后，quote 的 PCR 摘要与既有基线不符，`/boot-vars` 按 `pcr_mismatch` 拒绝；该摘要写入设备的 `attestation.pending_digest` 等待批准。管理员核对变更后调用本端点，把待批摘要写为新的 `pcr_baseline`，设备下次启动按新基线校验。
 
-成功后台账 `key_hash` 换成新公钥并记录 `key_rotated_at`；旧密钥在 `/boot-vars` 验签链路上**立即失效**。nonce 一次性（重放 `401`）；设备已吊销 `403`；未认领（无 `key_hash`）`409`；未知设备 `404`；非法 `pubkey` `400`。限速 10 次/分钟/来源 IP（`KURRENT_CP_RATE_LIMIT_ROTATE` 覆盖）。
+无请求体：批准对象固定为该设备最近一次上报的待批摘要，避免管理员手输摘要出错。
+
+**错误**：未知设备 `404`；设备已吊销 `403`；没有待批摘要（如尚未发生不匹配）`409`。
 
 ```bash
-# sig 须由设备旧私钥生成：ECDSA-P256(rotate + mac + new_pubkey + nonce)
-curl -s -X POST "https://<host>/devices/rotate?mac=000c29b98b2d&pubkey=<130-hex>&nonce=<64-hex>&sig=<base64-DER>"
+curl -s -X POST "$BASE_URL/devices/00:0c:29:b9:8b:2d/approve-baseline" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-```json
-{ "mac": "00:0c:29:b9:8b:2d", "rotated": true }
-```
+**成功返回（200）**：更新后的设备记录（`pcr_baseline` 为新摘要，`attestation.state=unproven`、`last_reason=baseline_approved`、`pending_digest` 已清除）。写入操作日志 `device.pcr_baseline.approve`（含摘要与来源地址）。
+
+AK 本身不可在线更换（AK 私钥不可导出）：设备恢复或更换主板走删除登记 + 注册窗口重新入池的管理员流程。
 
 ---
 
@@ -1990,7 +1991,7 @@ Agent 回报中 `tls_unavailable`（目标端 TLS 端口未就绪，409）覆盖
 触发推送的操作：**建盘即签发**（nvmet 后端，见上）、设置/删除凭据、设备绑定/解绑/换绑（`PUT /workers/{worker_id}/mac`）、删盘（含批量）、删除 Worker。
 
 **定期轮换**：对账线程每个周期先检查 DHHC-1 密钥年龄（`rotated_at`，缺省回落到
-`updated_at` / `created_at`），超过 `KURRENT_CP_CREDENTIAL_ROTATION_DAYS`（默认 90 天，`<=0` 关闭）
+`updated_at` / `created_at`），超过 `KURRENT_CP_CREDENTIAL_ROTATION_HOURS`（默认 24 小时，`<=0` 关闭）
 即轮换：生成新密钥 → 推送到该 Worker 的全部目标 Agent → **全部送达后**才在
 `state/credentials.yml` 切换（`rotated_at` / `updated_at` 更新，审计 `credential.rotate`）。
 任一目标失败或降级（TLS 未生效）则把已送达目标回推旧密钥、台账不动，下个周期重试；没有 nvmet 目标的条目跳过。
@@ -2004,7 +2005,7 @@ Agent 容器凭据缓存（含派生的 TLS PSK，均 0600）、存储节点 con
 
 **凭据边界（谁下发、谁自持）**：无盘引导链下发的凭据只有两类——DHHC-1 认证密钥，与由它派生的
 TLS-PSK；外加**非秘密**的一次性 nonce（`GET /devices/challenge`，防重放）。设备身份私钥
-（ECDSA P-256）**不下发**：设备侧生成、留在 NVRAM，控制面只回收公钥（`key_hash`/`pubkey_hash`）。
+**不下发**：TPM 内的 AK 私钥不可导出，控制面只记录 AK 公钥（`identity.ak_public`）与 PCR 基线。
 固件对控制面 HTTPS 的 TOFU 指纹是首次连接自行固定，不是下发。组件自举用的 bootstrap token 与
 mTLS 证书走 `/enroll`（管理面），与本节引导链凭据不共用通道。iSCSI/stgt 后端认证走 CHAP，不在本链路。
 
@@ -2821,7 +2822,19 @@ devices:
     uuid: "4c4c4544-..."          # SMBIOS UUID（双因子，可选）
     state: pooled                 # pooled | bound | revoked
     bound_worker_id: null         # 绑定关系权威在此，worker 侧只投影
-    key_hash: null                # 设备公钥指纹（窗口期带 pubkey 上报或认领后填充；验签强制依赖）
+    identity:                     # TPM 身份（窗口期带 AK 上报或认领后填充；证明强制依赖）
+      kind: tpm_ak
+      ak_public: 3059301306072a8648ce3d0201...   # AK 公钥 SPKI DER hex
+      ak_name: 000b6f2a...                        # TPM2B_NAME hex（alg + 公钥摘要）
+      ak_type: ecc_p256                           # ecc_p256 | rsa2048
+    pcr_baseline:                 # 首次证明通过时记录（TOFU）
+      selection: [0, 2, 4, 7]
+      digest_sha256: 9f2c...7b1d
+      recorded_at: 2026-08-15T10:05:00+08:00
+    attestation:                  # 最近一次证明结果
+      state: proven               # unproven | proven | mismatch
+      last_at: 2026-08-15T12:00:00+08:00
+      last_reason: null           # ak_unregistered | quote_invalid | nonce_invalid | pcr_mismatch | baseline_approved
     source: ipxe                  # ipxe（自动入池）| manual（手动录入/导入）
     fingerprint:                  # 申报性质，设备上报更新
       manufacturer: ASUSTeK COMPUTER INC.
@@ -2916,28 +2929,31 @@ curl -s -X DELETE "$BASE_URL/devices/revoked?mac=02:00:00:00:00:01&mac=02:00:00:
 
 ### 16.6 GET /devices/report
 
-iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启、放行额度未用尽且带有效公钥时入池。已有设备的 `uuid` 只允许补空，不能被上报值覆盖（绑定比对依据不由无鉴权端点改写）。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
+iPXE 设备信息上报入口（**不鉴权**，由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`）：更新指纹 + `last_seen`；未知 MAC 仅在注册窗口开启、放行额度未用尽、带有效 TPM AK 且 Secure Boot 开启时入池。已有设备的 `uuid` 只允许补空，不能被上报值覆盖（绑定比对依据不由无鉴权端点改写）。**返回空脚本体**（`#!ipxe\n`，`chain` 可直接消费，无脚本副作用；空 body 会被部分 iPXE 报 EOF，故统一返回合法空脚本）。
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `mac` | 是 | MAC，支持带冒号（`${mac}`）与 hex 无分隔（`${netX/mac}`）格式 |
 | `uuid` / `manufacturer` / `product` / `serial` / `cpumodel` / `mem-type` / `chip` / `busid` | 否 | 字符串字段，空值容忍 |
 | `mem-total` / `mem-speed` | 否 | 整数，兼容 `0x` hex 与十进制，归一化十进制存储 |
-| `pubkey` | 否 | ECDSA P-256 公钥（130 hex 未压缩点），注册/认领用；无参数或非法 → 忽略 |
+| `ak_public` | 否 | AK 公钥 SPKI DER hex（`ecc_p256` 或 `rsa2048`），注册/认领用；缺失或非法 → 无身份 |
+| `ak_name` | 否 | TPM2B_NAME hex（68 hex：算法前缀 + 公钥摘要），与 `ak_public` 配对；缺失或非法 → 无身份 |
+| `ak_type` | 否 | `ecc_p256`（默认）/ `rsa2048`；与 `ak_public` 实际算法不符 → 无身份 |
+| `sb` | 否 | Secure Boot 状态自报，`1` = 开启；未知 MAC 入池要求 `sb=1`（启动期不信任自报值，证明才是判据） |
 
 行为：
 
-- 已注册设备：更新指纹（非空字段覆盖）+ `last_seen`，`state` 不变；窗口开启且带有效公钥时填充 `key_hash`（密钥认领，不受放行额度约束），密钥不一致 → 拒绝覆盖（仅审计 `device.claim rejected`）
+- 已注册设备：更新指纹（非空字段覆盖）+ `last_seen`，`state` 不变；窗口开启且带有效 AK 时写入 `identity`（AK 认领，不受放行额度约束），AK 不一致 → 拒绝覆盖（仅审计 `device.claim rejected`）
 - 吊销设备：忽略（不更新、不复活）
-- 未知 MAC + 注册窗口开启 + 额度未用尽 + 带有效公钥：入池（`state=pooled`，`key_hash` 填充，`source=ipxe`）
-- 未知 MAC + 窗口关闭 / 额度用尽 / 无公钥：只更新指纹不入池（注册只在窗口期且受放行额度约束，见 5.1）
+- 未知 MAC + 注册窗口开启 + 额度未用尽 + 有效 AK + `sb=1`：入池（`state=pooled`，`identity` 写入，`source=ipxe`，审计 `device.ak.register`）
+- 未知 MAC + 窗口关闭 / 额度用尽 / 无有效 AK / `sb!=1`：只更新指纹不入池（审计 `device.register rejected`，reason=`window_closed` / `no_tpm` / `sb_disabled`；注册只在窗口期且受放行额度约束，见 5.1）
 
 **限速**：按来源 IP（nginx 覆盖写入 `X-Real-IP`）滑动窗口限速，默认 120 次/分钟；超限返回 `429`（带 `Retry-After`）并写 `boot_rate_limited` 告警。阈值可用 `KURRENT_CP_RATE_LIMIT_REPORT` 覆盖，`<=0` 关闭。限速只是扫描抑制，不是身份边界。
 
 **curl**（模拟 iPXE 上报；引导链走**裸路径**，不经 `/api/cp` 前缀，且无鉴权）：
 
 ```bash
-curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125"
+curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufacturer=ASUSTeK%20COMPUTER%20INC.&product=ROG%20Zephyrus%20G15&cpumodel=Intel(R)%20Core(TM)%20Ultra%207%20155H&mem-total=0x8000&mem-type=DDR5&mem-speed=5600&chip=RTL8125&busid=0110ec8125&ak_public=<SPKI-DER-hex>&ak_name=<TPM2B-NAME-hex>&ak_type=ecc_p256&sb=1"
 ```
 
 ### 16.7 POST /devices/{mac}/bind

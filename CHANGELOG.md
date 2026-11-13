@@ -13,6 +13,20 @@
 
 ---
 
+## 2026-11-12
+
+### 新增
+
+- **TPM 证明准入**：设备身份改为 TPM 2.0 AK。`/devices/report` 接收 `ak_public` / `ak_name` / `ak_type` / `sb`，未知 MAC 仅在注册窗口开启、携带有效 AK 且 `sb=1` 时入池；`/devices/challenge` 签发的一次性 nonce 由固件对 PCR 0/2/4/7 做 SHA-256 quote，`/boot-vars` 新增 `quote` / `quote_sig` 参数，验签、校验 `extraData` 与 nonce 后比对平台基线。拒绝原因码为 `no_tpm`、`sb_disabled`、`window_closed`、`ak_unregistered`、`quote_invalid`、`nonce_invalid`、`pcr_mismatch`。
+- **平台基线审批**：首次证明通过时记录 TOFU 基线；PCR 摘要变化按 `pcr_mismatch` 拒绝并保留待批摘要。新增 `POST /devices/{mac}/approve-baseline`（管理员），批准后设备下次启动按新基线校验。审计新增 `device.ak.register`、`device.attest`、`device.pcr_baseline.approve`。
+- **WebUI 证明可见性**：Devices 页新增「证明」列与不匹配汇总横幅，展开行显示 TPM 身份、AK 指纹、上次证明、平台基线与原因码，并可直接批准新基线；证明强制改为带二次确认的状态控件。
+
+### 变更
+
+- **设备身份数据模型**：设备记录删除软件公钥哈希与在线轮换，改为 `identity`（AK 公钥、名称、算法）、`pcr_baseline` 与 `attestation`（状态、时间、原因码）。`POST /devices/rotate` 移除；AK 更换走删除登记后重新入池。
+- **证明强制默认开启**：`enforce_device_auth` 默认值改为开启，`GET /settings/enforcement` 与未写入 `state/settings.json` 的部署都返回 `{"enabled": true}`；`/boot-vars` 默认只向证明通过的已绑定设备下发。显式关闭仅用于过渡或排障，关闭后未证明设备可取得菜单变量，但凭据在任何模式下都不注入。
+- **DHHC-1 轮换周期改为小时级**：`spec.credentials.rotationDays` 更名为 `rotationHours`，默认 24 小时，`0` 关闭；环境变量改为 `KURRENT_CP_CREDENTIAL_ROTATION_HOURS`。
+
 ## 2026-11-07
 
 ### 新增

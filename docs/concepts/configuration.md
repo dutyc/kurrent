@@ -178,7 +178,7 @@ kurrent config show      # 注入默认值后的生效形态
 | 变量 | 覆盖 |
 | --- | --- |
 | `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` | 凭据推送对账周期（秒） |
-| `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` | DHHC-1 定期轮换天数 |
+| `KURRENT_CP_CREDENTIAL_ROTATION_HOURS` | DHHC-1 定期轮换天数 |
 | `KURRENT_CP_CRL_REFRESH_INTERVAL` | CRL 重签周期（秒） |
 
 声明是缺省来源；环境变量用于测试与排障。生产环境应把稳定值写进声明，避免运行态与声明分离。

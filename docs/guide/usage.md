@@ -7,7 +7,7 @@
 按顺序完成六步，完成标志分别是：
 
 1. 确认母盘：`diskDir` 中有 4K 原生 GPT 母盘，`GET /masters` 可见。
-2. 设备入池：Devices 页显示 `pooled`，并完成密钥认领。
+2. 设备入池：Devices 页显示 `pooled`，并完成 AK 身份认领。
 3. 绑定 Worker：设备与 Worker 一对一绑定。
 4. 创建系统盘：母盘克隆完成，`os_tag` 已生成；nvmet 后端同时签发凭据。
 5. 设置默认盘：Worker 的默认启动盘指向目标系统。
@@ -66,24 +66,20 @@ api /settings/registration-window | jq
 
 窗口已开启时，`POST` 返回 409；先查询状态，必要时关闭后重开。
 
-设备网络启动后：DHCP → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM）→ `/devices/report` 上报指纹与公钥。
+设备网络启动后：DHCP → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次使用 TPM 创建 AK（私钥留在 TPM 内）→ `/devices/report` 上报指纹、AK 公钥与名称 → 每次引导经 `/devices/challenge` 取得 nonce，对 PCR 0/2/4/7 生成 quote 并随 `/boot-vars` 提交。
 
 ```bash
-# 确认设备出现在池中且已完成密钥认领
+# 确认设备出现在池中且已完成 AK 身份认领
 api /devices | jq
 ```
 
-设备全部认领后关闭窗口，再开启验签强制：
+设备 AK 全部认领后关闭窗口。TPM 证明强制默认开启，无需额外操作：
 
 ```bash
 api /settings/registration-window -X DELETE
-
-# 仅在全部设备完成密钥认领后开启
-api /settings/enforcement -X PUT \
-  -H 'Content-Type: application/json' -d '{"enabled": true}'
 ```
 
-> 注册窗口关闭后上报只更新指纹、不再入池；没有窗口外的注册通道。验签强制开启后，无密钥、无签名或验签失败的已绑定设备也会被拒绝引导。被吊销的设备不会因重新上报自动恢复。
+> 注册窗口关闭后上报只更新指纹、不再入池；没有窗口外的注册通道。TPM 证明强制默认开启，无 AK、quote 无效、nonce 重放或 PCR 与基线不符的已绑定设备会被拒绝引导；显式关闭仅用于过渡或排障，凭据在任何模式下都不注入。被吊销的设备不会因重新上报自动恢复。
 
 ## 3. 绑定 Worker
 

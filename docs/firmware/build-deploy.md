@@ -8,7 +8,7 @@
 
 - `tftp/snponly.efi` 来自本次构建，dnsmasq 已重启并加载新文件；
 - 设备完成一次 PXE 或本地介质引导，进入 iPXE 菜单；
-- 设备在注册窗口内上报公钥并出现在 Devices 台账；
+- 设备在注册窗口内上报 TPM AK 公钥并出现在 Devices 台账；
 - `/boot-assets` 报告固件能力完整。
 
 前提：
@@ -127,19 +127,20 @@ BMC / Redfish 虚拟介质只做过协议级验证，具体型号能力不同；
 
 首次启动时固件会：
 
-1. 执行 `keygen`，在 NVRAM 生成设备私钥；
-2. 通过 `pubkey` 导出公钥；
-3. 向控制面 `/devices/report` 上报指纹与公钥；
-4. 首次 HTTPS 握手固定控制面服务器叶证书指纹（TOFU）。
+1. 执行 `akgen`，在 TPM 内创建 AK（私钥不可导出）；
+2. 通过 `akpub` 导出 AK 公钥、名称与算法；
+3. 向控制面 `/devices/report` 上报指纹、AK 与 Secure Boot 状态；
+4. 每次引导经 `/devices/challenge` 取得 nonce，用 `quote` 对 PCR 0/2/4/7 生成证明；
+5. 首次 HTTPS 握手固定控制面服务器叶证书指纹（TOFU）。
 
 身份语义：
 
-- 设备私钥与服务器指纹存在 NVRAM，**不在盘上**；更新固件或替换 TFTP 文件不会清除它们。
-- 清除 `device-key` 等同于更换设备身份，需要重新登记与绑定。
+- 设备身份由 TPM 内的 AK 承载；服务器指纹存在 NVRAM，**不在盘上**；更新固件或替换 TFTP 文件不会清除它们。
+- 清除 TPM 或更换主板会失去原 AK，等同于更换设备身份，需要删除登记并在注册窗口内重新入池。
 - 清除 `server-fingerprint` 会解除 TOFU，下一次 HTTPS 连接重新固定；控制面证书轮换后必须这样做。
 - 更换硬件或整机替换即形成一台新设备；系统盘与 Worker 身份仍保留在控制面，通过换绑完成迁移。
 
-NVRAM 清理应通过固件可交互环境或受控预置流程完成；不得将 NVRAM 内容复制到另一台设备。密钥生命周期、签名格式与信任边界见[固件契约](../reference/firmware-contract.md)。
+NVRAM 清理应通过固件可交互环境或受控预置流程完成。AK 生命周期、quote 格式与信任边界见[固件契约](../reference/firmware-contract.md)。
 
 ## 5. 验证
 
@@ -151,7 +152,7 @@ NVRAM 清理应通过固件可交互环境或受控预置流程完成；不得�
 | 控制面日志 / 审计 | `/devices/report`、`/devices/challenge`、`/boot-vars` 有对应记录 |
 | 数据面 | 选择默认盘后可完成 NVMe/TCP 连接并进入系统 |
 
-`/boot-assets` 中 `status=ok` 且六项能力齐全（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定）才满足引导链要求。`incomplete` 通常表示 TFTP 根里放的是 stock iPXE。
+`/boot-assets` 中 `status=ok` 且 TPM 身份与 quote 能力齐全才满足引导链要求。`incomplete` 通常表示 TFTP 根里放的是 stock iPXE。
 
 ### QEMU 验证
 
@@ -179,7 +180,7 @@ bash test/run-qemu-auth.sh
 - **DHCP 后无 TFTP 下载**：TFTP 根是否只挂载了 `snponly.efi` 与 `boot.ipxe`；文件权限。
 - **卡在固件启动**：Secure Boot 是否开启（主线产物未签名）；产物是否为对应架构与形态。
 - **HTTPS 证书错误**：TOFU 指纹与控制面证书不匹配；证书轮换后未重新预置。
-- **设备不入池**：注册窗口是否开启；上报是否携带有效公钥；设备是否被吊销。
+- **设备不入池**：注册窗口是否开启；上报是否携带有效 TPM AK；设备是否被吊销。
 - **菜单为空或启动循环**：设备是否绑定 Worker；Worker 是否有系统盘与默认盘。
 - **数据面连接失败**：`tlshd`、内核 TLS 配置、4421 端口与凭据推送状态。
 

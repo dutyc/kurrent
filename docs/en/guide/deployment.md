@@ -384,7 +384,7 @@ docker compose restart kurrent-dnsmasq
 
 Mainline currently fixes the PXE first hop to `snponly.efi` and does not switch artifacts per device. Machines that need `pxe-uefi/ipxe.efi` cannot share the same PXE segment with the default first hop, so the first-hop artifact must be unified before deployment; see [Firmware Build and Deployment](../firmware/build-deploy.md#_2-select-artifacts).
 
-Confirm firmware status and the six capabilities (HTTPS boot, NVS persistence, device key generation, public-key export, challenge signing, TOFU anchoring) in the WebUI **Boot Chain** page, or query the API from the controller repository with the admin certificate:
+Confirm firmware status and capabilities (HTTPS boot, TOFU anchoring, TPM AK and PCR quote) in the WebUI **Boot Chain** page, or query the API from the controller repository with the admin certificate:
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
@@ -404,9 +404,9 @@ Open the registration window in WebUI → **Devices** first (TTL is bounded by `
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-Expected chain: the device gets an address via DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → `keygen` creates an ECDSA P-256 private key on first use (kept in EFI NVRAM) → `/devices/report` sends the fingerprint and public key → **the device appears under Devices and completes key claim**.
+Expected chain: the device gets an address via DHCP → TFTP pulls iPXE and the `boot.ipxe` pointer → iPXE fetches `boot.ipxe.cfg` over HTTPS → the TPM creates an AK (the private key cannot be exported) → `/devices/report` sends the fingerprint, AK public key and name → **the device appears under Devices and completes AK claim**.
 
-Close the registration window after the device is admitted. Once every device has claimed its key, enable **signature enforcement** on the Devices page: `/boot-vars` then serves only bound devices that pass challenge-response verification.
+Close the registration window after the device is admitted. TPM attestation enforcement is on by default: `/boot-vars` serves only bound devices that pass PCR quote attestation. Disable it only temporarily for migration or troubleshooting, then restore it.
 
 Admission only proves that the platform side and the registration path work; the device has no bootable system yet. A real boot takes three steps: a master image for the target distribution on a storage node → clone a system disk for the Worker and make it the default → cold boot to a login prompt. See [System Disk Customization](./system-disk.md) for the master image and [First Delivery](./usage.md) for the last two.
 

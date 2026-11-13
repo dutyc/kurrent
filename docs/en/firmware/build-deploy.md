@@ -8,7 +8,7 @@ When finished:
 
 - `tftp/snponly.efi` comes from this build, and dnsmasq has been restarted to load the new file;
 - a device completes one PXE or local-media boot and reaches the iPXE menu;
-- the device reports its public key inside a registration window and appears in the Devices ledger;
+- the device reports its TPM AK public key inside a registration window and appears in the Devices ledger;
 - `/boot-assets` reports complete firmware capabilities.
 
 Prerequisites:
@@ -127,19 +127,20 @@ BMC / Redfish virtual media has only protocol-level validation; capabilities var
 
 On first boot the firmware:
 
-1. runs `keygen` and creates the device private key in NVRAM;
-2. exports the public key with `pubkey`;
-3. reports the fingerprint and public key to `/devices/report`;
-4. pins the control plane server leaf certificate fingerprint on the first HTTPS handshake (TOFU).
+1. runs `akgen` and creates the AK inside the TPM (the private key cannot be exported);
+2. exports the AK public key, name and algorithm with `akpub`;
+3. reports the fingerprint, AK and Secure Boot state to `/devices/report`;
+4. requests a nonce from `/devices/challenge` and runs `quote` over PCR 0/2/4/7 on each boot;
+5. pins the control plane server leaf certificate fingerprint on the first HTTPS handshake (TOFU).
 
 Identity semantics:
 
-- The device private key and server fingerprint live in NVRAM, **not on disk**; updating firmware or replacing TFTP files does not clear them.
-- Clearing `device-key` is equivalent to replacing the device identity; it must be registered and bound again.
+- Device identity is carried by the AK inside the TPM; the server fingerprint lives in NVRAM, **not on disk**; updating firmware or replacing TFTP files does not clear them.
+- Clearing the TPM or replacing the mainboard loses the original AK, which is equivalent to replacing the device identity: delete the ledger entry and re-admit the device during the registration window.
 - Clearing `server-fingerprint` removes TOFU; the next HTTPS connection pins again. This is required after rotating the control plane certificate.
 - Replacing hardware creates a new device; the system disk and Worker identity remain in the control plane and move through rebinding.
 
-NVRAM cleanup belongs in the firmware interactive environment or a controlled provisioning procedure; never copy NVRAM contents to another device. See the [firmware contract](../reference/firmware-contract.md) for key lifecycle, signature format, and trust boundaries.
+NVRAM cleanup belongs in the firmware interactive environment or a controlled provisioning procedure. See the [firmware contract](../reference/firmware-contract.md) for AK lifecycle, quote format, and trust boundaries.
 
 ## 5. Verify
 
@@ -151,7 +152,7 @@ NVRAM cleanup belongs in the firmware interactive environment or a controlled pr
 | Control plane logs / audit | Records for `/devices/report`, `/devices/challenge`, and `/boot-vars` |
 | Data plane | Selecting the default disk connects over NVMe/TCP and boots the system |
 
-`/boot-assets` must report `status=ok` with all six capabilities (HTTPS boot, NVS persistence, device key generation, public-key export, challenge signing, TOFU pinning). `incomplete` usually means stock iPXE was placed in the TFTP root.
+`/boot-assets` must report `status=ok` with TPM identity and quote capabilities present. `incomplete` usually means stock iPXE was placed in the TFTP root.
 
 ### QEMU validation
 
@@ -179,7 +180,7 @@ Acceptance: the serial console shows successful authentication, Property Set, I/
 - **No TFTP download after DHCP** — TFTP root contains only `snponly.efi` and `boot.ipxe`; file permissions.
 - **Stuck at firmware boot** — Secure Boot enabled (mainline artifacts are unsigned); artifact architecture and form.
 - **HTTPS certificate error** — TOFU fingerprint does not match the control plane certificate; re-provision after rotation.
-- **Device not pooled** — Registration window open; report carries a valid public key; device not revoked.
+- **Device not pooled** — Registration window open; report carries a valid TPM AK; device not revoked.
 - **Empty menu or boot loop** — Device bound to a Worker; Worker has a system disk and default disk.
 - **Data plane connection failure** — `tlshd`, kernel TLS options, port 4421, and credential push state.
 

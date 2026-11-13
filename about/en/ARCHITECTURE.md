@@ -55,9 +55,9 @@ The binding relationship is authoritative on the **device side** (`bound_worker_
 ## Boot Chain
 
 1. Device powers on → DHCP (dnsmasq) → TFTP downloads iPXE and the `boot.ipxe` pointer → iPXE boots and fetches `boot.ipxe.cfg` over HTTPS
-2. **Device identity**: `keygen` creates an ECDSA P-256 private key once (persisted in EFI NVRAM, never leaves the machine) → `pubkey` → `/devices/report` sends the fingerprint and public key; an unknown MAC is admitted **only while the registration window is open and a valid public key is present**
-3. **Challenge-response**: `/devices/challenge` returns a one-shot nonce → `sign <nonce><mac>` → `/boot-vars?…&sig=`
-4. **`/boot-vars` admission**: identity match (MAC resolved through the device ledger; hostname is a fallback when no MAC is supplied or the ledger has no hit) → **binding is authentication** (the request MAC must belong to the matched Worker's bound device) → signature verification (with enforcement on, no key / no signature / bad signature are all rejected) → credentials injected only when the key store has an entry (**on nvmet nodes the key is issued automatically when a system disk is created**); only then are root-path, NQN and key projected
+2. **Device identity**: `akgen` creates an AK inside the TPM (the private key cannot be exported) → `akpub` exports the public key and name → `/devices/report` sends the fingerprint, AK and Secure Boot state; an unknown MAC is admitted **only while the registration window is open with a valid AK and Secure Boot enabled**
+3. **Challenge-attestation**: `/devices/challenge` returns a one-shot nonce → `quote ${nonce}` produces a SHA-256 quote over PCR 0/2/4/7 → `/boot-vars?…&quote=&quote_sig=`
+4. **`/boot-vars` admission**: identity match (MAC resolved through the device ledger; hostname is a fallback when no MAC is supplied or the ledger has no hit) → **binding is authentication** (the request MAC must belong to the matched Worker's bound device) → TPM attestation (enforcement is on by default; no AK / invalid quote / replayed nonce / PCR mismatch are all rejected) → credentials injected only when the key store has an entry (**on nvmet nodes the key is issued automatically when a system disk is created**); only then are root-path, NQN and key projected
 5. A pooled-but-unbound device loops on `reboot` until bound
 6. **Data-plane connect**: root-path is `nvme://<storager>:4421/<disk NQN>?secret=…&tls_psk=…&tls_trsvcid=4421`, authenticated with **DH-HMAC-CHAP** and encrypted with **TLS 1.3**; the key follows the Worker and lives only for this boot session — it is never written to disk
 7. **Hand-off to the OS**: at sanboot the firmware installs the **NBCT** credentials table (a custom ACPI table, registered iBFT-style, one record per session: traddr / trsvcid / nqn / hostnqn / secret, plus the TLS PSK and TLS port when the control plane provisioned them); the initramfs `nbft-connect` consumes **NBFT** (network and subsystem discovery) and **NBCT** (credentials and hostnqn identity relay) to reconnect — with `--tls` on the TLS port, once a PSK is available — and mount the root filesystem
@@ -88,9 +88,9 @@ records issuer evidence that reaches the app), an authentication-failure burst, 
 
 **② Device identity trust root** — device authentication along the boot chain:
 
-- the private key is generated and persisted inside device NVRAM (ECDSA P-256); fingerprint reporting is unauthenticated but only feeds the pool and grants no privilege
-- key rotation (`POST /devices/rotate`) is signed by the old key over `rotate‖mac‖new_pubkey‖nonce`; the old key is invalidated immediately on success, and `report` / `challenge` / `boot-vars` are rate-limited per source IP (`boot-vars` is the most expensive verification path)
-- challenge-response signing (one-shot nonce, bound to the MAC) proves the machine is what it claims to be
+- the AK is created and persisted inside the TPM, and its private key cannot be exported; fingerprint reporting is unauthenticated but only feeds the pool and grants no privilege
+- challenge-attestation (one-shot nonce bound to the MAC, PCR 0/2/4/7 against the platform baseline) proves the boot configuration has not drifted; the AK cannot be rotated online, and recovery deletes the ledger entry and re-admits the device; `report` / `challenge` / `boot-vars` are rate-limited per source IP (`boot-vars` is the most expensive attestation path)
+- the first hop depends on Secure Boot verifying signed firmware; admission requires Secure Boot enabled
 - TOFU single anchor: the self-signed server certificate's fingerprint is pinned in device NVRAM on the first handshake; any later validation failure is fatal
 - **binding is authentication**: `/boot-vars` validates that the requesting MAC belongs to the matched Worker's bound device, preventing another device from stealing a Worker's boot identity
 

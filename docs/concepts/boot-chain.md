@@ -8,7 +8,7 @@
 
 ![引导链：首跳、设备身份与数据面三个阶段](/diagrams/boot-chain.svg)
 
-控制面与固件分工明确：固件提供协议驱动、设备密钥命令、NVRAM 与 TOFU 能力；引导脚本与准入判断由主仓库维护。
+控制面与固件分工明确：固件提供协议驱动、TPM AK 与 quote、NV 与 TOFU 能力；引导脚本与准入判断由主仓库维护。
 
 ## 1. 网络引导
 
@@ -23,30 +23,36 @@ TFTP 根只暴露这两个文件。更新 `snponly.efi` 后需要重启 dnsmasq 
 
 ## 2. 设备身份
 
-首次启动时，固件执行 `keygen`，在 EFI NVRAM 中生成 ECDSA P-256 私钥；私钥不出机器。后续启动发现密钥已存在时拒绝覆盖。
+首次启动时，固件在本机 TPM 内创建证明密钥（AK，受限签名密钥，ECC P-256 或 RSA-2048），私钥不可导出。后续启动复用同一 AK，已存在的 AK 不会被重建。控制面只记录 AK 公钥（SPKI DER）、AK name 与密钥类型。
 
-`pubkey` 导出公钥后，固件向 `/devices/report` 上报：
+固件向 `/devices/report` 上报：
 
 - MAC、UUID、SMBIOS、CPU、内存、网卡等 11 项指纹；
-- 设备公钥。
+- AK 公钥、AK name 与类型；
+- Secure Boot 状态（自报，仅用于注册期准入）。
 
 控制面按 MAC 登记设备池。**上报不等于授权**：
 
-- 未知 MAC 只有在注册窗口开启且携带有效公钥时才入池；
+- 未知 MAC 只有在注册窗口开启、放行额度未用尽、携带有效 AK 且 `sb=1` 时才入池；
 - 已入池但未绑定的设备不会被授予任何启动凭据；
-- 窗口关闭后，上报只更新指纹，不新增条目。
+- 窗口关闭后，上报只更新指纹，不新增条目；
+- 无 TPM 或 Secure Boot 未开启的设备不入池。
 
-设备密钥可以在线轮换：用旧密钥签名 `rotate‖mac‖new_pubkey‖nonce`，成功后旧密钥立即失效。
+AK 不可在线轮换：设备恢复或更换主板走删除登记并在注册窗口内重新入池的管理员流程。
 
-## 3. 挑战-应答
+## 3. 挑战-证明
 
-绑定与验签强制开启后，仅凭“知道某个 MAC”不足以取得凭据。设备向 `/devices/challenge` 请求一次性 nonce，然后用私钥签名：
+绑定与证明强制（默认开启）下，仅凭“知道某个 MAC”不足以取得凭据。设备向 `/devices/challenge` 请求一次性 nonce，然后用 TPM AK 对 PCR 0/2/4/7 做 SHA-256 quote：
 
 ```text
-nonce ‖ mac          （无分隔拼接，ECDSA P-256 / SHA-256）
+extraData = nonce    （原样写入，不做编码变换）
+qualifiedSigner = AK
+pcrDigest = SHA-256( PCR 0 / 2 / 4 / 7 )
 ```
 
-nonce 一次性使用并绑定 MAC；`report`、`challenge` 与 `boot-vars` 按来源 IP 限速。签名结果随 `/boot-vars` 请求提交，控制面用设备公钥验证。
+PCR 读取与 quote 在同一次 TPM 调用内完成，避免两次读取之间的竞态。nonce 一次性使用并绑定 MAC；`report`、`challenge` 与 `boot-vars` 按来源 IP 限速。quote 与签名随 `/boot-vars` 请求提交，控制面用登记的 AK 公钥验签，并比对 PCR 摘要与平台基线。
+
+平台基线在首次证明通过时记录（TOFU）；摘要变化按 `pcr_mismatch` 拒绝并保留待批摘要，管理员核对后批准。
 
 ## 4. 准入与变量投影
 
@@ -54,10 +60,10 @@ nonce 一次性使用并绑定 MAC；`report`、`challenge` 与 `boot-vars` 按�
 
 1. **识别**：请求 MAC 经设备台账反查 Worker；未传 MAC 或台账未命中时，才用 hostname 兜底。
 2. **绑定即认证**：请求 MAC 必须属于命中 Worker 的绑定设备，其他设备不能冒领该 Worker 的引导身份。
-3. **身份验签**：验签强制开启时，无密钥、无签名或验签失败一律拒绝。
+3. **TPM 证明**：证明强制默认开启，无 AK、quote 无效、nonce 重放或 PCR 与基线不符一律拒绝。
 4. **凭据条件**：Worker 已绑定且密钥库有条目；nvmet 后端还要求存储节点数据面端口就绪。nvmet 条件不满足时拒绝下发；非 nvmet 后端不投影 NVMe-oF 凭据。
 
-通过检查后按设备是否完成验签投影变量：凭据只发给验签通过的设备，非凭据变量在过渡模式下可以下发。
+通过检查后按证明结果投影变量：凭据只发给证明通过的设备；非凭据变量仅在显式关闭证明强制时下发。
 
 | 变量 | 内容 |
 | --- | --- |
@@ -111,10 +117,11 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 
 ## 失败路径
 
-- **设备未入池**：注册窗口未开启；上报缺少有效公钥；设备已被吊销。
+- **设备未入池**：注册窗口未开启；上报缺少有效 AK 或 `sb!=1`；设备已被吊销。
 - **设备入池但无法启动**：未绑定 Worker；或 Worker 没有系统盘。
 - **设备反复重启**：Worker 没有默认盘；或池中设备尚未绑定。
-- **验签强制后提示无密钥/无签名**：设备未完成密钥认领；引导脚本未取得 nonce。
+- **证明强制（默认开启）下提示 `ak_unregistered` / `quote_invalid`**：设备未完成 AK 认领；引导脚本未取得 nonce 或未生成 quote。
+- **`pcr_mismatch`**：固件、Secure Boot 或启动配置变化；管理员核对后在设备详情批准新基线。
 - **启动变量不下发**：Worker 无凭据；后端不是 nvmet；数据面端口未就绪。
 - **菜单超时后重启**：未设置默认盘。
 - **数据面连接失败**：PSK 未送达存储节点 keyring；`tlshd` 版本或内核 TLS 配置不满足。
@@ -124,9 +131,9 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 
 第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有密码学保护：设备固件不验证这段内容，iPXE 也尚未取得服务器证书。部署把 PXE 网段本身作为信任边界，并在其上保留：
 
-- 设备身份 TOFU（NVRAM 密钥 + 注册窗口 + 绑定）；
+- 设备身份（TPM AK + PCR 基线 TOFU + 注册窗口 + 绑定）；
 - 服务器 TOFU；
-- 挑战-应答与绑定即认证；
+- PCR 证明与绑定即认证；
 - 数据面加密与无明文回退。
 
 同一二层内的攻击者、被控宿主或物理访问不在该边界内解决。完整的威胁模型与升级路径见[安全模型](../architecture/security.md)。
@@ -136,9 +143,9 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 | 能力 | 提供方 |
 | --- | --- |
 | DHCP/TFTP 客户端、HTTPS、TOFU、NVRAM | 固件 |
-| `keygen` / `pubkey` / `sign` | 固件 |
+| TPM AK 创建、PCR quote | 固件 |
 | NVMe/TCP 驱动、DH-HMAC-CHAP、NBCT | 固件 |
 | 引导脚本、注册窗口、`/boot-vars` 准入 | 主仓库控制面 |
 | 系统盘、凭据、菜单生成 | 主仓库控制面 |
 
-固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；设备密钥、签名格式与 TOFU 的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。
+固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；设备 AK、quote 格式与 TOFU 的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。

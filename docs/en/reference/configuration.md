@@ -97,7 +97,7 @@ The window itself is runtime state, opened only briefly during deployment; the d
 
 | Field | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `rotationDays` | `90` | 0–3650 | DHHC-1 rotation period; `0` disables |
+| `rotationHours` | `24` | 0–8760 | DHHC-1 rotation period in hours; `0` disables |
 | `reconcileIntervalSeconds` | `60` | 0–86400 | Credential push reconciliation period; `0` disables |
 
 ### `spec.agentTimeoutSec`
@@ -145,7 +145,7 @@ spec:
     windowMaxTtlMinutes: 60
     windowMaxDevices: 1000
   credentials:
-    rotationDays: 90
+    rotationHours: 24
     reconcileIntervalSeconds: 60
   agentTimeoutSec: 10
 ```
@@ -230,7 +230,7 @@ Derived objects and drift:
 | Server certificate | `spec.serverCert` | Report-only by default; re-signed when `rotateOnChange` is on |
 | Component PKI | `spec.pki` | Checked at startup; missing or damaged material fails health |
 
-Runtime settings such as the registration window and signature enforcement live in `state/settings.json`; they are not part of the declaration or `configHash`.
+Runtime settings such as the registration window and TPM attestation enforcement live in `state/settings.json`; they are not part of the declaration or `configHash`.
 
 ## Environment variables
 
@@ -240,7 +240,7 @@ Runtime settings such as the registration window and signature enforcement live 
 | `KURRENT_CP_INSECURE` | Development mode allowing all requests | Local development only, never production |
 | `KURRENT_CP_OPENAPI` | Enables the OpenAPI document endpoints | Off by default |
 | `KURRENT_CP_ALARM_WEBHOOK` | Alarm delivery URL | Optional |
-| `KURRENT_CP_CREDENTIAL_ROTATION_DAYS` | Temporary override of the rotation period | Operations and tests |
+| `KURRENT_CP_CREDENTIAL_ROTATION_HOURS` | Temporary override of the rotation period (hours) | Operations and tests |
 | `KURRENT_CP_CREDENTIAL_RECONCILE_INTERVAL` | Temporary override of the reconciliation period | Operations and tests |
 | `KURRENT_CP_CRL_REFRESH_INTERVAL` | Temporary override of the CRL re-sign period | Operations and tests |
 

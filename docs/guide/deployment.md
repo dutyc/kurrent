@@ -381,7 +381,7 @@ docker compose restart kurrent-dnsmasq
 
 主仓库当前的 PXE 首跳固定为 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物；详见[固件构建与部署](../firmware/build-deploy.md#_2-选择产物)。
 
-在 WebUI「引导链」页确认固件状态与六项能力（HTTPS 引导、NVS 持久化、设备密钥生成、公钥导出、挑战签名、TOFU 锚定），或直接查询接口（在控制面仓库目录执行，使用 admin 证书）：
+在 WebUI「引导链」页确认固件状态与能力（HTTPS 引导、TOFU 锚定、TPM AK 与 PCR quote），或直接查询接口（在控制面仓库目录执行，使用 admin 证书）：
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
@@ -401,9 +401,9 @@ curl -sS \
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-预期链路：设备 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → 首次 `keygen` 生成 ECDSA P-256 私钥（留在 EFI NVRAM）→ `/devices/report` 上报指纹与公钥 → **设备出现在 Devices 页并完成密钥认领**。
+预期链路：设备 DHCP 获取地址 → TFTP 拉取 iPXE 与 `boot.ipxe` 指针 → iPXE 经 HTTPS 取回 `boot.ipxe.cfg` → TPM 创建 AK（私钥不可导出）→ `/devices/report` 上报指纹、AK 公钥与名称 → **设备出现在 Devices 页并完成 AK 认领**。
 
-确认设备已入池后关闭注册窗口。全部设备认领完成后，再在 Devices 页开启**验签强制**：此后的 `/boot-vars` 只接受通过挑战-应答验签的已绑定设备。
+确认设备已入池后关闭注册窗口。TPM 证明强制默认开启，`/boot-vars` 只接受通过 PCR quote 证明的已绑定设备；仅在过渡或排障时临时关闭，完成后恢复。
 
 设备入池只表示平台侧与注册链路可用，此时设备还没有可启动的系统。真正启动还需要三步：存储节点上有目标发行版的母盘 → 为 Worker 克隆系统盘并设为默认盘 → 冷启动到登录提示符。母盘制作见[系统盘定制](./system-disk.md)，后两步见[首次交付](./usage.md)。
 

@@ -25,9 +25,9 @@ Kurrent 的设备固件由独立仓库 [kurrent-firmware](https://github.com/dut
 | TLS 1.3 PSK 数据面 | 固件段 `sanboot` 按 PSK 建立 TLS 1.3，与内核段共同形成全程加密 |
 | Host NQN 设置 | 按 MAC 注入 `hostnqn`，支持 nvmet `allow_any_host=0` 严格模式 |
 | 设备信息采集 | SMBIOS 身份与内存、CPUID、网卡字段，经 HTTP 上报控制面 |
-| EFI NVS 持久化 | `device-key` 与 `server-fingerprint` 写入 NVRAM，跨重启保留 |
+| EFI NVS / TPM NV 持久化 | `server-fingerprint` 写入 NVRAM；AK 与平台状态存于 TPM NV，跨重启保留 |
 | TOFU 信任 | 首次 HTTPS 握手固定服务器叶证书 SHA-256 指纹，此后不匹配即拒绝 |
-| 设备身份命令 | `keygen` / `pubkey` / `sign` / `nvclear` |
+| 设备身份与证明 | TCG2 访问、AK 创建与导出、PCR 0/2/4/7 的 SHA-256 quote、`nvclear` |
 | 网卡适配 | RTL8125/8126 原生驱动、`snponly` 本地引导回退 |
 | 本地介质引导 | `embed/auto.ipxe`；`direct-uefi` 产物内置脚本，启动即进入网络引导链 |
 
@@ -35,20 +35,22 @@ Kurrent 的设备固件由独立仓库 [kurrent-firmware](https://github.com/dut
 
 ## 设备身份与信任
 
-首次启动时，固件执行 `keygen`，在 EFI NVRAM 中生成 ECDSA P-256 私钥；私钥不出机器。后续启动发现密钥已存在时拒绝覆盖。`pubkey` 导出公钥后，固件向控制面上报设备指纹与公钥。
+设备身份是 TPM 2.0 证明密钥（AK）：首次启动在 TPM 内创建 restricted signing 密钥（ECC P-256 或 RSA-2048）并持久化到 TPM NV；私钥不可导出，后续启动复用已存在的 AK，不自动重建。固件向控制面 `/devices/report` 上报设备指纹、AK 公钥（SPKI）、AK 名称与 Secure Boot 状态。
 
-绑定与验签强制开启后，仅凭“知道某个 MAC”不足以取得凭据。控制面下发一次性 nonce，设备用私钥签名 `nonce‖mac`；验签通过的设备才会取得引导变量。设备密钥可以在线轮换，成功后旧密钥立即失效。
+证明复用一轮问答：控制面下发一次性 nonce，设备对 PCR 0/2/4/7 生成 SHA-256 quote，nonce 原样写入 `extraData`；quote 与签名随 `/boot-vars` 提交。控制面验签并与平台基线比对，通过后才下发引导变量。首次证明通过时记录平台基线（TOFU），PCR 变化后需管理员批准新基线。
 
 TOFU 是全局单锚：`server-fingerprint` 一旦存在，固件只信任首个 HTTPS 连接中被固定的证书。所有 HTTPS 目标必须共享同一信任锚；控制面证书轮换后，必须先清除 NVRAM 指纹，否则设备无法再次连接。
 
 安全边界：
 
-- **私钥不出设备**：`device-key` 仅供固件内部使用；公钥与签名可导出。
-- **私钥可被启动后的系统读取**：设备私钥保存在带运行时访问权限的 EFI 变量中，启动后的操作系统可以读取。Secure Boot 不关闭这一读取路径，详见[安全模型](../architecture/security.md)。
-- **首次接触无认证**：TOFU 在注册窗口内接受首个证书，中间人风险由 PXE 网段隔离承担。
+- **AK 私钥不可导出**：私钥留在 TPM 内，启动后的系统无法读取或复制设备身份。
+- **证明覆盖启动度量，不覆盖运行期**：PCR 0/2/4/7 反映固件、Secure Boot 策略与启动配置；被控的运行期系统仍可在轮换窗口内取得当前 PSK，详见[安全模型](../architecture/security.md)。
+- **首跳依赖 Secure Boot**：设备入池要求 Secure Boot 开启；首跳文件由 UEFI 信任库验证签名，TFTP 只交付签名二进制。
+- **服务器 TOFU 首次信任**：首次握手仍可能被中间人利用；控制面证书轮换后需重新信任。
 - **nonce 必须一次性**：签名可被重放的前提是 nonce 重复；控制面需保证 nonce 一次性、短 TTL 并绑定 MAC。
+- **AK 不可在线更换**：更换 AK 只能删除登记后在注册窗口内重新入池。
 
-命令、NVRAM 设置、签名格式、挑战-应答与 TOFU 状态见[固件契约](../reference/firmware-contract.md)。
+命令、TPM NV 设置、quote 格式、挑战-证明与 TOFU 状态见[固件契约](../reference/firmware-contract.md)。
 
 ## NVMe-oF 引导
 

@@ -1,43 +1,44 @@
 # Firmware Contract
 
-This page describes the interface between the firmware and the main repository: device identity commands, NVRAM settings, TOFU behavior, challenge-response formats, control-plane reporting, and boot variables. Field-level authority lives in the firmware repository's `docs/device-trust-usage.md`, `docs/capability-reference.md`, and `patches/README`; control-plane endpoint details are authoritative in `api/control-plane-api.en.md`.
+This page describes the interface between the firmware and the main repository: TPM identity commands, NV settings, TOFU behavior, challenge-attestation formats, control-plane reporting, and boot variables. Field-level authority lives in the firmware repository's `docs/device-trust-usage.md`, `docs/capability-reference.md`, and `patches/README`; control-plane endpoint details are authoritative in `api/control-plane-api.en.md`.
 
 ## Device identity commands
 
-The firmware provides three commands; all business logic (registration, challenge, admission) lives in the main repository's boot scripts and control plane.
+Firmware provides device identity through TPM 2.0; registration, challenge and admission logic live in the main repository's boot scripts and control plane.
 
 | Command | Precondition | Output | Persistence |
 | --- | --- | --- | --- |
-| `keygen` | none | Generates a 32-byte ECDSA P-256 private key and writes `device-key`; refuses to overwrite an existing key and exits non-zero | NVRAM |
-| `pubkey` | `device-key` exists | Prints 130 hex characters (65-byte uncompressed point `04‖X‖Y`) and writes the temporary setting `pubkey` | Current boot only |
-| `sign <data...>` | `device-key` exists | Concatenates arguments in order without separators, SHA-256 → ECDSA P-256 → DER → base64, and writes the temporary setting `sig` | Current boot only |
+| `akgen` | none | Creates a restricted signing key (ECC P-256 or RSA-2048) inside the TPM and persists it in TPM NV; reuses an existing AK and never overwrites it | TPM NV |
+| `akpub` | AK exists | Emits the AK public key SPKI DER hex, TPM2B_NAME (68 hex), algorithm type and the firmware's Secure Boot state into the temporary settings `ak-public`, `ak-name`, `ak-type`, `sb` | Current boot only |
+| `quote <nonce>` | AK exists | Quotes PCR 0/2/4/7 with SHA-256 and copies the nonce verbatim into `extraData`; emits `quote` (raw TPMS_ATTEST bytes as hex, without the TPM2B length prefix) and `quote-sig` (signature over the quote bytes, hex) | Current boot only |
 
 Notes:
 
-- `keygen` is the idempotent entry point: boot scripts call it unconditionally once; it generates on first boot and fails harmlessly afterwards.
-- The private key is used only inside the firmware; it is never written to disk or transmitted over the network.
-- `pubkey` and `sig` are command output buffers that disappear on reboot; they cannot be read across boots.
+- `akgen` is the idempotent entry point: boot scripts call it unconditionally once; it creates on first boot and skips when an AK already exists.
+- The AK private key is generated and held by the TPM, cannot be exported, and firmware never reads the private key in plaintext.
+- PCR reads and the quote must happen in one TPM call so measurements cannot change between reads.
+- The quote's `extraData` must be the ASCII bytes of the `nonce` string itself (64 hex characters, i.e. 64 bytes), not the 32-byte hex-decoded value; no other encoding transformation.
 
-## NVRAM settings
+## NV settings
 
 | Setting | Type | DHCP tag | Persistence | Writer |
 | --- | --- | --- | --- | --- |
-| `device-key` | hexraw | 0x5e | NVRAM | `keygen` |
 | `server-fingerprint` | hexraw | 0x5f | NVRAM | TOFU |
 | `trust` | hexraw | 0x5a | NVRAM (root certificate override) | TOFU |
-| `pubkey` | hexraw | 0x60 | Memory | `pubkey` |
-| `sig` | string | 0x61 | Memory | `sign` |
+| `ak-public` | hexraw | 0x60 | Memory | `akpub` |
+| `ak-name` | hexraw | 0x63 | Memory | `akpub` |
+| `ak-type` | string | 0x64 | Memory | `akpub` |
+| `sb` | string | 0x65 | Memory | `akpub` (`1` = Secure Boot enabled, `0` = disabled) |
+| `quote` | hexraw | 0x61 | Memory | `quote` |
+| `quote-sig` | hexraw | 0x62 | Memory | `quote` |
 
 Clearing persistent settings requires the `nvo/` block prefix:
 
 ```text
-clear nvo/device-key          # delete the device key; regenerated on next boot
 clear nvo/server-fingerprint  # remove the TOFU pin; repinned on next HTTPS connection
 ```
 
-A bare `clear device-key` or an empty `set device-key` has no effect on the NVS backend.
-
-Deleting `device-key` is equivalent to changing the device identity and requires re-registration and rebinding; deleting `server-fingerprint` makes the next HTTPS connection enter first-trust state again. Both are sensitive operations and should run through a management flow or controlled provisioning.
+A bare `clear server-fingerprint` or an empty `set server-fingerprint` has no effect on the NVS backend. The AK is not persisted through iPXE settings; clearing the TPM or replacing the mainboard loses the original AK, and the device must be deleted from the ledger and re-admitted.
 
 ## TOFU
 
@@ -56,7 +57,7 @@ Constraints:
 - HTTPS uses the native iPXE TLS implementation, limited to TLS 1.2.
 - After control-plane certificate rotation, devices must clear `server-fingerprint` and pin again, or boot will be refused.
 
-## Challenge-response
+## Challenge-attestation
 
 The control plane issues a one-time nonce:
 
@@ -66,42 +67,38 @@ GET /devices/challenge?mac=<MAC>
   set nonce <64 hex characters>
 ```
 
-The device signs:
+The device runs:
 
 ```text
-sign ${nonce}${mac}
+quote ${nonce}
 ```
 
-The signed data is `nonce‖mac` with no separator. Control-plane verification:
+Control-plane verification:
 
 | Item | Value |
 | --- | --- |
-| Digest | SHA-256 |
-| Algorithm | ECDSA P-256 |
-| Signature encoding | ASN.1 DER |
-| Transport encoding | base64 (standard alphabet, no line breaks) |
-| Public key | Uncompressed point `04‖X‖Y`, 130 hex |
+| Quote body | TPMS_ATTEST: magic `0xFF544347`, type `TPM_ST_ATTEST_QUOTE` |
+| `extraData` | The ASCII bytes of the nonce string (64 hex characters) |
+| PCR selection | Fixed 0/2/4/7, SHA-256 only |
+| PCR digest | 32-byte SHA-256 |
+| AK signature | ASN.1 DER for ECC P-256; PKCS#1 v1.5 with SHA-256 for RSA-2048 |
+| Transport encoding | hex (both quote and signature) |
 
-The nonce is single-use, short-lived, and bound to the MAC. The challenge endpoint returns 404 for unknown, unclaimed, or revoked devices. The signature does not include the hostname: identity is constrained by the device ledger entry for the MAC and the one-time nonce.
-
-Online rotation uses a nonce from the same challenge endpoint and signs:
-
-```text
-rotate‖mac‖new_pubkey‖nonce
-```
-
-with the old private key. On success the device public key is replaced immediately, and the old key stops working on the boot verification path.
+The nonce is single-use, short-lived, and bound to the MAC. The challenge endpoint returns 404 for unknown, unclaimed, or revoked devices. Attestation does not include the hostname: identity is constrained by the device ledger entry, the AK, and the one-time nonce.
 
 ## Device reporting
 
 ```text
-GET /devices/report?mac=<MAC>&pubkey=<130 hex>&uuid=...&manufacturer=...
+GET /devices/report?mac=<MAC>&ak_public=<hex>&ak_name=<hex>&ak_type=ecc_p256&sb=1&uuid=...&manufacturer=...
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `mac` | Required; the device NIC MAC |
-| `pubkey` | ECDSA P-256 public key, required for registration and key claiming |
+| `ak_public` | AK public key SPKI DER hex; paired with `ak_name` and required for registration and AK claiming |
+| `ak_name` | TPM2B_NAME hex (68 hex: algorithm prefix + public-key digest) |
+| `ak_type` | `ecc_p256` (default) or `rsa2048`; a mismatch with the actual key algorithm means no identity |
+| `sb` | Secure Boot state, `1` = enabled; must be `1` during registration |
 | `uuid` | SMBIOS UUID; an existing value is never overwritten by a self-reported one |
 | `manufacturer` / `product` / `serial` | Vendor, model, serial number |
 | `cpumodel` | CPU model |
@@ -110,8 +107,8 @@ GET /devices/report?mac=<MAC>&pubkey=<130 hex>&uuid=...&manufacturer=...
 
 Behavior:
 
-- Existing device: merge the fingerprint and update `last_seen`; within the registration window a valid public key can claim the key, and a mismatching key is rejected and audited.
-- Unknown MAC: admitted only when the registration window is open, admission quota remains, and a valid public key is present; otherwise ignored.
+- Existing device: merge the fingerprint and update `last_seen`; within the registration window a valid AK completes the claim, and a mismatching AK is rejected and audited.
+- Unknown MAC: admitted only when the registration window is open, admission quota remains, a valid AK is present, and `sb=1`; otherwise ignored.
 - Revoked device: reports are ignored; the device is neither updated nor revived.
 - The response is an empty `#!ipxe` script with no script side effects.
 
@@ -120,7 +117,7 @@ Reporting is unauthenticated and rate-limited by source IP.
 ## Boot variables
 
 ```text
-GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&sig=<base64>
+GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&quote=<hex>&quote_sig=<hex>
 ```
 
 The response is a `#!ipxe` script by default; `format=json` returns the same fields as JSON (snake_case). The encoding does not change admission.
@@ -129,7 +126,7 @@ Admission order:
 
 1. **Identify**: MAC → device ledger → `bound_worker_id`; hostname is only a fallback for legacy records.
 2. **Binding check**: a request carrying a MAC must come from the device bound to that Worker, or an empty script is returned.
-3. **Signature verification**: verify `nonce‖mac` with the public key in the device ledger. Unverified requests may receive non-credential variables but never any key; once enforcement is on they are rejected outright.
+3. **Attestation**: validate the quote structure, AK signature and `extraData == nonce`, then compare the PCR digest with the platform baseline. Requests that fail attestation never receive keys; with enforcement on by default they are rejected outright.
 4. **Data-plane readiness**: the nvmet backend must have both an authentication key and a ready data-plane port, or nothing is projected.
 5. **Projection**: emit the variables below, all valid only for this boot.
 
@@ -138,8 +135,8 @@ Admission order:
 | `disk-nqn` | Full NQN of the system disk, passed through verbatim | A default disk exists |
 | `storager-ip` | Data-plane address | A default disk exists and its storage node is registered |
 | `nbft-tls-port` | Data-plane TLS port | nvmet backend with a ready port |
-| `nbft-tls-psk` | TLS PSK derived from the authentication key | Signature verified and a key exists |
-| `nbft-secret` | DHHC-1 authentication key | Signature verified and a key exists |
+| `nbft-tls-psk` | TLS PSK derived from the authentication key | Attestation passed and a key exists |
+| `nbft-secret` | DHHC-1 authentication key | Attestation passed and a key exists |
 | `hostnqn` | The Worker's Host NQN | Node and disk NQN available |
 | `os` / `os-version` | OS label for the menu | Default disk carries OS information |
 | `menu-default` / `menu-timeout` | Auto-boot entry and timeout (milliseconds) | Always emitted |
@@ -193,16 +190,16 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 
 ## Version and compatibility
 
-- The full chain requires firmware with the NVMe/TCP, authentication, NVS, TOFU, device identity command, Host NQN, and NBCT patches; older firmware without the identity commands fails at `keygen`/`sign` and cannot obtain credentials.
-- The control plane never sends keys to unverified requests; with enforcement on, older firmware cannot complete boot.
+- The full chain requires firmware with the NVMe/TCP, authentication, NVS, TOFU, TPM AK and quote, Host NQN, and NBCT patches; firmware without a TPM identity cannot be admitted or obtain credentials.
+- The control plane never sends keys to requests that fail attestation; enforcement is on by default.
 - Upgrading the control plane does not require a simultaneous firmware upgrade, but new variables (for example a new TLS port) must be consumable by the firmware; check firmware capabilities before upgrading.
 
 ## Security boundary
 
-- Keys are injected only after signature verification; `/boot-vars` provides no registration channel.
-- The device private key lives in NVRAM and is readable by the booted system; current mainline has no Secure Boot/TPM measurement to isolate it.
-- TOFU first contact has no cryptographic protection and depends on PXE network isolation; after pinning, integrity is enforced.
-- Never copy NVRAM contents to another device; decommissioned devices should clear `device-key` and `server-fingerprint`.
+- Keys are injected only after attestation; `/boot-vars` provides no registration channel.
+- The AK private key cannot be exported, so a booted system cannot read or copy the device identity; attestation covers PCR 0/2/4/7, not runtime.
+- The first hop depends on Secure Boot verifying signed firmware; server TOFU first trust remains a residual risk.
+- Clearing the TPM or replacing the mainboard loses the original AK; delete the ledger entry and re-admit the device. Decommissioned devices should clear `server-fingerprint`.
 
 ## Related pages
 

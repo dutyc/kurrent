@@ -20,7 +20,7 @@ Kurrent addresses that layer: **make the machine that carries a system replaceab
 
 A compute node can be powered off, replaced or re-racked at any time. Its system comes from the network, its identity is granted by the control plane according to the binding, and its data lives on the system disk. The node keeps no local copy of the system and needs no per-machine installation record.
 
-What remains in device NVRAM is the boot identity key and the server certificate fingerprint. These are **identity anchors**, not system state: they carry no business data, do not migrate with the system, and require re-registration if lost.
+Device identity is an AK inside the TPM that cannot be exported; the server certificate fingerprint and platform baseline are **identity anchors**, not system state: they carry no business data, do not migrate with the system, and require re-registration if lost.
 
 ### The system is the unit of delivery
 
@@ -70,8 +70,8 @@ The device lifecycle is `pooled → bound → revoked`; a Worker's `readiness` i
 
 ## Capabilities
 
-- **Zero-touch enrollment** — Within the registration window, a device with a valid public key registers automatically; once the window closes, no new device is admitted.
-- **Device identity** — The private key is generated in NVRAM; challenge-response signatures; key rotation supported.
+- **Zero-touch enrollment** — Within the registration window, a device with a valid TPM AK registers automatically; once the window closes, no new device is admitted.
+- **Device identity** — Device identity is a TPM AK whose private key cannot be exported; each boot quotes PCR 0/2/4/7 and compares the digest with the platform baseline.
 - **Binding and rebinding** — One-to-one between device and Worker; rebinding is atomic; unbinding returns the device to the pool.
 - **System disks** — Master cloning, 4K-native GPT validation, placement policy, default disk and multiple systems per Worker.
 - **Data plane** — NVMe/TCP + TLS 1.3 on a single port `4421`; no plaintext fallback.

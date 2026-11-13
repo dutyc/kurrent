@@ -25,9 +25,9 @@ Firmware is unaware of business policy: registration windows, Worker binding, di
 | TLS 1.3 PSK data plane | Firmware-segment `sanboot` establishes TLS 1.3 with the PSK; together with the kernel segment this covers the full path |
 | Host NQN setting | Injects `hostnqn` per MAC, supporting nvmet `allow_any_host=0` strict mode |
 | Device information collection | Reports SMBIOS identity and memory, CPUID, and NIC fields over HTTP |
-| EFI NVS persistence | Stores `device-key` and `server-fingerprint` in NVRAM across reboots |
+| EFI NVS / TPM NV persistence | Stores `server-fingerprint` in NVRAM; the AK and platform state live in TPM NV across reboots |
 | TOFU trust | Pins the server leaf certificate SHA-256 fingerprint on the first HTTPS handshake and rejects mismatches |
-| Device identity commands | `keygen` / `pubkey` / `sign` / `nvclear` |
+| Device identity and attestation | TCG2 access, AK creation and export, SHA-256 quote over PCR 0/2/4/7, `nvclear` |
 | NIC adaptation | Native RTL8125/8126 drivers and a `snponly` local-boot fallback |
 | Local-media boot | `embed/auto.ipxe`; the `direct-uefi` artifact embeds a script that enters the network boot chain immediately |
 
@@ -35,20 +35,22 @@ Patch numbers, the NIC support matrix, and field-level details are in the [Firmw
 
 ## Device identity and trust
 
-On first boot, firmware runs `keygen`, generating an ECDSA P-256 private key in EFI NVRAM; the key never leaves the machine. Later boots refuse to overwrite an existing key. `pubkey` exports the public key, and firmware reports the device fingerprint and public key to the control plane.
+Device identity is a TPM 2.0 attestation key (AK): on first boot firmware creates a restricted signing key (ECC P-256 or RSA-2048) inside the TPM and persists it in TPM NV; the private key cannot be exported, later boots reuse the existing AK and never rebuild it automatically. Firmware reports the device fingerprint, AK public key (SPKI), AK name and Secure Boot state to `/devices/report`.
 
-With binding and signature enforcement in place, knowing a MAC is not enough to obtain credentials. The control plane issues a one-shot nonce, and the device signs `nonce‖mac`; only a verified device receives boot variables. The device key can be rotated online, and the old key is invalidated immediately on success.
+Attestation reuses one challenge round: the control plane issues a one-shot nonce, the device quotes PCR 0/2/4/7 with SHA-256 and copies the nonce verbatim into `extraData`, and the quote with its signature travels with `/boot-vars`. The control plane verifies the signature and compares the digest with the platform baseline before serving boot variables. The first successful attestation records the baseline (TOFU); after a PCR change an administrator approves the new baseline.
 
 TOFU is a global single anchor: once `server-fingerprint` exists, firmware trusts only the certificate pinned during the first HTTPS connection. Every HTTPS target must share that anchor; after rotating the control plane certificate, clear the NVRAM fingerprint first, otherwise the device cannot connect again.
 
 Security boundaries:
 
-- **The private key does not leave the device**: `device-key` is used only inside firmware; the public key and signatures may be exported.
-- **A booted system can read the private key**: the key lives in an EFI variable with runtime access, so the running OS can read it. Secure Boot does not close this read path; see the [security model](../architecture/security.md).
-- **First contact is unauthenticated**: TOFU accepts the first certificate inside the registration window; PXE segment isolation carries the man-in-the-middle risk.
-- **Nonces must be one-time**: replay requires a repeated nonce; the control plane must keep nonces one-time, short-lived, and bound to the MAC.
+- **The AK private key cannot be exported**: it stays inside the TPM, so a booted system cannot read or copy the device identity.
+- **Attestation covers boot measurements, not runtime**: PCR 0/2/4/7 reflect firmware, Secure Boot policy and boot configuration; a compromised running system can still obtain the current PSK within the rotation window. See the [security model](../architecture/security.md).
+- **The first hop depends on Secure Boot**: admission requires Secure Boot enabled; first-hop files are verified against the UEFI trust store and TFTP delivers only signed binaries.
+- **Server TOFU first trust**: the first handshake can still be intercepted; after the control-plane certificate rotates, devices must re-trust it.
+- **Nonces must be one-time**: replay requires a repeated nonce; the control plane keeps nonces one-time, short-lived, and bound to the MAC.
+- **The AK cannot be replaced online**: replacing it requires deleting the ledger entry and re-admitting the device during the registration window.
 
-Commands, NVRAM settings, signature format, challenge-response, and TOFU states are in the [Firmware Contract](../reference/firmware-contract.md).
+Commands, TPM NV settings, quote format, challenge-attestation and TOFU states are in the [Firmware Contract](../reference/firmware-contract.md).
 
 ## NVMe-oF boot
 

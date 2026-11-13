@@ -1,6 +1,6 @@
 # 固件平台参考
 
-本页是固件平台侧的参考：补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NVRAM、TOFU、挑战-应答与启动变量）见[固件契约](./firmware-contract.md)；构建、产物选择与部署见[固件构建与部署](../firmware/build-deploy.md)。
+本页是固件平台侧的参考：补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NV、TOFU、挑战-证明与启动变量）见[固件契约](./firmware-contract.md)；构建、产物选择与部署见[固件构建与部署](../firmware/build-deploy.md)。
 
 ## 补丁集
 
@@ -176,21 +176,21 @@ sanboot nvme://10.0.2.2:4420/nqn.2026-07.com.kurrent:worker-01.ubuntu.0123456789
 
 成功时日志应出现 `sending Property Set (CC)`、`namespace 1: N blocks of 4096 bytes` 与 `I/O queue established`，随后控制权交给盘上的 GRUB。
 
-密钥不固化在固件中。控制面 `/boot-vars` 按设备返回 iPXE 脚本，设置引导变量：
+密钥不固化在固件中。设备身份是 TPM 2.0 AK（私钥不可导出）：首次启动由 `akgen` 创建并持久化，`akpub` 导出 SPKI 与 TPM2B_NAME，随 `/devices/report` 入池；之后每次启动用 `quote` 对 PCR 0/2/4/7 做 SHA-256 证明，控制面在 `/boot-vars` 验证签名、nonce 绑定与 PCR 基线后才注入凭据：
 
 ```ipxe
 dhcp || goto failed
 chain --autofree https://<control-plane>/devices/challenge?mac=${net0/mac} || goto failed
 isset ${nonce} || goto failed
-sign ${nonce}${net0/mac} || goto failed
-chain --autofree https://<control-plane>/boot-vars?mac=${net0/mac}&hostname=${hostname}&nonce=${nonce}&sig=${sig} \
+quote ${nonce} || goto failed
+chain --autofree https://<control-plane>/boot-vars?mac=${net0/mac}&hostname=${hostname}&nonce=${nonce}&quote=${quote}&quote_sig=${quote-sig} \
   || goto failed
 sanboot nvme://<traddr>:<trsvcid>/<nqn>?secret=${nbft-secret}
 :failed
 shell
 ```
 
-启用数据面 TLS 时，控制面同时下发 `nbft-tls-psk` 与 `nbft-tls-port`，脚本在 URI 追加 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}`。端口或密钥缺失时，引导脚本应进入失败分支，不回落明文端口。`/boot-vars` 不要求登录会话，凭据只在一次性 nonce 与设备签名验证通过后注入；未验签的请求只能取得非凭据变量。
+启用数据面 TLS 时，控制面同时下发 `nbft-tls-psk` 与 `nbft-tls-port`，脚本在 URI 追加 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}`。端口或密钥缺失时，引导脚本应进入失败分支，不回落明文端口。`/boot-vars` 不要求登录会话，凭据只在一次性 nonce 与设备 quote 证明（AK 签名有效、`extraData` 等于 nonce、PCR 与基线一致）通过后注入；未证明的请求只能取得非凭据变量。
 
 当 `sanboot` URI 的端口等于 `tls_trsvcid` 时，固件对该连接执行 TLS 1.3 PSK 握手：
 

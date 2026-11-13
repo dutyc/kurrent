@@ -67,7 +67,7 @@ Devices 是无状态计算侧。物理设备不承载持久状态：PXE 引导�
 
 ## 引导链路
 
-引导从 DHCP 与 TFTP 的首跳开始：设备取得 iPXE 与指针，再经 HTTPS 取回配置。设备首次生成并持久化在 NVRAM 的 ECDSA P-256 私钥用于挑战-应答，未知 MAC 仅在注册窗口开启且带有效公钥时入池。`/boot-vars` 依次校验绑定关系、设备签名与密钥库条目，全部通过才投影 root-path、NQN 与凭据；设备随后以 DH-HMAC-CHAP 连接、以 TLS 1.3 加密传输。固件在 sanboot 时安装 NBCT 凭据表，initramfs 消费 NBFT 与 NBCT 重连并挂载根文件系统——盘内不写死任何机器身份。
+引导从 DHCP 与 TFTP 的首跳开始：设备取得 iPXE 与指针，再经 HTTPS 取回配置。设备身份是 TPM 2.0 内不可导出的 AK，每次引导对 PCR 0/2/4/7 生成 quote；未知 MAC 仅在注册窗口开启、携带有效 AK 且 Secure Boot 开启时入池。`/boot-vars` 依次校验绑定关系、quote 签名、nonce 与平台基线，全部通过才投影 root-path、NQN 与凭据；设备随后以 DH-HMAC-CHAP 连接、以 TLS 1.3 加密传输。固件在 sanboot 时安装 NBCT 凭据表，initramfs 消费 NBFT 与 NBCT 重连并挂载根文件系统——盘内不写死任何机器身份。
 
 ```text
 设备
@@ -83,7 +83,7 @@ Devices 是无状态计算侧。物理设备不承载持久状态：PXE 引导�
 
 管理面认证由三种凭据串行短试：mTLS 客户端证书、管理 token 与服务端会话，统一产出 `Identity` 供主体类与 RBAC 判定。凭据域拆成 users、nodes、control 三个独立根；nginx 只信任 users 与 nodes 的公钥包，按 issuer 判定主体类，控制面每个路由声明接受的主体类并默认拒绝。审计对每个管理请求写一条记录，写盘失败时请求返回 503（fail-closed）。
 
-设备身份信任根建立在 NVRAM 私钥、一次性 nonce 的挑战-应答、TOFU 单锚与「绑定即认证」之上；指纹上报不鉴权，只喂设备池。认证与加密是彼此独立的层：DH-HMAC-CHAP 回答谁能连，TLS 1.3 保护内容，PSK 是认证密钥的纯函数，无明文回退。完整的威胁模型见[安全模型](./security.md)。
+设备身份信任根建立在 TPM AK、一次性 nonce 的 PCR quote、平台基线与「绑定即认证」之上；指纹上报不鉴权，只喂设备池。认证与加密是彼此独立的层：DH-HMAC-CHAP 回答谁能连，TLS 1.3 保护内容，PSK 是认证密钥的纯函数，无明文回退。完整的威胁模型见[安全模型](./security.md)。
 
 ## 状态与派生物
 

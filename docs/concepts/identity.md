@@ -9,37 +9,41 @@ Kurrent 的身份体系分两条正交的链：
 
 ## 设备身份
 
-### 密钥
+### 信任根
 
-设备首次启动时由固件生成 ECDSA P-256 私钥，写入 EFI NVRAM，私钥不出机器。后续启动复用该密钥，拒绝覆盖。
+设备身份是 TPM 2.0 的证明密钥（AK）。固件在首次启动时于本机 TPM 内创建受限签名密钥（ECC P-256 或 RSA-2048），私钥不可导出；后续启动复用同一 AK，已存在的 AK 不会被重建。控制面只记录 AK 公钥（SPKI DER）、AK name 与密钥类型。
 
-固件提供三个命令：
+固件提供三项能力：
 
-| 命令 | 作用 |
+| 能力 | 作用 |
 | --- | --- |
-| `keygen` | 生成设备密钥；已存在时拒绝覆盖 |
-| `pubkey` | 导出公钥（未压缩点，hex） |
-| `sign <data>` | 对数据做 SHA-256 + ECDSA 签名，输出 base64 DER |
+| `akgen` | 在 TPM 内创建或复用 AK（受限签名，ECC P-256 或 RSA-2048）；已存在时不覆盖 |
+| `akpub` | 导出 AK 公钥（SPKI DER）、TPM2B_NAME 与算法类型，供注册上报 |
+| `quote <nonce>` | 读取 PCR 0/2/4/7（SHA-256）并在同一次 TPM 调用内生成 quote；`extraData` 为 nonce 字符串的 ASCII 字节；输出 TPMS_ATTEST 原始字节（不含 TPM2B 长度前缀）与 AK 签名 |
 
 ### 登记
 
-设备向 `/devices/report` 上报指纹与公钥。控制面按 MAC 登记，但**登记不产生权限**：
+设备向 `/devices/report` 上报指纹、AK 公钥/name/type 与 Secure Boot 状态。控制面按 MAC 登记，但**登记不产生权限**：
 
-- 只有注册窗口开启且带有效公钥的未知设备才入池；
+- 只有注册窗口开启、放行额度未用尽、携带有效 AK 且 `sb=1` 的未知设备才入池；
 - 已入池但未绑定的设备没有引导凭据；
-- 窗口关闭后不再接受新设备。
+- 窗口关闭后不再接受新设备；
+- 无 TPM 或 Secure Boot 未开启的设备不入池。
 
-### 挑战-应答
+### 挑战-证明
 
-`/devices/challenge` 下发一次性 nonce，设备用私钥签名 `nonce‖mac`。验签结果在 `/boot-vars` 准入时使用。nonce 一次性、绑定 MAC，相关端点按来源 IP 限速。
+`/devices/challenge` 下发一次性 nonce，设备用 TPM AK 对 PCR 0/2/4/7 生成 quote，`extraData` 等于 nonce 字符串的 ASCII 字节。`/boot-vars` 依次校验 quote 结构、AK 签名、nonce 绑定与一次性消费，再比对 PCR 摘要与平台基线。
 
-设备密钥支持轮换：旧密钥签名 `rotate‖mac‖new_pubkey‖nonce`，成功后旧密钥失效。
+平台基线在首次证明通过时记录（TOFU）；之后摘要变化按 `pcr_mismatch` 拒绝，并保留待批摘要，管理员核对后通过 `POST /devices/{mac}/approve-baseline` 批准。nonce 一次性、绑定 MAC，相关端点按来源 IP 限速。
+
+AK 不可在线轮换：设备恢复或更换主板走删除登记并在注册窗口内重新入池的管理员流程。
 
 ### 设备身份的边界
 
-- 挑战-应答证明“请求方持有该设备私钥”，不证明“运行该私钥的代码可信”。
+- 证明的是“请求方持有该设备的 AK，并能对指定 PCR 生成有效 quote”，不证明启动后的系统未被控制；运行期被控仍可在轮换窗口内取得当前 PSK。
 - TOFU 只固定服务器证书，不保护首跳的 DHCP/TFTP。
-- 设备私钥在 NVRAM 中，启动后的系统若可读取固件变量，也可以使用它。当前主线未提供 TPM 或 Secure Boot 度量来关闭这一路径。
+- PCR 基线同样是 TOFU：首次记录时若设备已在攻击者控制下，基线会被污染；首次登记应核对装机环境。
+- 固件行为（PCR 选择、AK 创建）需逐型号验证；AMD fTPM 与独立 TPM 的 PCR 行为不同。
 
 这些边界在[安全模型](../architecture/security.md)中展开。
 
@@ -136,7 +140,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 写入失败时请求返回 503（fail-closed）。八类事件写为 `event=alarm`：
 
-- 引导凭据注入但未验签；
+- 引导凭据注入但 TPM 证明未通过；
 - 组件或 control 主体进入管理路由；
 - 未知 issuer / CRL 命中；
 - 同源认证失败风暴；
@@ -149,7 +153,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 ## 凭据归属
 
-- **设备私钥**：设备 NVRAM；`POST /devices/rotate`。
+- **设备身份**：TPM 内 AK 私钥（不可导出）；台账记录 AK 公钥与 PCR 基线；恢复走删登记后重新入池。
 - **人员证书**：用户本地私钥 + users CA；CSR 重签 / 序列号吊销。
 - **管理 token**：控制面台账（摘要）；TTL / 吊销。
 - **会话**：控制面会话台账；登出 / 逐个吊销 / 全部下线。
@@ -160,7 +164,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 ## 相关页面
 
 - 引导链如何使用设备身份：[引导链](./boot-chain.md)
-- 固件侧密钥、签名与 TOFU：[固件契约](../reference/firmware-contract.md)
+- 固件侧 AK、quote 与 TOFU：[固件契约](../reference/firmware-contract.md)
 - 凭据与数据面：[存储与数据面](./storage.md)
 - 威胁模型与残余风险：[安全模型](../architecture/security.md)
 - 日常操作命令：[日常运维](../guide/operations.md)
