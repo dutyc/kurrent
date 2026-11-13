@@ -12,8 +12,9 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
-from . import (audit, audit_middleware, bootstrap_exchange, cert_bootstrap, config,
-               dnsmasq_conf, maintenance, nginx_reload, pki, runtime_status, users, utils)
+from . import (audit, audit_middleware, boot_pki, bootstrap_exchange, cert_bootstrap,
+               config, dnsmasq_conf, maintenance, nginx_reload, pki,
+               runtime_status, users, utils)
 from .principal import enforce_principal
 from .routers import (agents, boot, boot_assets, certs, devices, enroll,
                       operations, session, settings, tokens, workers)
@@ -136,3 +137,12 @@ try:
 except Exception as exc:
     log.exception("bootstrap exchange: failed to publish management credentials")
     runtime_status.record_error("管理凭据交换失败", exc)
+
+# 启动时幂等生成 Secure Boot 引导 PKI（boot CA 10 年 + 4443 叶证书 1 年）。
+# 与组件三分根完全分离；失败会让 4443 引导入口与 TPM 准入不可用，不影响 443 管理面。
+try:
+    boot_pki.ensure_boot_pki(
+        config.settings.pki_dir, config.settings.cert_dir, config.settings.cert_san,
+    )
+except Exception:
+    log.exception("boot-pki: failed to ensure Secure Boot PKI")

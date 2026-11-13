@@ -26,7 +26,7 @@ Kurrent 的设备固件由独立仓库 [kurrent-firmware](https://github.com/dut
 | Host NQN 设置 | 按 MAC 注入 `hostnqn`，支持 nvmet `allow_any_host=0` 严格模式 |
 | 设备信息采集 | SMBIOS 身份与内存、CPUID、网卡字段，经 HTTP 上报控制面 |
 | EFI NVS / TPM NV 持久化 | `server-fingerprint` 写入 NVRAM；AK 与平台状态存于 TPM NV，跨重启保留 |
-| TOFU 信任 | 首次 HTTPS 握手固定服务器叶证书 SHA-256 指纹，此后不匹配即拒绝 |
+| TOFU 与固定 boot CA | 未签名产物按首次 HTTPS 握手固定叶证书指纹；签名产物只信任构建时嵌入的 boot CA |
 | 设备身份与证明 | TCG2 访问、AK 创建与导出、PCR 0/2/4/7 的 SHA-256 quote、`nvclear` |
 | 网卡适配 | RTL8125/8126 原生驱动、`snponly` 本地引导回退 |
 | 本地介质引导 | `embed/auto.ipxe`；`direct-uefi` 产物内置脚本，启动即进入网络引导链 |
@@ -39,7 +39,7 @@ Kurrent 的设备固件由独立仓库 [kurrent-firmware](https://github.com/dut
 
 证明复用一轮问答：控制面下发一次性 nonce，设备对 PCR 0/2/4/7 生成 SHA-256 quote，nonce 原样写入 `extraData`；quote 与签名随 `/boot-vars` 提交。控制面验签并与平台基线比对，通过后才下发引导变量。首次证明通过时记录平台基线（TOFU），PCR 变化后需管理员批准新基线。
 
-TOFU 是全局单锚：`server-fingerprint` 一旦存在，固件只信任首个 HTTPS 连接中被固定的证书。所有 HTTPS 目标必须共享同一信任锚；控制面证书轮换后，必须先清除 NVRAM 指纹，否则设备无法再次连接。
+TOFU 是未签名产物的单锚：`server-fingerprint` 一旦存在，固件只信任首个 HTTPS 连接中被固定的证书。签名产物不采用首次连接信任，引导 HTTPS 只接受构建时嵌入的 boot CA 签发的证书；轮换 boot CA 等同于重刷固件。
 
 安全边界：
 
@@ -70,7 +70,7 @@ Target 配置、`sanboot` 示例、DHHC-1 格式与服务端错误见[固件平�
 - 引导路径为单控制器、单命名空间；Identify 解析 512 B 与 4 KB 块。
 - DH-HMAC-CHAP 为单向认证；双向认证不在固件实现范围内。
 - HTTPS 下载使用 iPXE 原生 TLS，上限 TLS 1.2；数据面 `sanboot` 使用 TLS 1.3 PSK。
-- 主线固件未签名；Secure Boot 开启时无法加载，需在部署前关闭。
+- 部署产物由站点密钥签名并预置到目标机 `db`；未签名产物在开启 Secure Boot 的目标机上不会执行。
 - 固件只提供命令与协议能力，不实现注册窗口、Worker 绑定、盘选择或凭据签发。
 - iPXE 侧生成 NBFT 仍待实现；当前验证链路使用注入的 NBFT 表模拟固件预生成阶段。
 

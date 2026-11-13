@@ -198,7 +198,7 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 
 - 密钥只在证明通过后注入，`/boot-vars` 不提供注册通道。
 - AK 私钥不可导出，引导后的系统无法读取或复制设备身份；证明覆盖 PCR 0/2/4/7，不覆盖运行期。
-- 首跳依赖 Secure Boot 验证签名固件；服务器 TOFU 的首次信任仍是残余风险。
+- 首跳依赖 Secure Boot 验证签名固件；签名固件只信任构建时嵌入的 boot CA，不使用首次连接信任。
 - TPM 或主板被清除/更换后原 AK 丢失，需删除登记后重新入池；退役设备应清除 `server-fingerprint`。
 
 ## 相关页面

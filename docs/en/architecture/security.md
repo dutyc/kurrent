@@ -6,7 +6,7 @@ Kurrent's security boundary is not a single line but four independent trusts:
 | --- | --- | --- |
 | Management plane | Who may call management APIs | users CA certificates / management tokens / server-side sessions |
 | Component plane | Which storage-node components may join and renew | nodes CA + bootstrap token bound to a node identity + CRL |
-| Device plane | Which machine may obtain boot credentials | TPM AK + PCR baseline + registration window + binding + server TOFU |
+| Device plane | Which machine may obtain boot credentials | TPM AK + PCR baseline + registration window + binding + signed first hop and fixed boot CA |
 | Data plane | Who may connect and whether content is encrypted | DH-HMAC-CHAP + TLS 1.3 PSK |
 
 They cannot substitute for each other. A compromised management plane does not let a device claim boot credentials; a non-exportable device identity key still grants no management access.
@@ -77,25 +77,25 @@ Every management request writes an audit record; if the write fails the request 
 - The binding is `bound_worker_id` on the device side; `/boot-vars` verifies that the requesting MAC belongs to that Worker's bound device.
 - Challenge-attestation uses a one-shot nonce and a PCR quote; enforcement is on by default, and no AK, an invalid quote, a replayed nonce or a PCR digest that does not match the baseline is rejected.
 - The platform baseline is recorded when the first attestation succeeds (TOFU); a changed digest is applied only after an administrator approves it.
-- Server certificate TOFU pins the leaf fingerprint on the first handshake and rejects any later mismatch.
+- Boot HTTPS trusts the boot CA embedded in the signed firmware (4443): only server certificates issued by that CA are accepted, with no fallback to first-contact trust; rotating the boot CA equals reflashing the firmware.
 
 ### Explicit Boundaries
 
 1. **The first hop depends on Secure Boot.** Admission requires Secure Boot enabled; first-hop code is verified against the UEFI trust store, and TFTP delivers only signed binaries. Signed firmware, AK creation and the quote command come from the firmware repository; per-model acceptance is not complete. A device with Secure Boot off cannot be admitted, and a deployment cannot bypass first-hop protection by disabling Secure Boot.
 2. **The limits of device identity.** The AK private key is not exportable, and attestation covers the boot measurements in PCR 0/2/4/7. That does not make the running system trustworthy: a compromised operating system can still obtain the current PSK within the rotation window and read the mounted system disk. The PCR baseline is TOFU—if the first attestation happens under attacker control, the baseline is poisoned, so first enrollment should be verified against the provisioning environment.
-3. **TOFU trusts the first server connection.** The HTTPS segment after the first hop pins the leaf fingerprint on first contact, and that first handshake can still be intercepted. After the control-plane certificate rotates, devices must re-trust it or refuse the connection.
+3. **Boot HTTPS trust comes from the signed firmware.** The boot CA is baked into the signed image at build time and only issues the 4443 leaf; changing it requires re-signing the firmware and re-enrolling `db` on every target, otherwise boot HTTPS always fails.
 4. **Physical access.** An attacker who can clear the TPM or replace the mainboard loses the original AK; the device degrades to an unregistered machine that must be deleted from the ledger and re-admitted during the registration window. The original identity does not come back.
 
 ### First Hop and Attestation
 
-The first hop is DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`. Device firmware trusts its content directly, and iPXE has not yet obtained the control-plane certificate, so this segment must be authenticated by the UEFI trust store and signed firmware rather than by network isolation. Mainline therefore makes Secure Boot an admission prerequisite: the device must have Secure Boot enabled, firmware artifacts are signed by the site and enrolled in the trust store, and TFTP delivers only signed binaries.
+The first hop is DHCP → TFTP `snponly.efi`. UEFI firmware verifies the signature against the site certificate in the target's `db`, so an unsigned or tampered image never runs; the static scripts, boot CA and controller address are embedded in that signed binary and cannot be replaced separately.
 
 After the first hop, two mechanisms take over:
 
-- **Server identity**: the device pins the control-plane leaf fingerprint (TOFU); the first trust is a residual risk.
+- **Server identity**: firmware trusts only the boot CA embedded at build time, so boot HTTPS is anchored by certificates issued by that CA rather than first-contact trust.
 - **Device identity**: the TPM AK quotes PCR 0/2/4/7 with the nonce copied verbatim into `extraData`; the control plane verifies the signature and the one-shot nonce, then compares the PCR digest against the platform baseline. The private key is not exportable, so a booted system cannot copy the device identity elsewhere.
 
-An attacker on the same Layer 2 is therefore left with two options: replacing first-hop files (rejected by Secure Boot) and impersonating the control plane on first contact (limited by TOFU first trust). An attacker who gains runtime control of an admitted device can still obtain the current PSK within the rotation window; a shorter rotation period and revocation are the main countermeasures.
+An attacker on the same Layer 2 is therefore limited to denial of service: forged DHCP/ARP or a link disruption can stall a device, but cannot replace the first hop, swap scripts or impersonate the boot server. An attacker who gains runtime control of an admitted device can still obtain the current PSK within the rotation window; a shorter rotation period and revocation are the main countermeasures.
 
 ### Platform Baseline and Firmware Changes
 
@@ -122,7 +122,8 @@ Kurrent does not add another application-layer encryption layer. Deployments own
 ## Not Solved Today
 
 - **First-hop replacement** — Closed by Secure Boot verifying signed firmware; a device with Secure Boot off cannot be admitted.
-- **Server TOFU first trust** — The first handshake can still be intercepted; deployments should verify the fingerprint pinned on first contact.
+- **Boot server impersonation** — Closed by the boot CA embedded in the signed firmware; there is no fallback to first-contact trust.
+- **Boot-plane denial of service** — Forged DHCP/ARP and link disruption can still block boot; there is no complete DoS design.
 - **Runtime compromise** — TPM attestation does not protect the running system; a compromised system can obtain the current PSK within the rotation window.
 - **Platform baseline and firmware validation** — Per-model PCR behavior (discrete TPM / AMD fTPM) and signed-firmware acceptance are not complete.
 - **Control-plane or storage-host root** — Treated as loss of the corresponding boundary.
@@ -135,11 +136,12 @@ Kurrent does not add another application-layer encryption layer. Deployments own
 
 - [ ] The PXE network is dedicated, and the control plane is the only DHCP/TFTP provider.
 - [ ] Switches enable DHCP snooping, Dynamic ARP Inspection, RA guard and port security; 802.1X/MAB where available.
-- [ ] The control-plane host exposes only 22, 53/67/69 and 80/443; storage nodes expose only 4840/4421 (source-restricted as needed).
+- [ ] The control-plane host exposes only 22, 53/67/69 and 80/443/4443; 4443 is reachable only from the boot segment; storage nodes expose only 4840/4421 (source-restricted as needed).
 - [ ] `sudo kurrent host check --strict` reports neither FAIL nor SKIP; CA keys, `admin.conf`, credentials and audit files are 600.
 - [ ] The registration window is opened on demand with an admission cap and closed afterwards.
 - [ ] TPM attestation enforcement stays on by default; disable it only temporarily for migration or troubleshooting, then restore it.
-- [ ] Targets have Secure Boot enabled and the site trust store enrolled; devices without a TPM are not admitted.
+- [ ] Targets have Secure Boot enabled with the site signing certificate and the Microsoft UEFI CA enrolled; devices without a TPM are not admitted.
+- [ ] Boot-chain artifacts come from a signed build (`build-sb.sh`), and `secureboot.status` in `/boot-assets` is `ok`.
 - [ ] User certificates are issued on demand and revoked immediately on departure or compromise.
 - [ ] CRL refresh, credential pushes and audit alarms are reviewed regularly.
 - [ ] Backups are encrypted and recovery is tested.

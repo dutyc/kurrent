@@ -26,7 +26,7 @@ Firmware is unaware of business policy: registration windows, Worker binding, di
 | Host NQN setting | Injects `hostnqn` per MAC, supporting nvmet `allow_any_host=0` strict mode |
 | Device information collection | Reports SMBIOS identity and memory, CPUID, and NIC fields over HTTP |
 | EFI NVS / TPM NV persistence | Stores `server-fingerprint` in NVRAM; the AK and platform state live in TPM NV across reboots |
-| TOFU trust | Pins the server leaf certificate SHA-256 fingerprint on the first HTTPS handshake and rejects mismatches |
+| TOFU and fixed boot CA | Unsigned artifacts pin the server leaf fingerprint on the first HTTPS handshake; signed artifacts trust only the boot CA embedded at build time |
 | Device identity and attestation | TCG2 access, AK creation and export, SHA-256 quote over PCR 0/2/4/7, `nvclear` |
 | NIC adaptation | Native RTL8125/8126 drivers and a `snponly` local-boot fallback |
 | Local-media boot | `embed/auto.ipxe`; the `direct-uefi` artifact embeds a script that enters the network boot chain immediately |
@@ -39,7 +39,7 @@ Device identity is a TPM 2.0 attestation key (AK): on first boot firmware create
 
 Attestation reuses one challenge round: the control plane issues a one-shot nonce, the device quotes PCR 0/2/4/7 with SHA-256 and copies the nonce verbatim into `extraData`, and the quote with its signature travels with `/boot-vars`. The control plane verifies the signature and compares the digest with the platform baseline before serving boot variables. The first successful attestation records the baseline (TOFU); after a PCR change an administrator approves the new baseline.
 
-TOFU is a global single anchor: once `server-fingerprint` exists, firmware trusts only the certificate pinned during the first HTTPS connection. Every HTTPS target must share that anchor; after rotating the control plane certificate, clear the NVRAM fingerprint first, otherwise the device cannot connect again.
+TOFU is the single anchor for unsigned artifacts: once `server-fingerprint` exists, firmware trusts only the certificate pinned during the first HTTPS connection. Signed artifacts do not use first-contact trust: boot HTTPS accepts only certificates issued by the embedded boot CA, and rotating that CA equals reflashing the firmware.
 
 Security boundaries:
 
@@ -70,7 +70,7 @@ Target configuration, `sanboot` examples, DHHC-1 format, and server-side errors 
 - The boot path uses a single controller and a single namespace; Identify parses 512 B and 4 KB blocks.
 - DH-HMAC-CHAP is one-way; mutual authentication is outside the firmware implementation.
 - HTTPS downloads use iPXE native TLS up to 1.2; data-plane `sanboot` uses TLS 1.3 PSK.
-- Mainline firmware is unsigned and cannot load with Secure Boot enabled; disable Secure Boot before deployment.
+- Deployment artifacts are signed with the site key and enrolled in the target's `db`; unsigned artifacts never run on a target with Secure Boot enabled.
 - Firmware provides commands and protocol capabilities only; it does not implement registration windows, Worker binding, disk selection, or credential issuance.
 - iPXE-side NBFT generation is still pending; the current validation path uses an injected NBFT table to simulate the firmware pre-generation stage.
 

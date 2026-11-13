@@ -198,7 +198,7 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 
 - Keys are injected only after attestation; `/boot-vars` provides no registration channel.
 - The AK private key cannot be exported, so a booted system cannot read or copy the device identity; attestation covers PCR 0/2/4/7, not runtime.
-- The first hop depends on Secure Boot verifying signed firmware; server TOFU first trust remains a residual risk.
+- The first hop depends on Secure Boot verifying signed firmware; signed firmware trusts only the boot CA embedded at build time and never first-contact trust.
 - Clearing the TPM or replacing the mainboard loses the original AK; delete the ledger entry and re-admit the device. Decommissioned devices should clear `server-fingerprint`.
 
 ## Related pages

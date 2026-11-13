@@ -8,16 +8,13 @@ This page describes the main path (NVMe/TCP with TLS 1.3). Firmware build and pr
 
 ![Boot chain: first hop, device identity and data plane](/diagrams/boot-chain.svg)
 
-The split is explicit: firmware provides protocol drivers, TPM AK and quote commands, NV storage and TOFU; the platform repository owns boot scripts and admission decisions.
+The split is explicit: firmware provides protocol drivers, TPM AK and quote commands, NV persistence and boot CA pinning; the platform repository owns boot scripts and admission decisions.
 
 ## 1. Network Boot
 
-The device gets an address and `next-server` over DHCP, then downloads two things over TFTP:
+The device gets an address and `next-server` over DHCP, then downloads the first-stage `snponly.efi` over TFTP (the TFTP root also exposes the `boot.ipxe` pointer). The first stage must be signed with the site certificate enrolled in the target's `db`, otherwise firmware refuses to run it.
 
-- `snponly.efi`: the first-stage firmware.
-- `boot.ipxe`: a pointer that performs one HTTPS redirect.
-
-From `boot.ipxe.cfg` onward, every script, menu and device endpoint uses HTTPS. The server certificate is self-signed and generated at control-plane startup; the device pins its fingerprint on the first handshake (TOFU).
+The signed first stage embeds the static scripts, the boot CA and the controller address: menus, variables and device endpoints are fetched over 4443 HTTPS, trusting only that boot CA and never first-contact trust.
 
 The TFTP root exposes only these two files. Restart the dnsmasq container after replacing `snponly.efi`: the file-level mount pins the inode.
 
@@ -125,27 +122,27 @@ No machine identity is written into the disk: identity, credentials and connecti
 - **Boot variables withheld** — Worker has no credential; backend is not nvmet; data-plane port is not ready.
 - **Reboot after the menu timeout** — No default disk set.
 - **Data-plane connect fails** — PSK not in the storage node keyring; `tlshd` version or kernel TLS support missing.
-- **HTTPS handshake fails** — The control-plane certificate was rotated while the device still pins the old fingerprint.
+- **HTTPS handshake fails** — The boot CA differs (the certificate used at firmware build time and `state/pki/ca/boot/ca.crt` are not the same), or the 4443 leaf SAN or port differs from the firmware build.
 
 ## Trust Boundary
 
-The first hop (DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`) has no cryptographic protection: device firmware does not verify it, and iPXE has not yet obtained the server certificate. Deployments treat the PXE network itself as the trust boundary, while retaining:
+The first hop (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: the target's `db` trusts only the site signing certificate, so an unsigned or tampered first stage never runs and the embedded static scripts cannot be replaced either. The 4443 HTTPS that follows is anchored by the embedded boot CA, and device identity is protected by the TPM AK and PCR baseline:
 
-- device identity (TPM AK + PCR baseline TOFU + registration window + binding);
-- server TOFU;
+- device identity (TPM AK + PCR baseline + registration window + binding);
+- boot server identity (fixed boot CA, no fallback to first-contact trust);
 - PCR attestation and binding-as-authentication;
 - data-plane encryption with no plaintext fallback.
 
-Attackers on the same Layer 2, a compromised host or physical access are outside this boundary. See the [Security Model](../architecture/security.md) for the full threat model and upgrade paths.
+Attackers on the same Layer 2 are therefore limited to denial of service (forged DHCP/ARP, link disruption) and cannot replace the first stage, swap scripts or impersonate the boot server. A compromised host, a compromised running device or physical access is outside this boundary. See the [Security Model](../architecture/security.md) for the full threat model.
 
 ## Firmware Split
 
 | Capability | Provided by |
 | --- | --- |
-| DHCP/TFTP client, HTTPS, TOFU | Firmware |
+| DHCP/TFTP client, HTTPS, boot CA pinning, NVRAM | Firmware |
 | TPM AK creation and PCR quote | Firmware |
 | NVMe/TCP driver, DH-HMAC-CHAP, NBCT | Firmware |
 | Boot scripts, registration window, `/boot-vars` admission | Platform control plane |
 | System disks, credentials, menu generation | Platform control plane |
 
-Firmware build, artifacts and device provisioning are covered in [Build and Artifacts](../firmware/build-deploy.md) and [Provisioning](../firmware/build-deploy.md); the full semantics of the device key, signature format and TOFU are in the [Firmware Contract](../reference/firmware-contract.md); NVMe/TCP and NBCT configuration is in the [Firmware Platform Reference](../reference/firmware-platform.md).
+Firmware build, artifacts and device provisioning are covered in [Build and Artifacts](../firmware/build-deploy.md) and [Provisioning](../firmware/build-deploy.md); trust anchors and provisioning for Secure Boot are in [Secure Boot Boot](../firmware/secure-boot.md); the full semantics of the device key, quote format and trust anchors are in the [Firmware Contract](../reference/firmware-contract.md); NVMe/TCP and NBCT configuration is in the [Firmware Platform Reference](../reference/firmware-platform.md).

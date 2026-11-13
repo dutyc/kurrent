@@ -8,7 +8,7 @@ This page is organized by symptom: first identify the boundary where the failure
 - **Signed in, but an Agent is not `ok`** — control plane → Agent 4840; `kurrent agents list`; node `spec.agent.advertiseUrl`.
 - **Device gets no DHCP response** — dnsmasq / PXE segment; device segment, `interface=`, firewall 67/69.
 - **DHCP works but TFTP download fails** — TFTP root / 69; TFTP root files and permissions.
-- **iPXE stalls at HTTPS** — 443 / certificate / TOFU; server certificate; NVRAM fingerprint.
+- **iPXE stalls at 4443 HTTPS** — boot CA / 4443 certificate / port; boot CA used at firmware build time, leaf SAN and port.
 - **Device not pooled** — registration window / TPM AK / revocation; window state on Devices; device report.
 - **Empty menu or boot loop** — binding / system disk / default disk; Worker details; `/boot-vars` projection.
 - **Data plane fails after the menu** — 4421 / tlshd / credentials; `kurrent host check --role storage`; credential push state.
@@ -105,7 +105,7 @@ kurrent cert list
 - Component certificates: `kurrent cert revoke-component <agent_id>`; writes the nodes CRL and removes the node bootstrap token.
 - Recover a node by issuing a new token and running `join` again, as described under "Agent not ok".
 
-## Device identity, TPM attestation and server TOFU
+## Device identity, TPM attestation and boot trust
 
 Device identity is a TPM 2.0 AK, and attestation is submitted with `/boot-vars`. The control plane records rejection reasons in the `boot_vars.credential` audit and in `attestation.last_reason` on the device record; the Attestation column and expanded row on the Devices page show the state and reason code.
 
@@ -121,8 +121,8 @@ Device identity is a TPM 2.0 AK, and attestation is submitted with `/boot-vars`.
 | `pcr_mismatch` | The PCR digest does not match the platform baseline (firmware or boot configuration changed) | Verify the change, then click Approve New Baseline in the device detail; the next boot re-attests |
 | `baseline_approved` | The baseline was just approved and awaits the next attestation | Reboot the device to complete one attestation |
 
-- **HTTPS download rejected** — server certificate does not match the pinned fingerprint; confirm whether the certificate rotated; clear `server-fingerprint` after rotation.
-- **A second HTTPS host is rejected** — TOFU is a global single anchor; consolidate HTTPS endpoints and certificates; use TFTP/HTTP for other traffic.
+- **Boot HTTPS rejected** — the server certificate does not chain to the boot CA embedded in firmware; check the `BOOT_CA_CERT` used at build time against `state/pki/ca/boot/ca.crt`, and whether the 4443 leaf SAN covers the address devices use.
+- **A second HTTPS host is rejected** — the boot CA is a global single anchor; consolidate boot HTTPS endpoints and certificates; use TFTP/HTTP for other traffic.
 - **TLS handshake fails** — server TLS is above 1.2 or uses incompatible suites; limit the server to TLS 1.2.
 - **`${quote}` / `${quote-sig}` is empty** — the TPM command failed or the device has no TPM; check firmware logs; devices without a TPM are not admitted.
 - **`device.claim rejected reason=ak_mismatch`** — the registered AK differs from this report; the AK cannot be replaced online, so delete the ledger entry and admit the device again during the registration window.

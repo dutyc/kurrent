@@ -8,16 +8,13 @@
 
 ![引导链：首跳、设备身份与数据面三个阶段](/diagrams/boot-chain.svg)
 
-控制面与固件分工明确：固件提供协议驱动、TPM AK 与 quote、NV 与 TOFU 能力；引导脚本与准入判断由主仓库维护。
+控制面与固件分工明确：固件提供协议驱动、TPM AK 与 quote、NV 持久化与 boot CA 固定能力；引导脚本与准入判断由主仓库维护。
 
 ## 1. 网络引导
 
-设备通过 DHCP 取得地址与 `next-server`，从 TFTP 下载两件东西：
+设备通过 DHCP 取得地址与 `next-server`，从 TFTP 下载首跳 `snponly.efi`（TFTP 根还暴露 `boot.ipxe` 指针）。首跳必须是用预置在目标机 `db` 中的站点证书签名的镜像，否则固件拒绝执行。
 
-- `snponly.efi`：首跳固件。
-- `boot.ipxe`：只做一次 HTTPS 跳转的指针。
-
-从 `boot.ipxe.cfg` 开始，所有脚本、菜单与设备接口都走 HTTPS。服务器证书是控制面启动时生成的自签证书，设备在首次握手时固定其指纹（TOFU）。
+签名首跳内嵌静态脚本、boot CA 与控制面地址：菜单、变量与设备接口都经 4443 HTTPS 取回，只信任该 boot CA，不采用首次连接信任。
 
 TFTP 根只暴露这两个文件。更新 `snponly.efi` 后需要重启 dnsmasq 容器：文件级挂载固定 inode。
 
@@ -125,27 +122,27 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 - **启动变量不下发**：Worker 无凭据；后端不是 nvmet；数据面端口未就绪。
 - **菜单超时后重启**：未设置默认盘。
 - **数据面连接失败**：PSK 未送达存储节点 keyring；`tlshd` 版本或内核 TLS 配置不满足。
-- **HTTPS 握手失败**：控制面证书轮换后，设备 NVRAM 仍固定旧指纹。
+- **HTTPS 握手失败**：boot CA 不一致（固件构建使用的证书与控制面 `state/pki/ca/boot/ca.crt` 不同），或 4443 叶证书的 SAN、端口与固件构建不一致。
 
 ## 信任边界
 
-第一跳（DHCP → TFTP `snponly.efi` → TFTP `boot.ipxe`）没有密码学保护：设备固件不验证这段内容，iPXE 也尚未取得服务器证书。部署把 PXE 网段本身作为信任边界，并在其上保留：
+首跳（DHCP → TFTP `snponly.efi`）由 UEFI Secure Boot 验证：目标机 `db` 只信任站点签名证书，未签名或被篡改的首跳不会执行，内嵌的静态脚本也随之不可替换。首跳之后的 4443 HTTPS 由嵌入的 boot CA 锚定，设备身份由 TPM AK 与 PCR 基线保护：
 
-- 设备身份（TPM AK + PCR 基线 TOFU + 注册窗口 + 绑定）；
-- 服务器 TOFU；
+- 设备身份（TPM AK + PCR 基线 + 注册窗口 + 绑定）；
+- 引导服务器身份（固定 boot CA，不回落首次连接信任）；
 - PCR 证明与绑定即认证；
 - 数据面加密与无明文回退。
 
-同一二层内的攻击者、被控宿主或物理访问不在该边界内解决。完整的威胁模型与升级路径见[安全模型](../architecture/security.md)。
+因此同二层攻击者能造成拒绝服务（伪 DHCP/ARP、链路中断），但无法替换首跳、替换脚本或冒充引导服务器。被控宿主、运行期被控设备与物理访问不在该边界内解决。完整的威胁模型见[安全模型](../architecture/security.md)。
 
 ## 固件分工
 
 | 能力 | 提供方 |
 | --- | --- |
-| DHCP/TFTP 客户端、HTTPS、TOFU、NVRAM | 固件 |
+| DHCP/TFTP 客户端、HTTPS、boot CA 固定、NVRAM | 固件 |
 | TPM AK 创建、PCR quote | 固件 |
 | NVMe/TCP 驱动、DH-HMAC-CHAP、NBCT | 固件 |
 | 引导脚本、注册窗口、`/boot-vars` 准入 | 主仓库控制面 |
 | 系统盘、凭据、菜单生成 | 主仓库控制面 |
 
-固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；设备 AK、quote 格式与 TOFU 的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。
+固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；Secure Boot 的信任锚与预置见 [Secure Boot 引导](../firmware/secure-boot.md)；设备 AK、quote 格式与信任锚的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。

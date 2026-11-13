@@ -8,7 +8,7 @@
 - **能登录但 Agent 非 `ok`**：控制面 → Agent 4840；`kurrent agents list`；节点 `spec.agent.advertiseUrl`。
 - **设备没有 DHCP 应答**：dnsmasq / PXE 网段；设备网段、`interface=`、防火墙 67/69。
 - **有 DHCP 但无 TFTP 下载**：TFTP 根 / 69；TFTP 根文件与权限。
-- **iPXE 卡在 HTTPS**：443 / 证书 / TOFU；服务器证书、NVRAM 指纹。
+- **iPXE 卡在 4443 HTTPS**：boot CA / 4443 证书 / 端口；固件构建的 boot CA、叶证书 SAN 与端口。
 - **设备不入池**：注册窗口 / TPM AK / Secure Boot / 吊销；Devices 页窗口状态与证明列；设备上报。
 - **菜单为空或循环重启**：绑定 / 系统盘 / 默认盘；Worker 详情；`/boot-vars` 投影。
 - **菜单后数据面连接失败**：4421 / tlshd / 凭据；`kurrent host check --role storage`；凭据推送状态。
@@ -105,7 +105,7 @@ kurrent cert list
 - 组件证书：`kurrent cert revoke-component <agent_id>`，写 nodes CRL 并删除该节点 bootstrap token。
 - 恢复节点：签发新 token 后重新 `join`，见「Agent 非 ok」。
 
-## 设备身份、TPM 证明与服务器 TOFU
+## 设备身份、TPM 证明与引导信任
 
 设备身份是 TPM 2.0 AK，证明随 `/boot-vars` 提交。控制面把拒绝原因写入 `boot_vars.credential` 审计与设备记录的 `attestation.last_reason`，Devices 页的证明列与展开行显示状态和原因码。
 
@@ -121,8 +121,8 @@ kurrent cert list
 | `pcr_mismatch` | PCR 摘要与平台基线不一致（固件或启动配置变更） | 核对变更后在设备详情点击「批准新基线」，设备下次启动重新证明 |
 | `baseline_approved` | 基线刚被批准，等待下次证明 | 重启设备完成一次证明 |
 
-- **HTTPS 下载被拒**：服务器证书与已固定指纹不一致；确认证书是否轮换；轮换后清除 `server-fingerprint`。
-- **访问第二个 HTTPS 主机被拒**：TOFU 为全局单锚；统一 HTTPS 入口与证书，其余流量走 TFTP/HTTP。
+- **引导 HTTPS 被拒**：服务器证书无法链到固件内嵌的 boot CA；核对固件构建用的 `BOOT_CA_CERT` 与控制面 `state/pki/ca/boot/ca.crt`，以及 4443 叶证书 SAN 是否覆盖设备访问的地址。
+- **访问第二个 HTTPS 主机被拒**：boot CA 为全局单锚；统一引导 HTTPS 入口与证书，其余流量走 TFTP/HTTP。
 - **TLS 握手失败**：服务端 TLS 高于 1.2 或套件不兼容；服务端限制到 TLS 1.2。
 - **`${quote}` / `${quote-sig}` 为空**：TPM 命令失败或设备没有 TPM；检查固件日志，无 TPM 设备不入池。
 - **`device.claim rejected reason=ak_mismatch`**：已登记的 AK 与本次上报不一致；AK 不可在线更换，删除登记后在注册窗口内重新入池。

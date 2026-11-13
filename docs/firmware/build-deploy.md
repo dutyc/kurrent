@@ -15,7 +15,7 @@
 
 - Linux x86_64 构建机，具备 `git`、`make`、`gcc`；
 - 能访问上游 iPXE 仓库，首次构建会缓存源码；
-- 目标设备为 x86_64 UEFI，部署时关闭 Secure Boot；主线产物未签名；传统 BIOS（Legacy/CSM）引导不再支持；
+- 目标设备为 x86_64 UEFI，开启 Secure Boot，且 `db` 已导入站点签名证书；传统 BIOS（Legacy/CSM）引导不再支持；
 - 已按[部署](../guide/deployment.md)完成控制面、dnsmasq 与 PXE 网段。
 
 ## 1. 构建
@@ -42,6 +42,8 @@ JOBS=8 ./build/build.sh                  # 并行度
 ```
 
 补丁基线与升级流程见固件仓库 `patches/README`。升级上游前需逐个确认补丁仍可应用，并重新执行 QEMU 与整机验证。
+
+部署使用 `build-sb.sh` 产出的签名产物 `dist/secureboot/snponly-sb.efi`；`build.sh` 的未签名产物在开启 Secure Boot 的目标机上会被固件拒绝。签名的输入、产物与预置步骤见 [Secure Boot 引导](./secure-boot.md)。
 
 校验产物：
 
@@ -73,6 +75,8 @@ sha256sum -c SHA256SUMS
 
 主仓库默认使用 `tftp/snponly.efi`。不同机型可能需要不同的首跳产物，而主线当前只下发 `snponly.efi`，不支持按设备切换；需要 `pxe-uefi/ipxe.efi` 的机器无法在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物。
 
+上表是 `build.sh` 的形态；部署时首跳换成 `build-sb.sh` 的 `dist/secureboot/snponly-sb.efi`，形态与 `pxe-uefi/snponly.efi` 相同。
+
 ## 3. 部署到设备
 
 | 条件 | 路径 |
@@ -83,22 +87,25 @@ sha256sum -c SHA256SUMS
 
 ### PXE 路径
 
-1. 取得 `pxe-uefi/snponly.efi`。
+1. 取得 `dist/secureboot/snponly-sb.efi` 与 `manifest.json`。
 2. 安装到主仓库 TFTP 根并重启 dnsmasq：
 
    ```bash
-   sudo install -m 0644 dist/pxe-uefi/snponly.efi /path/to/kurrent/tftp/snponly.efi
+   sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
+     /path/to/kurrent/tftp/secureboot/
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
    cd /path/to/kurrent
    eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
-   `tftp/snponly.efi` 是文件级挂载，替换后必须重启容器，否则容器仍持有旧 inode。
+   `tftp/snponly.efi` 是文件级挂载，替换后必须重启容器，否则容器仍持有旧 inode。`tftp/secureboot/` 留作 `/boot-assets` 的产物核对与导出源。
 
-3. 在设备 UEFI 设置中启用网络栈，将网络启动置于启动顺序首位。
-4. 启动设备，确认 DHCP 分配地址、TFTP 下载首跳、HTTPS 取回脚本。
+3. 在设备 UEFI 设置中启用网络栈与 Secure Boot，将网络启动置于启动顺序首位。
+4. 启动设备，确认 DHCP 分配地址、TFTP 下载首跳、首跳经 4443 完成上报与挑战。
 
-首跳只下载 `snponly.efi` 与 `boot.ipxe`，后续脚本从 HTTPS 取回。PXE 网段必须按[安全模型](../architecture/security.md)隔离。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用。
+TFTP 只交付首跳 `snponly.efi`（与 `boot.ipxe` 指针）；签名首跳内嵌静态脚本、boot CA 与控制面地址，后续请求走 4443 HTTPS，只信任该 boot CA。余下的 TLS 1.3 数据面 `sanboot` 与内核段保持既有凭据链。PXE 网段必须按[安全模型](../architecture/security.md)隔离。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用。
 
 ### 本地介质路径
 
@@ -131,13 +138,15 @@ BMC / Redfish 虚拟介质只做过协议级验证，具体型号能力不同；
 2. 通过 `akpub` 导出 AK 公钥、名称与算法；
 3. 向控制面 `/devices/report` 上报指纹、AK 与 Secure Boot 状态；
 4. 每次引导经 `/devices/challenge` 取得 nonce，用 `quote` 对 PCR 0/2/4/7 生成证明；
-5. 首次 HTTPS 握手固定控制面服务器叶证书指纹（TOFU）。
+5. 经 4443 取回引导变量，只信任构建时固定的 boot CA。
+
+设备必须上报 `sb=1` 才能入池；Secure Boot 关闭时注册期上报只记指纹。
 
 身份语义：
 
-- 设备身份由 TPM 内的 AK 承载；服务器指纹存在 NVRAM，**不在盘上**；更新固件或替换 TFTP 文件不会清除它们。
+- 设备身份由 TPM 内的 AK 承载；引导 HTTPS 的信任锚是烘在签名固件里的 boot CA；更新固件或替换 TFTP 文件不会清除 TPM 中的 AK。
 - 清除 TPM 或更换主板会失去原 AK，等同于更换设备身份，需要删除登记并在注册窗口内重新入池。
-- 清除 `server-fingerprint` 会解除 TOFU，下一次 HTTPS 连接重新固定；控制面证书轮换后必须这样做。
+- boot CA 轮换等于重刷固件：需要重新构建签名产物，并在目标机重新预置 `db` 证书。
 - 更换硬件或整机替换即形成一台新设备；系统盘与 Worker 身份仍保留在控制面，通过换绑完成迁移。
 
 NVRAM 清理应通过固件可交互环境或受控预置流程完成。AK 生命周期、quote 格式与信任边界见[固件契约](../reference/firmware-contract.md)。
@@ -148,11 +157,11 @@ NVRAM 清理应通过固件可交互环境或受控预置流程完成。AK 生�
 | --- | --- |
 | 设备启动 | 进入 iPXE 菜单，能看到该 Worker 的系统盘 |
 | WebUI → Devices | 设备在注册窗口内入池 |
-| WebUI → 引导链 / `/boot-assets` | 固件 `status=ok`，能力齐全 |
+| WebUI → 引导链 / `/boot-assets` | 固件 `status=ok`，能力齐全；`secureboot.status=ok` |
 | 控制面日志 / 审计 | `/devices/report`、`/devices/challenge`、`/boot-vars` 有对应记录 |
 | 数据面 | 选择默认盘后可完成 NVMe/TCP 连接并进入系统 |
 
-`/boot-assets` 中 `status=ok` 且 TPM 身份与 quote 能力齐全才满足引导链要求。`incomplete` 通常表示 TFTP 根里放的是 stock iPXE。
+`/boot-assets` 中 `status=ok` 且 TPM 身份与 quote 能力齐全才满足引导链要求。`incomplete` 通常表示 TFTP 根里放的是 stock iPXE。`secureboot.status` 不是 `ok` 时，按镜像哈希、端口与 boot CA 三项分别核对。
 
 ### QEMU 验证
 
@@ -178,8 +187,8 @@ bash test/run-qemu-auth.sh
 
 - **无 DHCP 应答**：设备是否在 PXE 网段；dnsmasq `interface=` 与防火墙 67/69。
 - **DHCP 后无 TFTP 下载**：TFTP 根是否只挂载了 `snponly.efi` 与 `boot.ipxe`；文件权限。
-- **卡在固件启动**：Secure Boot 是否开启（主线产物未签名）；产物是否为对应架构与形态。
-- **HTTPS 证书错误**：TOFU 指纹与控制面证书不匹配；证书轮换后未重新预置。
+- **卡在固件启动**：产物未签名、签名证书不在目标机 `db`，或 Secure Boot 未开启；用 `sbverify --cert` 与 `tools/secureboot/check-host.sh` 复核，并确认产物为对应架构与形态。
+- **引导 HTTPS 证书错误**：固件构建用的 `BOOT_CA_CERT` 与控制面 `state/pki/ca/boot/ca.crt` 不一致；或 4443 叶证书的 SAN 不覆盖设备访问的地址、端口与 `BOOT_HTTPS_PORT` 不一致。
 - **设备不入池**：注册窗口是否开启；上报是否携带有效 TPM AK；设备是否被吊销。
 - **菜单为空或启动循环**：设备是否绑定 Worker；Worker 是否有系统盘与默认盘。
 - **数据面连接失败**：`tlshd`、内核 TLS 配置、4421 端口与凭据推送状态。
