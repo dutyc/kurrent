@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page is organized by symptom: first identify the boundary where the failure occurs, then inspect the responsible component. Task pages keep their local failure tables; this page covers cross-component isolation, evidence collection, and recovery paths.
+Failures are located by symptom: first identify the boundary where the failure occurs, then inspect the responsible component. Task pages keep their local failure tables; this page covers cross-component isolation, evidence collection, and recovery paths.
 
 ## Locate the failure boundary
 
@@ -60,7 +60,7 @@ Old certificates do not need manual deletion; the Agent startup self-check re-en
 3. Confirm the device is not revoked; a `revoked` entry does not recover through a new report.
 4. Check control plane logs and audit for `/devices/report`.
 
-After the window closes, reports update fingerprints only and do not pool devices. There is no registration path outside the window.
+After the window closes, reports from unknown devices do not pool them or write the ledger, leaving only a rejection audit record. There is no registration path outside the window.
 
 ## Boot refused
 
@@ -70,7 +70,6 @@ After the window closes, reports update fingerprints only and do not pool device
 | Does the Worker have a system disk and a default disk | Worker details; without a default disk the control plane returns `menu-default=reboot` |
 | Is TPM attestation enforcement disabled | Devices page registration panel; it is on by default, and disabling it lets bound devices without attestation boot (credentials are still never injected) |
 | Does `/boot-vars` return complete connection data | `GET /boot-vars`; check `disk-nqn`, `storager-ip`, port, and PSK |
-| Does the NVRAM fingerprint match the control plane certificate | Re-provision `server-fingerprint` after certificate rotation |
 
 ## Data plane connection failure
 
@@ -146,4 +145,4 @@ Audit write failures return 503 (fail-closed). When reporting an issue, include 
 - [Operations](./operations.md)
 - [Boot chain](../concepts/boot-chain.md)
 - [Storage and data plane](../concepts/storage.md)
-- [Firmware build and deployment](../firmware/build-deploy.md)
+- [Firmware build](../firmware/build.md), [deployment and provisioning](../firmware/deploy.md)

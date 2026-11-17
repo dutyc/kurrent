@@ -1,10 +1,10 @@
 # Firmware Platform Reference
 
-This page is the platform-side firmware reference: patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NV, TOFU, challenge-attestation and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building, artifact selection and deployment are covered in [Firmware Build and Deployment](../firmware/build-deploy.md).
+The platform-side firmware reference includes the patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NV, TOFU for unsigned debugging, challenge-attestation and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building and artifact selection are covered in [Build](../firmware/build.md), deployment in [Deployment and Provisioning](../firmware/deploy.md).
 
 ## Patch set
 
-Patches are applied in filename order; if any patch fails against the pinned baseline, the build fails. The current chain has ten patches:
+Patches are applied in filename order; if any patch fails against the pinned baseline, the build fails. The current chain has eleven patches:
 
 | No. | Name | Content |
 | --- | --- | --- |
@@ -15,9 +15,10 @@ Patches are applied in filename order; if any patch fails against the pinned bas
 | 0005 | `nvmeof-adaptation` | NVMe/TCP SAN driver, DH-HMAC-CHAP, authentication timing fixes, and `hostnqn` |
 | 0006 | `efi-nvs-backend` | EFI variable NVS backend, including empty-block deletion semantics |
 | 0007 | `tofu-fingerprint` | TOFU fingerprint pinning and verification |
-| 0008 | `devicekey-commands` | ECDSA P-256 device identity commands |
+| 0008 | `nvclear-command` | `nvclear` command that clears the TOFU fingerprint and trust anchor from NVRAM |
 | 0009 | `nvmetcp-nbct-acpi-table` | NBCT ACPI table and kernel credential handoff |
 | 0010 | `tls13-psk` | TLS 1.3 PSK client and record layer |
+| 0011 | `tpm-attestation` | TPM 2.0 AK creation and persistence, PCR quote, and the `akgen` / `akpub` / `quote` commands |
 
 Besides the patches, `embed/auto.ipxe` is a build-level EMBED asset compiled into the `direct-uefi` artifacts via `EMBED=`; it is not part of the patch sequence. Licensing differs across the set: the RTL8125/8126 adaptation is GPL-2.0 only and may not be redistributed under UBDL; the other patches follow their file-header terms. Read `patches/README` before redistribution.
 
@@ -204,7 +205,7 @@ The default path encrypts both the firmware segment and the kernel segment. HTTP
 
 - [Firmware Overview](../firmware/index.md)
 - [Firmware Contract](./firmware-contract.md)
-- [Firmware Build and Deployment](../firmware/build-deploy.md)
+- [Build](../firmware/build.md), [Deployment and Provisioning](../firmware/deploy.md)
 - [Distribution Matrix](./distributions.md)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)

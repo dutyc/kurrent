@@ -1,18 +1,6 @@
-# Secure Boot Boot
+# Secure Boot Provisioning
 
-This page explains how the first-hop firmware and the boot HTTPS endpoint get verifiable trust anchors, and how they combine with TPM attestation. Admission requires `sb=1`, so Secure Boot is a prerequisite of the platform rather than an option.
-
-## Trust anchors
-
-The boot chain has three trust anchors that do not replace one another:
-
-| Object | Anchor | Failure consequence |
-| --- | --- | --- |
-| First-hop binary (iPXE) | Site signing certificate in the target's UEFI `db` | Unsigned or mismatched firmware never runs |
-| Boot HTTPS (4443) | Boot CA embedded in the signed firmware (`TRUST=` / `CERT=`) | Server certificates outside that CA are rejected; there is no TOFU fallback |
-| Device identity | TPM AK and PCR 0/2/4/7 quote | No AK or a failing quote means no credentials |
-
-Changing the firmware signing key requires updating the target's `db`; changing the boot CA means reflashing the firmware, because the fingerprint is baked into the image. Changing firmware or Secure Boot policy changes the PCRs, so attestation is rejected as `pcr_mismatch` until an administrator reviews and approves the new baseline.
+Admission requires `sb=1`, so Secure Boot is a prerequisite of the platform. `build-sb.sh` builds the signed artifact, which is then delivered to the control plane and its signing certificate provisioned into the target trust store. The trust anchors and rotation effects are in [Boot Trust](./trust.md).
 
 ## Control-plane artifacts
 
@@ -22,7 +10,7 @@ The control plane generates these idempotently at startup, separate from the com
 - `state/certs/boot-server.crt|boot-server.key`: the 4443 leaf certificate, valid for 1 year, with SANs mirroring `spec.serverCert.san`; it is reissued automatically when less than 30 days remain, without changing the boot CA.
 - The nginx 4443 server proxies only `/boot-vars`, `/devices/report`, and `/devices/challenge`, does not request client certificates, and returns 404 for any other path; the management plane, WebUI, and `/api/cp/` are not on this port.
 
-Adjust the host port with `KURRENT_BOOT_HTTPS_PORT`, and keep it identical to `BOOT_HTTPS_PORT` at firmware build time: the port is baked into the signed image, and `secureboot.port_matches` in `/api/cp/boot-assets` verifies it.
+Adjust the host port with `KURRENT_BOOT_HTTPS_PORT`, and keep it identical to `BOOT_HTTPS_PORT` at firmware build time: the port is embedded in the signed image, and `secureboot.port_matches` in `/api/cp/boot-assets` verifies it.
 
 ## Building signed firmware
 
@@ -33,19 +21,14 @@ cd kurrent-firmware
 SB_KEY=/path/to/artifact-signing.key \
 SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=/path/to/boot-ca.crt \
-BOOT_HTTPS_PORT=4443 \
 ./build/build-sb.sh
 ```
 
-Required inputs:
+A signed build requires a signing key, a signing certificate and the boot CA certificate. The port and controller address may be omitted: the port defaults to `4443`, and the address comes from the DHCP `next-server` unless `CONTROLLER_IP` fixes it inside the image. Changing the boot CA, the port or a fixed address requires a rebuild.
 
-- `SB_KEY` / `SB_CERT`: the offline code-signing key and certificate; the certificate must be enrolled in the target's `db`.
-- `BOOT_CA_CERT`: the control plane's boot CA certificate (`state/pki/ca/boot/ca.crt`), pinned into the firmware as `TRUST=` / `CERT=`.
-- `CONTROLLER_IP`: set it when the control-plane address is fixed; leave it empty to use DHCP `next-server`.
+The script embeds `auto.ipxe`, `sb-boot.ipxe.cfg`, and `sb-menu.ipxe`, then signs the result with `sbsign`. Artifacts land in `dist/secureboot/`: `snponly-sb.efi` and `manifest.json`; the manifest records the artifact hash, signer, build time, port, and boot CA fingerprint.
 
-The script embeds `auto.ipxe`, `sb-boot.ipxe.cfg` (port and controller address), and `sb-menu.ipxe`, then signs the result with `sbsign`. Artifacts land in `dist/secureboot/`: `snponly-sb.efi` and `manifest.json`; the manifest records the artifact hash, signer, build time, port, and boot CA fingerprint.
-
-The script is the only entry point for the static boot logic: changing the menu, a variable, or a jump requires a rebuild and a new signature; the logic cannot be replaced on its own.
+The same image can therefore be pre-provisioned across devices within one deployment (same boot CA, same port). The script is the only entry point for the static boot logic: changing the menu, a variable, or a jump requires a rebuild and a new signature; the logic cannot be replaced on its own.
 
 ## Deploying to the control plane
 
@@ -62,7 +45,7 @@ The signing certificate must be in the target's `db` first, otherwise the firmwa
 - **Redfish (optional, requires BMC and vendor support)**: `KURRENT_BMC_USER=... KURRENT_BMC_PASSWORD=... tools/secureboot/enroll-redfish.sh --bmc <bmc> --cert <artifact-signing.crt> --enable-secureboot`. The script reads the Secure Boot and `db` state, confirms the Microsoft UEFI CA is present, then imports the certificate idempotently and reads the fingerprint back; `--dry-run` only reads. The tool has only been validated at protocol level (simulated BMC); confirm vendor behavior per model.
 - Target: disable CSM, enable Secure Boot, and verify the state and `db` with `tools/secureboot/check-host.sh <artifact-signing.crt>`.
 
-The loader after `sanboot` is decided by the distribution signing chain: the golden disk's ESP shim/GRUB/kernel must be vendor-signed (the Ubuntu 26.04 golden disk uses a Microsoft UEFI CA 2011 signed shim → Canonical-signed GRUB and kernel), and the target `db` must contain that Microsoft CA. An unsigned GRUB is rejected after `sanboot`.
+The loader after `sanboot` is decided by the distribution signing chain: the master disk's ESP shim/GRUB/kernel must be vendor-signed (the Ubuntu 26.04 master disk uses a Microsoft UEFI CA 2011 signed shim → Canonical-signed GRUB and kernel), and the target `db` must contain that Microsoft CA. An unsigned GRUB is rejected after `sanboot`.
 
 ## Verification
 
@@ -70,16 +53,11 @@ The loader after `sanboot` is decided by the distribution signing chain: the gol
 - The `secureboot` section of `/api/cp/boot-assets` is `ok`.
 - The first cold boot reaches the iPXE menu, passes attestation, and reaches `login:`; negative cases are in [Troubleshooting](../guide/troubleshooting.md).
 
-## Boundaries
-
-- Secure Boot covers only the first iPXE segment and the boot HTTPS endpoint; the loader after `sanboot` is decided by the distribution signing chain.
-- There is no rollback protection: a previously signed firmware still verifies, so rollback control depends on the release process.
-- Rotating the boot CA equals reflashing the firmware; firmware upgrades or trust-store changes alter the PCRs and require an administrator to approve a new baseline.
-- Some PXE firmware does not verify the downloaded NBP; prefer local media or controlled HTTP boot where possible. Per-model validation on real hardware is not complete.
-
 ## Related pages
 
-- [Firmware Build and Deployment](./build-deploy.md)
+- [Firmware Overview](./index.md), [Firmware Composition](./composition.md)
+- [Boot Trust](./trust.md)
+- [Build](./build.md), [Deployment and Provisioning](./deploy.md)
 - [Identity and Access](../concepts/identity.md)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)

@@ -97,17 +97,17 @@
       <rect x="40" y="600" width="300" height="100" rx="12" fill="#fbfcfe" stroke="#5b87b5" stroke-width="1.5"/>
       <text x="64" y="630" font-size="15" font-weight="600" fill="#2f4f70">Device 01</text>
       <text x="64" y="652" font-size="12" fill="#6b7c8f">Worker worker-01</text>
-      <text x="64" y="676" font-size="11" fill="#8798aa">iPXE · NVRAM identity · TOFU</text>
+      <text x="64" y="676" font-size="11" fill="#8798aa">iPXE · TPM AK · boot CA</text>
 
       <rect x="380" y="600" width="300" height="100" rx="12" fill="#fbfcfe" stroke="#5b87b5" stroke-width="1.5"/>
       <text x="404" y="630" font-size="15" font-weight="600" fill="#2f4f70">Device 02</text>
       <text x="404" y="652" font-size="12" fill="#6b7c8f">Worker worker-02</text>
-      <text x="404" y="676" font-size="11" fill="#8798aa">iPXE · NVRAM identity · TOFU</text>
+      <text x="404" y="676" font-size="11" fill="#8798aa">iPXE · TPM AK · boot CA</text>
 
       <rect x="720" y="600" width="300" height="100" rx="12" fill="#fbfcfe" stroke="#5b87b5" stroke-width="1.5"/>
       <text x="744" y="630" font-size="15" font-weight="600" fill="#2f4f70">Device 03</text>
       <text x="744" y="652" font-size="12" fill="#6b7c8f">Worker worker-03</text>
-      <text x="744" y="676" font-size="11" fill="#8798aa">iPXE · NVRAM identity · TOFU</text>
+      <text x="744" y="676" font-size="11" fill="#8798aa">iPXE · TPM AK · boot CA</text>
     </g>
 
     <!-- Data plane arrows -->

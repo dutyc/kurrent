@@ -25,7 +25,7 @@ const zh = {
   eyebrow: '云原生 · 无状态 · 裸金属',
   h1: ['计算不该', '被硬件占有。'],
   lede: 'Kurrent 把身份、系统与状态从机器上剥离。<strong>节点保持空，系统成为调度的唯一单元。</strong>机器只是系统此刻所在的位置。',
-  cta: ['项目概述', '它如何成立'],
+  cta: ['开始部署', '它如何成立'],
   propCap: '命题 / PROPOSITION',
   prop: [
     ['节点', '只提供位置，<b>不持有身份与状态</b>。'],
@@ -78,12 +78,10 @@ const zh = {
   s4: {
     side: '文档',
     items: [
-      ['01', '入门', '项目定位、标准部署流程与第一次端到端交付。', '/guide/overview'],
-      ['02', '概念', '架构、实体、引导链、存储、身份、安全与配置。', '/architecture/'],
-      ['03', '固件', '固件概述、构建部署、接口契约与发行版矩阵。', '/firmware/'],
-      ['04', '任务', '系统盘定制、日常运维与故障排查。', '/guide/system-disk'],
-      ['05', '参考', '配置键表、CLI、API 与术语表。', '/reference/configuration'],
-      ['06', '项目', '路线图、参与贡献与设计依据。', '/about/roadmap'],
+      ['01', '概念', '实体模型、引导链、存储与数据面、身份与访问、声明式配置。', '/concepts/entities'],
+      ['02', '部署', '从空白主机到首次冷启动：部署、固件预置、系统盘与验收。', '/guide/deployment'],
+      ['03', '运维', '日常运维与故障排查。', '/guide/operations'],
+      ['04', '参考', '配置、CLI、固件契约、发行版与完整 API。', '/reference/configuration'],
     ],
   },
   footer: {
@@ -100,7 +98,7 @@ const en = {
   eyebrow: 'Cloud-native · Stateless · Bare metal',
   h1: ['Compute should not', 'be owned by hardware.'],
   lede: 'Kurrent strips identity, system and state away from the machine. <strong>The node stays empty; the system becomes the only unit of scheduling.</strong> The machine is merely where the system happens to be.',
-  cta: ['Project Overview', 'How it holds'],
+  cta: ['Start Deployment', 'How it holds'],
   propCap: 'Proposition',
   prop: [
     ['Node', 'Provides location only; <b>holds no identity or state</b>.'],
@@ -153,12 +151,10 @@ const en = {
   s4: {
     side: 'Docs',
     items: [
-      ['01', 'Getting Started', 'Positioning, the standard deployment procedure, and a first end-to-end delivery.', '/en/guide/overview'],
-      ['02', 'Concepts', 'Architecture, entities, boot chain, storage, identity, security, and configuration.', '/en/architecture/'],
-      ['03', 'Firmware', 'Firmware overview, build and deployment, contract, and distribution matrix.', '/en/firmware/'],
-      ['04', 'Tasks', 'System disk customization, operations, and troubleshooting.', '/en/guide/system-disk'],
-      ['05', 'Reference', 'Configuration keys, CLI, API, and glossary.', '/en/reference/configuration'],
-      ['06', 'Project', 'Roadmap, contribution, and design rationale.', '/en/about/roadmap'],
+      ['01', 'Concepts', 'Entity model, boot chain, storage and data plane, identity, declarative configuration.', '/en/concepts/entities'],
+      ['02', 'Deployment', 'From blank hosts to the first cold boot: deployment, firmware, system disks, acceptance.', '/en/guide/deployment'],
+      ['03', 'Operations', 'Day-to-day operations and troubleshooting.', '/en/guide/operations'],
+      ['04', 'Reference', 'Configuration, CLI, firmware contract, distributions and the full API.', '/en/reference/configuration'],
     ],
   },
   footer: {
@@ -204,7 +200,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <h1>{{ c.h1[0] }}<br>{{ c.h1[1] }}</h1>
           <p class="lede" v-html="c.lede"></p>
           <div class="links">
-            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/overview' : 'guide/overview')">{{ c.cta[0] }} <span>→</span></a>
+            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/deployment' : 'guide/deployment')">{{ c.cta[0] }} <span>→</span></a>
             <a class="link" href="#unit">{{ c.cta[1] }} <span>↓</span></a>
           </div>
         </div>

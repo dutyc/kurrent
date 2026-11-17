@@ -1,6 +1,6 @@
 # Firmware Contract
 
-This page describes the interface between the firmware and the main repository: TPM identity commands, NV settings, TOFU behavior, challenge-attestation formats, control-plane reporting, and boot variables. Field-level authority lives in the firmware repository's `docs/device-trust-usage.md`, `docs/capability-reference.md`, and `patches/README`; control-plane endpoint details are authoritative in `api/control-plane-api.en.md`.
+The interface between firmware and the main repository includes TPM identity commands, NV settings, TOFU behavior, challenge-attestation formats, control-plane reporting, and boot variables. Field-level authority lives in the firmware repository's `docs/device-trust-usage.md`, `docs/capability-reference.md`, and `patches/README`; control-plane endpoint details are authoritative in the [API Reference](./api/index.md).
 
 ## Device identity commands
 
@@ -21,6 +21,8 @@ Notes:
 
 ## NV settings
 
+`server-fingerprint` and `trust` are used only by unsigned debugging artifacts; the deployment path uses signed firmware, whose boot HTTPS trusts only the boot CA embedded at build time.
+
 | Setting | Type | DHCP tag | Persistence | Writer |
 | --- | --- | --- | --- | --- |
 | `server-fingerprint` | hexraw | 0x5f | NVRAM | TOFU |
@@ -32,17 +34,17 @@ Notes:
 | `quote` | hexraw | 0x61 | Memory | `quote` |
 | `quote-sig` | hexraw | 0x62 | Memory | `quote` |
 
-Clearing persistent settings requires the `nvo/` block prefix:
+Persistent settings are cleared with `nvclear`, which deletes `server-fingerprint` and `trust` as settings in the `nvo` block and reports each as `cleared`, `not present` or `could not clear`; any failure yields a non-zero exit with `incomplete`. The equivalent single-setting form is:
 
 ```text
 clear nvo/server-fingerprint  # remove the TOFU pin; repinned on next HTTPS connection
 ```
 
-A bare `clear server-fingerprint` or an empty `set server-fingerprint` has no effect on the NVS backend. The AK is not persisted through iPXE settings; clearing the TPM or replacing the mainboard loses the original AK, and the device must be deleted from the ledger and re-admitted.
+A bare `clear server-fingerprint` or an empty `set server-fingerprint` only removes the in-memory block and never reaches the NVS backend. The AK is not persisted through iPXE settings; clearing the TPM or replacing the mainboard loses the original AK, and the device must be deleted from the ledger and re-admitted.
 
-## TOFU
+## TOFU (unsigned debugging artifacts)
 
-TOFU applies automatically in the TLS handshake path; there is no command or configuration item.
+TOFU applies only to unsigned debugging artifacts and is not part of the deployment path; signed firmware trusts only the boot CA embedded at build time. The behavior below is automatic in the TLS handshake path, with no command or configuration item.
 
 | State | Condition | Behavior |
 | --- | --- | --- |
@@ -55,7 +57,7 @@ Constraints:
 - The fingerprint is the **SHA-256 of the leaf certificate DER**; verify independently with `openssl x509 -outform DER | sha256sum`.
 - The pin is a single global anchor: the firmware trusts only the certificate pinned on the first HTTPS connection. Every HTTPS target must share that certificate or chain to it; other traffic can use TFTP/HTTP.
 - HTTPS uses the native iPXE TLS implementation, limited to TLS 1.2.
-- After control-plane certificate rotation, devices must clear `server-fingerprint` and pin again, or boot will be refused.
+- After control-plane certificate rotation, unsigned artifacts must clear `server-fingerprint` and pin again, or boot will be refused.
 
 ## Challenge-attestation
 
@@ -97,7 +99,7 @@ GET /devices/report?mac=<MAC>&ak_public=<hex>&ak_name=<hex>&ak_type=ecc_p256&sb=
 | `mac` | Required; the device NIC MAC |
 | `ak_public` | AK public key SPKI DER hex; paired with `ak_name` and required for registration and AK claiming |
 | `ak_name` | TPM2B_NAME hex (68 hex: algorithm prefix + public-key digest) |
-| `ak_type` | `ecc_p256` (default) or `rsa2048`; a mismatch with the actual key algorithm means no identity |
+| `ak_type` | `ecc_p256` or `rsa2048`; required alongside `ak_public` and must match the actual key algorithm — missing or mismatched means no identity |
 | `sb` | Secure Boot state, `1` = enabled; must be `1` during registration |
 | `uuid` | SMBIOS UUID; an existing value is never overwritten by a self-reported one |
 | `manufacturer` / `product` / `serial` | Vendor, model, serial number |
@@ -205,9 +207,9 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 
 - [Firmware Overview](../firmware/index.md)
 - [Firmware Platform Reference](./firmware-platform.md)
-- [Build and Artifacts](../firmware/build-deploy.md)
-- [Provisioning and Flashing](../firmware/build-deploy.md)
+- [Build](../firmware/build.md)
+- [Deployment and Provisioning](../firmware/deploy.md)
 - [Device Identity and Trust](../firmware/index.md#device-identity-and-trust)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)
-- [API Reference](./api.md)
+- [API Reference](./api/index.md)

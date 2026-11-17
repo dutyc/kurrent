@@ -21,7 +21,7 @@
 - **Principal class（主体类）**：`human` / `component` / `automation` / `anonymous`；路由按类授权，默认拒绝。
 - **CA（证书颁发机构）**：控制面维护 users / nodes / control 三套根，分别对应人员、节点组件与控制面客户端。
 - **CRL**：证书吊销列表；组件面定期拉取并按序列号拒绝已吊销证书。
-- **TOFU**：Trust On First Use：首次 HTTPS 握手固定服务器叶证书指纹，之后不匹配即拒绝。
+- **TOFU（首次连接信任）**：仅用于未签名调试产物：首次 HTTPS 握手固定服务器叶证书指纹。部署路径使用签名固件与固定的 boot CA，不使用 TOFU。
 - **NQN**：NVMe Qualified Name，NVMe-oF 子系统与主机的标识。
 - **Host NQN**：主机侧 NQN，按节点 `nqnBase` 与 Worker 派生，用于 target 侧主机授权。
 - **IQN**：iSCSI Qualified Name，iSCSI 后端使用的标识。

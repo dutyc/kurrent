@@ -60,7 +60,7 @@
     <rect x="944" y="190" width="184" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
     <text x="958" y="214" font-size="12" font-weight="600" fill="#151412">Device</text>
     <text x="958" y="232" font-size="10" fill="#6f6a61">network boot</text>
-    <text x="958" y="248" font-size="10" fill="#8d867b">iPXE · TOFU</text>
+    <text x="958" y="248" font-size="10" fill="#8d867b">iPXE · boot CA</text>
 
     <rect x="712" y="300" width="200" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
     <text x="726" y="324" font-size="12" font-weight="600" fill="#151412">Control Plane</text>

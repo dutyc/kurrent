@@ -16,17 +16,21 @@ Kurrent is a cloud-native, stateless bare-metal delivery paradigm. It carries "s
 
 Storage is NVMe-oF-first: an in-kernel NVMe/TCP target exports system disks, with TLS 1.3 on a single port `4421` shared by the firmware and kernel boot stages. DHHC-1 credentials follow the Worker and are issued at disk creation on nvmet backends; the root path uses the full NQN from the disk record. iSCSI (stgt/lio) remains as a compatibility backend.
 
+## Security
+
+Device identity is an Attestation Key inside the TPM: the device reports its public key during a registration window, and on every boot answers a single-use nonce with a PCR 0/2/4/7 quote before the control plane releases credentials. Secure Boot verifies the signed first hop against the UEFI database, and boot HTTPS trusts only the boot CA embedded at build time. The management plane uses mutual TLS; the NVMe/TCP data plane uses TLS 1.3 with per-Worker DHHC-1 credentials. See the [security model](https://dutyc.github.io/kurrent/en/architecture/security.html).
+
 ## Getting Started
 
 Deploy a control plane and join storage nodes in minutes — see [Deployment](https://dutyc.github.io/kurrent/en/guide/deployment.html) on the documentation site. The `kurrent` CLI ships prebuilt binaries on [Releases](https://github.com/dutyc/kurrent/releases) for Linux amd64/arm64 and Windows amd64.
 
 ## Documentation
 
-The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment, system disk customization, operations, troubleshooting, and reference material: [CLI reference](https://dutyc.github.io/kurrent/en/reference/cli.html), [API reference](https://dutyc.github.io/kurrent/en/reference/api.html), [architecture overview](https://dutyc.github.io/kurrent/en/architecture/).
+The [documentation site](https://dutyc.github.io/kurrent/en/) covers deployment, system disk customization, operations, troubleshooting, and reference material: [CLI reference](https://dutyc.github.io/kurrent/en/reference/cli.html), [API reference](https://dutyc.github.io/kurrent/en/reference/api/), [architecture overview](https://dutyc.github.io/kurrent/en/architecture/).
 
 ## Delivery Flow
 
-A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. [System Disk Customization](https://dutyc.github.io/kurrent/en/guide/system-disk.html) and [First Delivery](https://dutyc.github.io/kurrent/en/guide/usage.html) cover image preparation and the first boot. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0 and Arch Linux (rolling); see the [distribution matrix](https://dutyc.github.io/kurrent/en/reference/distributions.html) for details, and the verification set does not limit which distributions can boot.
+A device joins the pool on first boot; after binding a Worker, creating a system disk and setting the default disk in the Web UI, it boots. One Worker can carry multiple system disks and switch between them in the menu. [System Disk Customization](https://dutyc.github.io/kurrent/en/guide/system-disk.html) and [Deployment](https://dutyc.github.io/kurrent/en/guide/deployment.html) cover image preparation and the first boot. Cold boot is verified on Debian 12/13, Ubuntu 24.04/26.04, Fedora 44, AlmaLinux 10.2, openSUSE Leap 16.0 and Arch Linux (rolling); see the [distribution matrix](https://dutyc.github.io/kurrent/en/reference/distributions.html) for details, and the verification set does not limit which distributions can boot.
 
 ## Firmware Repo
 

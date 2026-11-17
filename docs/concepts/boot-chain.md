@@ -1,139 +1,84 @@
 # 引导链
 
-引导链回答启动瞬间的三个问题：以谁的身份、连哪个目标、挂哪块盘。Kurrent 不把答案写进机器或盘，而是由控制面按当前绑定关系在每次启动时投影。
+一台设备从加电到挂载根文件系统，要依次回答三个问题：执行的代码是否可信、请求方是不是那台设备、应该连哪个存储目标。传统装机把答案固定在机器和磁盘里，Kurrent 不这样做：每次启动，控制面按当前的绑定关系把答案投影给设备。这样系统才能在不同机器之间流动，而机器本身不携带任何固定身份。
 
-本页描述主路径（NVMe/TCP + TLS 1.3）。固件侧的构建与预置见[固件](../firmware/index.md)，信任边界见[安全模型](../architecture/security.md)。
+主路径为 NVMe/TCP + TLS 1.3：系统盘通过网络以 NVMe 协议访问，传输全程加密。
 
-## 总览
+## 一次启动的三个阶段
+
+| 阶段 | 回答的问题 | 信任锚 | 失败结果 |
+| --- | --- | --- | --- |
+| 首跳 | 代码是否可信 | UEFI `db` 站点证书 | 固件拒绝执行 |
+| 身份 | 是否那台设备 | TPM AK + PCR 基线 | 不入池、无凭据 |
+| 数据面 | 连哪个 target | DHHC-1 + TLS 1.3 | 拒绝连接 |
 
 ![引导链：首跳、设备身份与数据面三个阶段](/diagrams/boot-chain.svg)
 
-控制面与固件分工明确：固件提供协议驱动、TPM AK 与 quote、NV 持久化与 boot CA 固定能力；引导脚本与准入判断由主仓库维护。
+三个阶段依次进行，后一阶段以前一阶段的结论为前提。任一阶段失败，启动即停止，不会改走其他路径。
 
-## 1. 网络引导
+## 首跳
 
-设备通过 DHCP 取得地址与 `next-server`，从 TFTP 下载首跳 `snponly.efi`（TFTP 根还暴露 `boot.ipxe` 指针）。首跳必须是用预置在目标机 `db` 中的站点证书签名的镜像，否则固件拒绝执行。
+设备开机后先通过 DHCP 拿到地址和 `next-server`（下一跳服务器地址），再从 TFTP 下载第一个执行文件 `snponly.efi`。这是整个引导链里唯一一段无法用网络手段保护的过程——下载本身是明文的，所以可信性必须由目标机固件自己保证。
 
-签名首跳内嵌静态脚本、boot CA 与控制面地址：菜单、变量与设备接口都经 4443 HTTPS 取回，只信任该 boot CA，不采用首次连接信任。
+这个文件必须经过签名，签名证书要预先导入目标机的 UEFI `db`（固件内置的受信签名证书库）。验签不通过，固件直接拒绝执行，网络引导不会开始。
 
-TFTP 根只暴露这两个文件。更新 `snponly.efi` 后需要重启 dnsmasq 容器：文件级挂载固定 inode。
+签名镜像里内嵌了三样东西：
 
-## 2. 设备身份
+- 静态引导脚本
+- boot CA 证书
+- 引导 HTTPS 端口（默认 4443）
 
-首次启动时，固件在本机 TPM 内创建证明密钥（AK，受限签名密钥，ECC P-256 或 RSA-2048），私钥不可导出。后续启动复用同一 AK，已存在的 AK 不会被重建。控制面只记录 AK 公钥（SPKI DER）、AK name 与密钥类型。
+内嵌的意义在于：脚本与信任锚随镜像一起被签名保护，攻击者无法单独替换其中任何一项。控制面地址默认不在镜像里，由 DHCP 提供。此后的菜单、变量与设备接口都只通过 boot CA 锚定的 HTTPS 下载。
 
-固件向 `/devices/report` 上报：
+## 设备身份
 
-- MAC、UUID、SMBIOS、CPU、内存、网卡等 11 项指纹；
-- AK 公钥、AK name 与类型；
-- Secure Boot 状态（自报，仅用于注册期准入）。
+首跳解决了「代码可信」，接下来要解决「设备是谁」。首次启动时，固件在本机 TPM 内创建证明密钥（AK），私钥不可导出，因此这把密钥只能代表这台物理机器。设备向控制面上报指纹与 AK 公钥后按 MAC 入池。
 
-控制面按 MAC 登记设备池。**上报不等于授权**：
+登记不产生权限。每次启动，设备用 AK 对 PCR 0/2/4/7 生成 quote——TPM 对这几个启动度量寄存器当前值的签名报告。控制面把报告里的值与平台基线比对，确认启动环境没有被改动。证明通过的设备才可能取得凭据。
 
-- 未知 MAC 只有在注册窗口开启、放行额度未用尽、携带有效 AK 且 `sb=1` 时才入池；
-- 已入池但未绑定的设备不会被授予任何启动凭据；
-- 窗口关闭后，上报只更新指纹，不新增条目；
-- 无 TPM 或 Secure Boot 未开启的设备不入池。
+## 数据面
 
-AK 不可在线轮换：设备恢复或更换主板走删除登记并在注册窗口内重新入池的管理员流程。
+身份确认后，控制面把当前绑定投影成一组启动变量。`/boot-vars` 依次检查识别、绑定、证明与凭据条件，一次成功请求的返回形如：
 
-## 3. 挑战-证明
-
-绑定与证明强制（默认开启）下，仅凭“知道某个 MAC”不足以取得凭据。设备向 `/devices/challenge` 请求一次性 nonce，然后用 TPM AK 对 PCR 0/2/4/7 做 SHA-256 quote：
-
-```text
-extraData = nonce    （原样写入，不做编码变换）
-qualifiedSigner = AK
-pcrDigest = SHA-256( PCR 0 / 2 / 4 / 7 )
+```ipxe
+#!ipxe
+# boot vars for worker-01
+set disk-nqn nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89
+set storager-ip 192.168.80.3
+set hostnqn nqn.2026-07.com.kurrent:host.worker-01
+set nbft-secret DHHC-1:01:<base64>
+set nbft-tls-psk <64 hex>
+set nbft-tls-port 4421
+set os ubuntu
+set menu-default boot-os
+set menu-timeout 5000
 ```
 
-PCR 读取与 quote 在同一次 TPM 调用内完成，避免两次读取之间的竞态。nonce 一次性使用并绑定 MAC；`report`、`challenge` 与 `boot-vars` 按来源 IP 限速。quote 与签名随 `/boot-vars` 请求提交，控制面用登记的 AK 公钥验签，并比对 PCR 摘要与平台基线。
+这些变量告诉固件：连哪台存储节点（`storager-ip`）、挂哪块盘（`disk-nqn`）、以什么身份连（`hostnqn`）、用什么密钥认证（`nbft-secret`）和加密（`nbft-tls-psk`）。固件按这些变量在端口 `4421` 上完成 DH-HMAC-CHAP 认证与 TLS 1.3 握手，没有明文回退。示例中的密钥与 PSK 为占位符，实际值只下发给证明通过的设备。
 
-平台基线在首次证明通过时记录（TOFU）；摘要变化按 `pcr_mismatch` 拒绝并保留待批摘要，管理员核对后批准。
+## 交接给内核
 
-## 4. 准入与变量投影
+固件建立的连接只服务引导阶段；操作系统启动后，根文件系统要由内核自己挂载。为此固件在 `sanboot` 时安装 NBCT 凭据表，记录本次会话的 target、NQN 与 DHHC-1 密钥。
 
-`/boot-vars` 是引导链上最关键的一次判断。控制面依次检查：
+initramfs 里的 `nbft-connect` 读取 NBCT 与 NBFT（网络与子系统发现信息表），在同一端口以 `--tls` 重新连接并挂载根文件系统。盘内不包含固定的机器身份，内核拿到的一切连接信息都来自本次启动的投影。
 
-1. **识别**：请求 MAC 经设备台账反查 Worker；未传 MAC 或台账未命中时，才用 hostname 兜底。
-2. **绑定即认证**：请求 MAC 必须属于命中 Worker 的绑定设备，其他设备不能冒领该 Worker 的引导身份。
-3. **TPM 证明**：证明强制默认开启，无 AK、quote 无效、nonce 重放或 PCR 与基线不符一律拒绝。
-4. **凭据条件**：Worker 已绑定且密钥库有条目；nvmet 后端还要求存储节点数据面端口就绪。nvmet 条件不满足时拒绝下发；非 nvmet 后端不投影 NVMe-oF 凭据。
+## 失败与观测
 
-通过检查后按证明结果投影变量：凭据只发给证明通过的设备；非凭据变量仅在显式关闭证明强制时下发。
+任一阶段失败都不会回退到其他路径：
 
-| 变量 | 内容 |
-| --- | --- |
-| `disk-nqn` | 默认盘的完整 NQN |
-| `storager-ip` | 持有该盘的存储节点地址 |
-| `hostnqn` | 该 Worker 的发起端 Host NQN |
-| `nbft-secret` | DH-HMAC-CHAP 认证密钥 |
-| `nbft-tls-psk` / `nbft-tls-port` | 由认证密钥派生的 TLS PSK 与数据面端口 |
-| `menu-default` | 菜单超时后的启动项 |
+- 首跳验签失败：固件不执行。
+- 身份或准入失败：`/boot-vars` 返回空脚本。
+- 数据面缺凭据或端口未就绪：拒绝下发。
 
-没有默认盘时返回 `menu-default=reboot`；池中未绑定设备同样进入重启循环，等待绑定。nvmet 后端缺少密钥或端口未就绪时，控制面拒绝下发完整变量；非 nvmet 后端不投影 NVMe-oF 密钥与 PSK。所有路径都不拼接明文 URI。
-
-## 5. 菜单
-
-`menu.ipxe` 经 HTTPS 加载，显示当前默认盘的 OS 标识：
-
-- 超时后启动默认盘；
-- 要切换系统盘，在 WebUI 的 Worker 详情中设置另一块盘为默认盘，下一次启动生效；
-- 启动项来自台账投影，不依赖盘内配置。
-
-## 6. 数据面连接
-
-`sanboot` 的目标形如：
-
-```text
-nvme://<storager>:<tls_port>/<disk_nqn>?secret=<dhhc1>&tls_psk=<psk>&tls_trsvcid=<tls_port>
-```
-
-连接分两层完成：
-
-- **认证**：DH-HMAC-CHAP 完成连接控制，回答“谁可以连”。
-- **加密**：TLS 1.3 在同一个端口 `4421` 上保护传输内容。
-
-固件自己完成 TLS 握手。认证失败、PSK 缺失或端口未就绪时连接失败；没有明文回退端口。
-
-## 7. 交接给操作系统
-
-固件在 `sanboot` 时安装一张 **NBCT** 凭据表（ACPI 表），记录本会话的：
-
-- target 地址与端口；
-- 子系统 NQN 与 Host NQN；
-- DH-HMAC-CHAP 密钥。
-
-TLS PSK 与数据面端口随 `sanboot` URI 交给后续阶段；NBFT 负责网络与子系统发现信息。
-
-initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **NBCT**（凭据与 Host NQN 中继），用同一端口以 `--tls` 重连，挂载根文件系统。
-
-盘内不写死机器身份：身份、凭据与连接信息都来自本次启动的投影。
-
-> 当前状态：NBCT 由固件生成；iPXE 侧生成 NBFT 仍待实现。已验证的整机链路用注入的 NBFT 表模拟“固件预生成”阶段。
-
-## 失败路径
-
-- **设备未入池**：注册窗口未开启；上报缺少有效 AK 或 `sb!=1`；设备已被吊销。
-- **设备入池但无法启动**：未绑定 Worker；或 Worker 没有系统盘。
-- **设备反复重启**：Worker 没有默认盘；或池中设备尚未绑定。
-- **证明强制（默认开启）下提示 `ak_unregistered` / `quote_invalid`**：设备未完成 AK 认领；引导脚本未取得 nonce 或未生成 quote。
-- **`pcr_mismatch`**：固件、Secure Boot 或启动配置变化；管理员核对后在设备详情批准新基线。
-- **启动变量不下发**：Worker 无凭据；后端不是 nvmet；数据面端口未就绪。
-- **菜单超时后重启**：未设置默认盘。
-- **数据面连接失败**：PSK 未送达存储节点 keyring；`tlshd` 版本或内核 TLS 配置不满足。
-- **HTTPS 握手失败**：boot CA 不一致（固件构建使用的证书与控制面 `state/pki/ca/boot/ca.crt` 不同），或 4443 叶证书的 SAN、端口与固件构建不一致。
+设备反复重启通常是未绑定或没有默认盘。原因码写入审计与设备的证明状态，管理员可以在 WebUI 设备详情里看到。
 
 ## 信任边界
 
-首跳（DHCP → TFTP `snponly.efi`）由 UEFI Secure Boot 验证：目标机 `db` 只信任站点签名证书，未签名或被篡改的首跳不会执行，内嵌的静态脚本也随之不可替换。首跳之后的 4443 HTTPS 由嵌入的 boot CA 锚定，设备身份由 TPM AK 与 PCR 基线保护：
+首跳（DHCP → TFTP `snponly.efi`）由 UEFI Secure Boot 验证。目标机 `db` 只信任站点签名证书，未签名或被篡改的首跳不会执行，内嵌的静态脚本也随之不可替换。
 
-- 设备身份（TPM AK + PCR 基线 + 注册窗口 + 绑定）；
-- 引导服务器身份（固定 boot CA，不回落首次连接信任）；
-- PCR 证明与绑定即认证；
-- 数据面加密与无明文回退。
+首跳之后的 HTTPS 由内嵌的 boot CA 锚定，设备身份由 TPM AK 与 PCR 基线保护。
 
-因此同二层攻击者能造成拒绝服务（伪 DHCP/ARP、链路中断），但无法替换首跳、替换脚本或冒充引导服务器。被控宿主、运行期被控设备与物理访问不在该边界内解决。完整的威胁模型见[安全模型](../architecture/security.md)。
+因此，同二层攻击者能造成拒绝服务（伪 DHCP/ARP、链路中断），但无法替换首跳、替换脚本或冒充引导服务器。被控宿主、运行期被控设备与物理访问不在该边界内解决。
 
 ## 固件分工
 
@@ -145,4 +90,11 @@ initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **
 | 引导脚本、注册窗口、`/boot-vars` 准入 | 主仓库控制面 |
 | 系统盘、凭据、菜单生成 | 主仓库控制面 |
 
-固件的构建、产物与设备预置见[构建与产物](../firmware/build-deploy.md)与[预置与刷写](../firmware/build-deploy.md)；Secure Boot 的信任锚与预置见 [Secure Boot 引导](../firmware/secure-boot.md)；设备 AK、quote 格式与信任锚的完整语义见[固件契约](../reference/firmware-contract.md)；NVMe/TCP 与 NBCT 的配置见[固件平台参考](../reference/firmware-platform.md)。
+## 相关页面
+
+- 各阶段的完整机制：[首跳](./boot-chain/first-hop.md)、[设备身份](./boot-chain/device-identity.md)、[数据面](./boot-chain/data-plane.md)、[交接给内核](./boot-chain/handover.md)
+- 固件构建与预置：[固件](../firmware/index.md)
+- AK、quote 格式与信任锚：[固件契约](../reference/firmware-contract.md)
+- 盘、凭据与数据面：[存储与数据面](./storage.md)
+- 完整威胁模型：[安全模型](../architecture/security.md)
+- 失败后的操作入口：[日常运维](../guide/operations.md)

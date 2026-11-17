@@ -1,6 +1,6 @@
 # 故障排查
 
-本页按现象组织：先判断失败发生在哪一段边界，再进入对应组件检查。各任务页保留局部失败表；本页负责跨组件定位、证据采集与恢复路径。
+故障按现象定位：先判断失败发生在哪一段边界，再进入对应组件检查。任务页保留局部失败表，这里负责跨组件定位、证据采集与恢复路径。
 
 ## 先定位失败边界
 
@@ -60,7 +60,7 @@ kurrent join https://<控制面地址> --token <token> --agent-id <agent_id>
 3. 确认设备未被吊销；`revoked` 条目不会因重新上报自动恢复。
 4. 检查控制面审计与日志中是否有 `/devices/report` 记录。
 
-窗口关闭后上报只更新指纹，不再入池。没有窗口外的注册通道。
+窗口关闭后未知设备的上报不入池、不写台账，只留拒绝审计。没有窗口外的注册通道。
 
 ## 引导被拒绝
 
@@ -70,7 +70,6 @@ kurrent join https://<控制面地址> --token <token> --agent-id <agent_id>
 | Worker 是否有系统盘与默认盘 | Worker 详情；无默认盘时控制面返回 `menu-default=reboot` |
 | TPM 证明强制是否被关闭 | Devices 页注册窗口面板；默认开启，关闭后未通过证明的已绑定设备也可取得菜单变量（凭据仍不注入） |
 | `/boot-vars` 是否返回完整连接信息 | `GET /boot-vars`，核对 `disk-nqn`、`storager-ip`、端口与 PSK |
-| 设备 NVRAM 指纹是否与控制面证书一致 | 证书轮换后需重新预置 `server-fingerprint` |
 
 ## 数据面连接失败
 
@@ -146,4 +145,4 @@ kurrent cert list
 - [日常运维](./operations.md)
 - [引导链](../concepts/boot-chain.md)
 - [存储与数据面](../concepts/storage.md)
-- [固件构建与部署](../firmware/build-deploy.md)
+- [固件构建](../firmware/build.md)、[部署与预置](../firmware/deploy.md)

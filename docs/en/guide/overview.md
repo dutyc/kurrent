@@ -1,52 +1,37 @@
 # Project Overview
 
-Kurrent is a stateless delivery system for bare-metal compute. It separates identity, system and data from the physical machine: a compute node holds no persistent business state, and boot-time identity, system disk and credentials are granted by the network and the control plane. The node therefore becomes a replaceable location, and the system becomes the object that is delivered and scheduled.
+Kurrent is a stateless delivery system for bare-metal compute: identity, system and data do not belong to the physical machine; they are granted by the control plane and the storage side at boot. The machine therefore becomes a replaceable location, and the system becomes the object that is delivered and scheduled.
 
-```text
-Identity lives in the device ledger, the system disk on storage,
-the declaration in configuration files, and credentials are issued by the control plane.
-What remains on the node is a temporary connection for one boot.
-```
+> Identity lives in the device ledger, the system disk on storage, the declaration in configuration files, and credentials are issued by the control plane; the node keeps only a temporary connection for one boot.
 
-## The Problem
+## The problem it solves
 
-Cloud-native practice over the past decade made applications elastic: containers can be rebuilt, moved and upgraded without being tied to a machine. The physical nodes underneath, however, are still maintained the traditional way — installing systems, configuring networks, reinstalling, replacing hardware and migrating by hand or through a separate infrastructure stack.
+Cloud-native practice lets applications be rebuilt, moved and upgraded, but the physical nodes underneath are still maintained the traditional way — installing systems, configuring networks, reinstalling and replacing hardware all require manual work or a separate infrastructure stack.
 
-Kurrent addresses that layer: **make the machine that carries a system replaceable as well**. It does not replace application orchestration, and it does not hide state behind another storage abstraction. It redefines the origin of identity and the system at boot, so that replacing the machine no longer requires reinstalling the system.
+Kurrent addresses that layer: **make the machine that carries a system replaceable as well**. It does not replace application orchestration, and it does not hide state behind another storage abstraction; it changes the origin of identity and of the system at boot, so replacing the machine no longer requires reinstalling the system.
 
-## Core Propositions
+Kubernetes schedules application workloads and assumes that nodes already exist and systems are already installed; Kurrent delivers the system that carries applications, one layer below. The two compose, and Kurrent does not provide post-boot application orchestration.
 
-### The node holds no persistent state
+## Core model
 
-A compute node can be powered off, replaced or re-racked at any time. Its system comes from the network, its identity is granted by the control plane according to the binding, and its data lives on the system disk. The node keeps no local copy of the system and needs no per-machine installation record.
+**A system consists of a compute identity, a system disk and boot credentials, and belongs to the identity rather than the device.**
 
-Device identity is an AK inside the TPM that cannot be exported; the server certificate fingerprint and platform baseline are **identity anchors**, not system state: they carry no business data, do not migrate with the system, and require re-registration if lost.
+| Object | Identifier | Meaning | Authority |
+| --- | --- | --- | --- |
+| Device | MAC | A replaceable physical location | Device ledger |
+| Worker | `worker_id` | The compute identity | Control-plane ledger |
+| System disk | NQN | The bootable system itself | Disk file on a storage node; ownership recorded by the control plane |
 
-### The system is the unit of delivery
+Four invariants:
 
-What is delivered is not an application process but a bootable system: compute identity (Worker), system disk, boot credentials and the device binding together define it. A system belongs to an identity, not to a machine; the machine is merely where the system currently resides.
+- Device and Worker are one-to-one; the binding can change, and rebinding is one cold migration.
+- The Worker owns its system disks; disks do not move with devices.
+- The disk stores no fixed machine identity; each boot projects connection information and credentials from the current binding.
+- Device identity lives inside the TPM and does not migrate with the disk; replacing the mainboard or clearing the TPM is equivalent to replacing the device.
 
-This determines the control plane's object model: Device, Worker and system disk are three independent entities, the binding has a single authority, and disks are decoupled from machines. Applications and higher-level orchestration run inside the system and are outside Kurrent's scheduling scope.
+The device lifecycle is `pooled → bound → revoked`. A Worker's `readiness` is derived from "has a bound device" and "has a system disk"; one Worker may carry multiple system disks, and the default disk determines the boot entry after the menu timeout.
 
-### Identity and system disk are decoupled
-
-A device is identified by its MAC, compute identity is represented by a Worker, and a system disk is identified by its NQN. The binding between them can change: rebinding a device to another Worker is a cold migration; the system disk stays where it is and does not need to be recreated.
-
-Machine identity is not written into the disk. At boot the control plane projects connection information according to the current binding, so the same disk can boot on a different device provided that identity and credentials match.
-
-### The data plane does not traverse the control plane
-
-Block I/O between devices and storage nodes uses an independent data plane; the control plane handles provisioning, identity and configuration. A control-plane outage affects new provisioning and boots but does not interrupt established I/O.
-
-The data plane is encrypted by default: a single NVMe/TCP port `4421` uses TLS 1.3, shared by the firmware and kernel segments. Authentication uses DH-HMAC-CHAP, and the TLS pre-shared key is derived from the authentication key. A missing key or an unready port refuses the boot instead of falling back to plaintext.
-
-## Relationship to Kubernetes
-
-Kubernetes schedules application workloads and assumes that nodes already exist and systems are already installed. Kurrent delivers the system that carries applications; it addresses the layer beneath Kubernetes.
-
-The two operate at different layers and can be combined: Kurrent converts bare metal into replaceable system carriers, and Kubernetes or another orchestrator runs inside those systems. Kurrent does not provide post-boot application orchestration and does not require replacing an existing upper-layer platform.
-
-## Three Roles
+## What the system is made of
 
 | Role | Responsibility | Main components |
 | --- | --- | --- |
@@ -56,41 +41,50 @@ The two operate at different layers and can be combined: Kurrent converts bare m
 
 ![Deployment topology: the management and data planes between control plane, storage nodes and devices](/diagrams/topology.svg)
 
-The control plane and storage nodes may be separate or co-located, but the roles stay separate; master image customization is one-time preparation rather than a per-deployment step.
+The control plane handles provisioning, identity and configuration and is not on the data path between devices and storage nodes; the control plane and storage nodes may be separate or co-located, but the roles stay separate. Components, ports and failure domains are covered in the [Architecture](../architecture/index.md).
 
-## Three Entities
+## One run: from power-on to login
 
-| Entity | Identifier | Authority |
-| --- | --- | --- |
-| Device | MAC | Device ledger; the binding is authoritative on the device side |
-| Worker | `worker_id` (hostname) | Control-plane ledger; represents compute identity |
-| System disk | NQN | Disk file on a storage node; ownership recorded by the control plane |
+1. **Network boot** — the device obtains an address and next hop over DHCP and fetches the signed first-hop iPXE from the control plane over TFTP. The control plane is the only DHCP and TFTP provider on that segment.
+2. **Identity and attestation** — the firmware creates or reuses an AK inside the TPM, reports the device fingerprint and AK public key; the control plane issues a one-shot nonce, and the device quotes PCR 0/2/4/7.
+3. **Admission and projection** — the control plane checks the binding, the quote signature, the nonce and the platform baseline; only then does it return the root-path, NQN, storage address and credentials. Requests that do not pass receive menu variables only.
+4. **Data-plane connection** — the firmware authenticates with DH-HMAC-CHAP and connects to port `4421` on the storage node over TLS 1.3.
+5. **System boot** — iPXE `sanboot` loads GRUB and the kernel from the disk.
+6. **initramfs handover** — the kernel phase authenticates again and establishes TLS; NBFT and NBCT carry the connection information, and the initramfs reconnects and mounts the root filesystem.
+7. **Login** — the target system comes up. The control plane is not on the I/O path: its failure affects new provisioning and boots but does not interrupt established connections.
 
-The device lifecycle is `pooled → bound → revoked`; a Worker's `readiness` is derived from "has a bound device" and "has a system disk". One Worker may carry multiple system disks, and the default disk determines the boot entry after the menu timeout.
+Any credential step that fails refuses the boot instead of falling back to plaintext. Step-by-step mechanics and failure paths are in the [Boot Chain](../concepts/boot-chain.md).
 
-## Capabilities
+![Key steps of one boot: DHCP, attestation, variable projection and the NVMe/TCP connection](/diagrams/boot-chain.svg)
 
-- **Zero-touch enrollment** — Within the registration window, a device with a valid TPM AK registers automatically; once the window closes, no new device is admitted.
-- **Device identity** — Device identity is a TPM AK whose private key cannot be exported; each boot quotes PCR 0/2/4/7 and compares the digest with the platform baseline.
-- **Binding and rebinding** — One-to-one between device and Worker; rebinding is atomic; unbinding returns the device to the pool.
-- **System disks** — Master cloning, 4K-native GPT validation, placement policy, default disk and multiple systems per Worker.
-- **Data plane** — NVMe/TCP + TLS 1.3 on a single port `4421`; no plaintext fallback.
-- **Credential lifecycle** — DHHC-1 issued at disk creation; rotation, revocation, push reconciliation and restart recovery.
-- **Declarative configuration** — One YAML each for the control plane and the node; full validation before writing, rollback on failure.
-- **Management entry points** — WebUI, CLI and REST API; certificate, token and session authentication.
-- **Identity and audit** — Three CAs, deny-by-default principal classes, per-serial revocation, request-level audit and alarms.
-- **Firmware** — A separate repository maintains iPXE patches and build artifacts; device firmware provides boot-layer capabilities.
+## Capability map
 
-## Current Boundaries
+- **Enrollment (device)** — within the registration window, a device with a valid TPM AK and Secure Boot enabled registers automatically; a missing TPM, disabled Secure Boot or a closed window refuses enrollment.
+- **Binding (device, Worker)** — one-to-one between device and Worker; unbinding returns the device to the pool, and a bound device is not admitted twice.
+- **System disks (Worker, system disk)** — master cloning, placement policy, default disk and multiple systems; no default disk falls back to `reboot`, and a non-4K GPT disk fails with `0x7f22208e`.
+- **Boot (device, system disk)** — variable projection, menu and NBFT/NBCT handover; failed attestation releases no credentials.
+- **Credentials (system disk)** — DHHC-1 issued at disk creation, with rotation, revocation and push reconciliation; revocation refuses the boot and does not fall back to plaintext.
+- **Operations (global)** — declaration drift, audit, alarms and node draining; a control-plane outage refuses new provisioning and boots.
 
-Kurrent currently focuses on the minimal closed loop of the control plane and data plane. The complete implementation boundaries, verified distributions, and unavailable capabilities are listed in the [Roadmap](../about/roadmap.md).
+Entry points are the WebUI, the CLI and the REST API; commands and endpoints are in [Deployment](./deployment.md), [Operations](./operations.md) and the [API Reference](../reference/api/).
 
-Before deployment, confirm that the PXE network is an independent trust boundary and that storage hosts meet the kernel NVMe/TCP TLS and `tlshd >= 1.5.0` prerequisites. See [Deployment](./deployment.md) for checks and the [Security Model](../architecture/security.md) for the first-hop trust assumptions.
+## Current boundaries
 
-## Related Pages
+- Boot architecture is x86_64 UEFI; the network is IPv4. ARM and IPv6 are not complete.
+- The control plane is single-node with file state; high availability is not provided, and its failure affects new provisioning and boots.
+- Post-boot application orchestration is out of scope and can be provided by an upper layer.
+- Cold migration requires a manual fence; live migration is not supported.
+- The Secure Boot first hop requires a per-model trust store, and per-model validation on real hardware is not complete.
+- The PXE segment must be an independent trust boundary, with the control plane as its only DHCP, TFTP and boot HTTPS provider.
 
-- Objects and binding: [Devices, Workers and System Disks](../concepts/entities.md)
-- Boot and storage: [Boot Chain](../concepts/boot-chain.md), [Storage and Data Plane](../concepts/storage.md)
-- Deployment and delivery: [Deployment](./deployment.md), [First Delivery](./usage.md)
-- Security boundary: [Security Model](../architecture/security.md)
-- Firmware: [Firmware Overview](../firmware/index.md)
+See the [Roadmap](../about/roadmap.md) for complete boundaries and the [Security Model](../architecture/security.md) for trust assumptions.
+
+## Reading paths
+
+- Understand objects and binding: [Devices, Workers and System Disks](../concepts/entities.md)
+- Understand boot and identity: [Boot Chain](../concepts/boot-chain.md), [Identity and Access](../concepts/identity.md)
+- Understand storage and the data plane: [Storage and Data Plane](../concepts/storage.md)
+- Start deploying: [Deployment](./deployment.md), [System Disk Customization](./system-disk.md)
+- Operate and troubleshoot: [Operations](./operations.md), [Troubleshooting](./troubleshooting.md)
+- Look up parameters and interfaces: [Configuration](../reference/configuration.md), [CLI](../reference/cli.md), [API](../reference/api/)
+- Firmware and branches: [Firmware Overview](../firmware/index.md), [Repositories and Branches](../reference/branches.md)

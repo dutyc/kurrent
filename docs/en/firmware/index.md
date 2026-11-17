@@ -1,85 +1,66 @@
 # Firmware Overview
 
-Kurrent's device firmware is built by the separate [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) repository. The repository does not carry iPXE source; it maintains difference patches and build assets on top of the pinned upstream baseline `e6e51ccb`.
+Firmware is the layer that runs before the operating system. It extends UEFI's network capability into a verifiable, authenticatable NVMe/TCP boot path and proves the device identity before handing the connection to the kernel.
 
-Firmware handles the device side of the boot path: NVMe/TCP SAN boot, DH-HMAC-CHAP authentication, NBCT credential handoff, device identity keys, and TOFU. Registration windows, Worker binding, system disk selection, and credential issuance belong to the control plane.
+Firmware is built from the separate [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) repository, and its artifacts are the first link in the main repository's boot chain. It is built from a pinned upstream iPXE baseline plus this project's patch set and embedded content, so protocol capabilities and the control plane can be released on their own schedules.
 
 ![Firmware pipeline: from the upstream iPXE baseline to device network boot](/diagrams/firmware-pipeline.svg)
 
-## Responsibility split
+## Firmware During Boot
 
-| Repository | Responsibility | Deliverable |
-| --- | --- | --- |
-| kurrent-firmware | Protocol drivers, authentication, device information collection, NIC adaptation, firmware build | `dist/` artifacts, patch set, test tooling |
-| kurrent (platform) | Control plane, boot scripts, registration window, identity and credential projection, system disks | Control-plane service, `tftp/` scripts, API |
+In one boot, firmware performs network boot, identity attestation, trusted connection and hand-over in sequence.
 
-Firmware is unaware of business policy: registration windows, Worker binding, disk selection, and credential issuance live in the platform repository. Firmware provides commands and protocol capabilities; boot scripts decide the call order.
+### Network and Scripts
 
-## Capability overview
+Firmware loads the NIC driver, performs DHCP to obtain an address and `next-server`, fetches the boot pointer over TFTP, and then fetches boot scripts and variables from the control plane on port 4443. Signed artifacts trust only the boot CA embedded at build time and never first-contact trust; the first-stage binary itself is verified by UEFI `db`.
 
-| Capability | Description |
-| --- | --- |
-| NVMe/TCP SAN boot | Native `nvmetcp` driver covering ICReq negotiation, Connect, Property Set, Identify, I/O queues, and R2T reads/writes |
-| DH-HMAC-CHAP authentication | One-way authentication; hashes SHA-256/384/512, DH groups 0/2048/3072/4096 |
-| NBCT credential table | Hands the session key, Host NQN, and TLS handoff parameters to the kernel, avoiding a second credential fetch |
-| TLS 1.3 PSK data plane | Firmware-segment `sanboot` establishes TLS 1.3 with the PSK; together with the kernel segment this covers the full path |
-| Host NQN setting | Injects `hostnqn` per MAC, supporting nvmet `allow_any_host=0` strict mode |
-| Device information collection | Reports SMBIOS identity and memory, CPUID, and NIC fields over HTTP |
-| EFI NVS / TPM NV persistence | Stores `server-fingerprint` in NVRAM; the AK and platform state live in TPM NV across reboots |
-| TOFU and fixed boot CA | Unsigned artifacts pin the server leaf fingerprint on the first HTTPS handshake; signed artifacts trust only the boot CA embedded at build time |
-| Device identity and attestation | TCG2 access, AK creation and export, SHA-256 quote over PCR 0/2/4/7, `nvclear` |
-| NIC adaptation | Native RTL8125/8126 drivers and a `snponly` local-boot fallback |
-| Local-media boot | `embed/auto.ipxe`; the `direct-uefi` artifact embeds a script that enters the network boot chain immediately |
+### Device Identity
 
-Patch numbers, the NIC support matrix, and field-level details are in the [Firmware Platform Reference](../reference/firmware-platform.md).
+Device identity is a TPM 2.0 attestation key (AK). On first boot firmware creates a restricted signing key inside the TPM and persists it to TPM NV; the private key is non-exportable, and later boots reuse the same AK to produce a quote over PCR 0/2/4/7. The control plane verifies the signature and compares the platform baseline, and only then issues credentials to the device.
 
-## Device identity and trust
+### Data-Plane Connection
 
-Device identity is a TPM 2.0 attestation key (AK): on first boot firmware creates a restricted signing key (ECC P-256 or RSA-2048) inside the TPM and persists it in TPM NV; the private key cannot be exported, later boots reuse the existing AK and never rebuild it automatically. Firmware reports the device fingerprint, AK public key (SPKI), AK name and Secure Boot state to `/devices/report`.
+Firmware includes a native `nvmetcp` driver and connects to the target hosting the system disk over NVMe/TCP: ICReq/ICResp negotiation, Admin queue Connect, DH-HMAC-CHAP authentication, controller enable, Identify, I/O queue establishment, then block I/O. After authentication, `sanboot` establishes TLS 1.3 from the PSK issued by the control plane, so the firmware segment and the kernel segment are encrypted end to end on the same port.
 
-Attestation reuses one challenge round: the control plane issues a one-shot nonce, the device quotes PCR 0/2/4/7 with SHA-256 and copies the nonce verbatim into `extraData`, and the quote with its signature travels with `/boot-vars`. The control plane verifies the signature and compares the digest with the platform baseline before serving boot variables. The first successful attestation records the baseline (TOFU); after a PCR change an administrator approves the new baseline.
+### Hand-over to the Kernel
 
-TOFU is the single anchor for unsigned artifacts: once `server-fingerprint` exists, firmware trusts only the certificate pinned during the first HTTPS connection. Signed artifacts do not use first-contact trust: boot HTTPS accepts only certificates issued by the embedded boot CA, and rotating that CA equals reflashing the firmware.
+Once connected, firmware writes credentials and discovery information into NBCT, and the kernel reconnects to the data plane during initramfs and mounts the root filesystem. Firmware does not generate an NBFT table; the verified chain injects that table to emulate the hand-over stage.
 
-Security boundaries:
+The complete trust prerequisites, failure behavior and per-segment connections are in [Boot Chain](../concepts/boot-chain.md).
 
-- **The AK private key cannot be exported**: it stays inside the TPM, so a booted system cannot read or copy the device identity.
-- **Attestation covers boot measurements, not runtime**: PCR 0/2/4/7 reflect firmware, Secure Boot policy and boot configuration; a compromised running system can still obtain the current PSK within the rotation window. See the [security model](../architecture/security.md).
-- **The first hop depends on Secure Boot**: admission requires Secure Boot enabled; first-hop files are verified against the UEFI trust store and TFTP delivers only signed binaries.
-- **Server TOFU first trust**: the first handshake can still be intercepted; after the control-plane certificate rotates, devices must re-trust it.
-- **Nonces must be one-time**: replay requires a repeated nonce; the control plane keeps nonces one-time, short-lived, and bound to the MAC.
-- **The AK cannot be replaced online**: replacing it requires deleting the ledger entry and re-admitting the device during the registration window.
+## Split with the Control Plane
 
-Commands, TPM NV settings, quote format, challenge-attestation and TOFU states are in the [Firmware Contract](../reference/firmware-contract.md).
+Firmware owns protocol drivers, authentication, device identity commands and trust anchor pinning. The registration window, Worker binding, system-disk selection and credential issuance belong to the control plane: on every boot the device states only what it can prove, and the control plane decides whether it joins the pool and which disk it receives.
 
-## NVMe-oF boot
+The boot script the device sees is generated by the control plane; when attestation fails the device receives an empty script, and the reason code goes to the audit log and the device record. The verification order on both sides is in [Device Identity](../concepts/boot-chain/device-identity.md).
 
-Firmware includes a native `nvmetcp` driver for NVMe over TCP SAN boot:
+## Firmware Status
 
-- Protocol flow: ICReq/ICResp negotiation → Connect (Admin) → authentication → Property Set (CC.EN=1) → Identify (controller/namespace) → I/O queue Connect → block reads and writes.
-- Authentication: one-way DH-HMAC-CHAP, hashes SHA-256/384/512, DH groups 0/2048/3072/4096.
-- TCP transport only; RDMA and FC are not supported.
-- The boot path uses a single controller and a single namespace; Identify parses both 512 B and 4 KB blocks.
+The control plane aggregates firmware status at `/api/cp/boot-assets`: the first-stage file and its capabilities, reachability of the second-stage scripts, the menu, the Secure Boot artifacts and the data-plane port. The WebUI "Boot Chain" page shows the same results and reports, item by item, whether the platform can boot right now: firmware, service, data plane, Workers and reports.
 
-Target configuration, `sanboot` examples, DHHC-1 format, and server-side errors are in the [Firmware Platform Reference](../reference/firmware-platform.md#target-configuration). Boot-variable projection rules are in the [Firmware Contract](../reference/firmware-contract.md#boot-variables).
+`firmware.status` of `incomplete` usually means the TFTP root holds upstream iPXE rather than this project's artifact. When `secureboot.status` is not `ok`, check image hash, port and boot CA separately.
 
-## Runtime boundaries
+## Operating Boundaries
 
-- Build artifacts are UEFI-only, seven in total.
-- NVMe/TCP only; RDMA and FC are not supported.
-- The boot path uses a single controller and a single namespace; Identify parses 512 B and 4 KB blocks.
-- DH-HMAC-CHAP is one-way; mutual authentication is outside the firmware implementation.
-- HTTPS downloads use iPXE native TLS up to 1.2; data-plane `sanboot` uses TLS 1.3 PSK.
-- Deployment artifacts are signed with the site key and enrolled in the target's `db`; unsigned artifacts never run on a target with Secure Boot enabled.
-- Firmware provides commands and protocol capabilities only; it does not implement registration windows, Worker binding, disk selection, or credential issuance.
-- iPXE-side NBFT generation is still pending; the current validation path uses an injected NBFT table to simulate the firmware pre-generation stage.
+- UEFI and NVMe/TCP only; no Legacy/CSM form, and no RDMA or FC.
+- The boot path is single-controller and single-namespace; Identify parses both 512 B and 4 KB blocks.
+- DH-HMAC-CHAP is one-way; mutual authentication is out of scope.
+- Boot HTTPS uses iPXE native TLS, up to TLS 1.2; the data plane uses TLS 1.3 PSK, and the two are independent.
+- Unsigned artifacts are for local debugging only; Secure Boot targets refuse to load them, and they do not satisfy the device pool admission requirements.
 
-## Related pages
+## In This Chapter
 
-- [Firmware Platform Reference](../reference/firmware-platform.md)
-- [Firmware Contract](../reference/firmware-contract.md)
-- [Firmware Build and Deployment](./build-deploy.md)
-- [Distribution Matrix](../reference/distributions.md)
+- What baselines, patches and embedded content firmware consists of: [Firmware Composition](./composition.md)
+- What the first stage, boot HTTPS and device identity each trust: [Boot Trust](./trust.md)
+- Build and sign from the upstream baseline: [Build](./build.md)
+- Put the artifact on a PXE segment or local media and complete the first boot: [Deployment and Provisioning](./deploy.md)
+- Provision the target trust store and deliver the signed artifact: [Secure Boot Provisioning](./secure-boot.md)
+- Patch set, NIC matrix and target configuration: [Firmware Platform Reference](../reference/firmware-platform.md)
+- Commands and variables between firmware and the main repository: [Firmware Contract](../reference/firmware-contract.md)
+- Distribution scripts and family differences: [Distribution Matrix](../reference/distributions.md)
+
+## Related Pages
+
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../architecture/security.md)
-- Firmware repository source, patches and research notes: <https://github.com/dutyc/kurrent-firmware>
+- Firmware sources, patches and research notes: <https://github.com/dutyc/kurrent-firmware>

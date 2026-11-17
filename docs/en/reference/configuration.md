@@ -56,15 +56,15 @@ PXE deployment network declaration and the sole authority for `dnsmasq.conf`.
 
 ### `spec.serverCert`
 
-The nginx 443 self-signed server certificate used by the TOFU boot chain.
+The nginx 443 management certificate; its SAN is also used by the 4443 boot leaf.
 
 | Field | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `san` | `IP:127.0.0.1,DNS:localhost` | At least one entry, no duplicates | Comma-separated `IP:` / `DNS:` entries |
 | `days` | `3650` | 1–36500 | Certificate lifetime |
-| `rotateOnChange` | `false` | — | Re-sign automatically when the declaration changes; changes the TOFU fingerprint |
+| `rotateOnChange` | `false` | — | Re-sign automatically when the declaration changes; reissues leaf certificates without changing the boot CA that devices trust |
 
-SAN or lifetime changes are reported as drift only; re-signing requires `rotateOnChange: true`. Devices already in the pool must pin the new server fingerprint.
+SAN or lifetime changes are reported as drift only; re-signing requires `rotateOnChange: true`. Devices trust the boot CA, so a leaf reissue needs no re-admission.
 
 ### `spec.boot`
 
@@ -251,5 +251,5 @@ The declaration is the default source for policy; the two background-task variab
 - [Declarative Configuration](../concepts/configuration.md)
 - [Daily Operations](../guide/operations.md)
 - [CLI Reference](./cli.md)
-- [API Reference](./api.md)
+- [API Reference](./api/index.md)
 - [Glossary](./glossary.md)

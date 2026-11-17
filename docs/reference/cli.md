@@ -1,8 +1,10 @@
 # CLI 参考
 
-`kurrent` 是控制面的命令行客户端与部署工具，单二进制分发，覆盖声明模板、控制面初始化、节点加入、凭据签发与日常查询。命令语法、完整参数与行为以仓库中的 `cli/README.md` 为准；本页给出命令面与常用流程。
+`kurrent` 是控制面的命令行客户端与部署工具，单二进制分发，覆盖声明模板、控制面初始化、节点加入、凭据签发与日常查询。命令语法、完整参数与行为以仓库中的 `cli/README.md` 为准；以下是命令面与常用流程。
 
 ## 安装与凭据
+
+从主仓库 `main` 构建（需要 Go 1.27+，或允许 `toolchain` 自动下载）：
 
 ```bash
 mkdir -p bin
@@ -12,6 +14,8 @@ sudo install -m 0755 ../bin/kurrent /usr/local/bin/kurrent
 kurrent init                   # 首次部署：同时安装管理凭据到 ~/.kurrent
 kurrent credentials install    # 后续轮换时刷新快照
 ```
+
+[Releases](https://github.com/dutyc/kurrent/releases) 另提供 `kurrent-linux-amd64`、`kurrent-linux-arm64` 与 `kurrent-windows-amd64.exe`。发布版本可能落后于 `main`，部署主线时以源码构建为准。
 
 `kurrent init` 通过一次性交换安装 `~/.kurrent/admin.conf` 与证书副本（目录 0700、文件 0600），使 PATH 安装的二进制脱离仓库也可使用 443 mTLS。凭据轮换后重新执行 `kurrent init` 或 `kurrent credentials install` 刷新。
 
@@ -25,6 +29,16 @@ kurrent credentials install    # 后续轮换时刷新快照
 6. 用户级快照 `~/.kurrent/admin.conf`
 
 没有管理凭据时必须显式给出 `--server` 与 `--token`，走 Bearer 通道。
+
+### 一次性凭据交换
+
+交换目录 `<state>/control-plane/bootstrap`（0700，部署用户所有）挂载为容器的 `/app/bootstrap`：
+
+1. `init` 写入 `request`。
+2. 控制面在 PKI 与 `admin.conf` 就绪后，把 `admin.conf` 及其引用的服务端 CA、admin 证书与私钥复制进 `pki/`，改写为包内相对路径，按 0700/0600 落盘并把属主对齐交换目录，最后写入含逐文件 SHA-256 的 `ready`，再删除 `request`。
+3. CLI 校验路径不越界、文件哈希、证书与私钥配对及 server 地址后安装快照；mTLS 自检通过才写 `consumed` 并删除副本。
+
+交换包只是副本，权威文件始终是 `<state>/control-plane/state/admin.conf`；任一步失败都不写 `consumed`，重跑从该步继续。信任边界是同机文件系统属主：目录归部署用户，容器 root 可写；凭据不进入日志、命令行参数或环境变量。
 
 ## 命令面
 
@@ -67,7 +81,7 @@ kurrent config status
 
 - 预检 Docker/Compose v2、WebUI 构建产物、状态根与 `~/.kurrent` 的属主与可写性；
 - 构建校验镜像并全量校验声明，失败不写盘；
-- 在状态根（默认 `~/.local/state/kurrent`）建立目录并种下 compose 挂载点，写入部署记录 `bootstrapping`；
+- 在状态根（默认 `~/.local/state/kurrent`）建立目录并种下 compose 挂载点，写入部署记录 `bootstrapping`；容器以 root 写入的文件属主对齐所在目录，宿主侧备份与迁移不需要 `sudo`；
 - 以固定项目名 `kurrent` 启动、重启控制面并等待 `/healthz`；启动失败回滚上一份声明并恢复运行；
 - 等待一次性凭据交换，校验后安装到 `~/.kurrent`，以安装副本完成 mTLS `GET /whoami` 自检；
 - 交换包消费后重启 dnsmasq 并核验其保持运行，部署记录转 `ready`；
@@ -85,7 +99,11 @@ kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.80.1
 kurrent join https://192.168.80.1 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-`--agent-id` 是节点身份，只接受 12 位小写十六进制；省略时由控制面在签发 bootstrap token 时分配（显式传入则绑定已有身份，用于恢复），`kurrent token create` 与 WebUI 都只消费响应返回的 `agent_id`。join 首次执行把它写入节点状态根下的 `storager/state/agent.id`，之后重跑须与状态文件一致。昵称属于控制面台账，用 `kurrent agents edit <id> --remark <text>` 设置。控制面入口是 origin 地址（可带反向代理路径）；误贴的 `/api/cp` 后缀会在写声明前自动去除。
+`--agent-id` 是节点身份，只接受 12 位小写十六进制。省略时由控制面在签发 bootstrap token 时分配；显式传入则绑定已有身份，用于恢复。`kurrent token create` 与 WebUI 都只消费响应返回的 `agent_id`。
+
+join 首次执行把身份写入节点状态根下的 `storager/state/agent.id`，之后重跑须与状态文件一致。昵称属于控制面台账，用 `kurrent agents edit <id> --remark <text>` 设置。
+
+控制面入口是 origin 地址（可带反向代理路径）；误贴的 `/api/cp` 后缀会在写声明前自动去除。
 
 `join` 的行为：
 
@@ -108,7 +126,15 @@ kurrent host check --role storage              # 内核 nvmet 前置 / configfs 
 sudo kurrent host check --role control -o json --strict
 ```
 
-只读本地检查，不访问管理 API，控制面未启动时也可用。公共 TCP 监听、Docker 守护进程 TCP 暴露与 `DOCKER-USER`/ufw 对两种角色都检查，端口白名单按角色区分（control：22/53/67/69/80/443；storage：22/4840/4421）。`control` 另查控制面容器暴露面、凭据权限与状态根（须在仓库外、0700、属主正确，且与部署记录一致）；`storage` 另查 nvmet / nvmet-tcp 模块、configfs 与 `tlshd`；`all` 取并集。容器按 compose 服务标签识别，不依赖固定容器名。状态为 `ok` / `warn` / `fail` / `skip`；退出码 `0` 通过、`1` 有 FAIL、`2` 用法错误，`--strict` 把 SKIP 也计为失败。修复系统状态仍用 `sudo bash storager/nvmeof/host-prepare.sh`。
+只读本地检查，不访问管理 API，控制面未启动时也可用。
+
+两种角色都检查公共 TCP 监听、Docker 守护进程 TCP 暴露与 `DOCKER-USER`/ufw，端口白名单按角色区分（control：22/53/67/69/80/443；storage：22/4840/4421）。
+
+- `control` 另查控制面容器暴露面、凭据权限与状态根（须在仓库外、0700、属主正确，且与部署记录一致）。
+- `storage` 另查 nvmet / nvmet-tcp 模块、configfs 与 `tlshd`。
+- `all` 取并集。
+
+容器按 compose 服务标签识别，不依赖固定容器名。状态为 `ok` / `warn` / `fail` / `skip`；退出码 `0` 通过、`1` 有 FAIL、`2` 用法错误，`--strict` 把 SKIP 也计为失败。修复系统状态仍用 `sudo bash storager/nvmeof/host-prepare.sh`。
 
 ## 凭据签发
 
@@ -195,4 +221,4 @@ kurrent workers credential revoke storage-worker-01
 - [部署](../guide/deployment.md)
 - [日常运维](../guide/operations.md)
 - [配置参考](./configuration.md)
-- [API 参考](./api.md)
+- [API 参考](./api/index.md)

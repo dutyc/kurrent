@@ -21,7 +21,7 @@
 - **Principal class** — `human` / `component` / `automation` / `anonymous`; routes authorize by class and deny by default.
 - **CA** — Certificate authority. The control plane maintains users, nodes, and control roots for people, node components, and control-plane clients.
 - **CRL** — Certificate revocation list; component faces fetch it periodically and reject revoked serials.
-- **TOFU** — Trust On First Use: pin the server leaf fingerprint on the first HTTPS handshake and reject mismatches afterwards.
+- **TOFU** — Trust On First Use, used only by unsigned debugging artifacts: pin the server leaf fingerprint on the first HTTPS handshake. The deployment path uses signed firmware with a fixed boot CA and does not use TOFU.
 - **NQN** — NVMe Qualified Name, the identifier for NVMe-oF subsystems and hosts.
 - **Host NQN** — The host-side NQN derived from a node's `nqnBase` and the Worker, used for target-side host authorization.
 - **IQN** — iSCSI Qualified Name, used by the iSCSI backend.

@@ -1,137 +1,68 @@
 # Deployment
 
-> This page starts from blank hosts and walks through preparation, the control plane, storage nodes, firmware and device admission. The deployment units are a **controller server + storage nodes**; they may be separate or run on the same machine, with one Agent per storage server.
+> From blank hosts to a device cold-booting to a login prompt. The deployment units are a **controller server + storage nodes**, separate or co-located; one Agent per storage server.
 
-Deployment is declaration-driven: `control_plane/kurrent.yaml` and `storager/kurrent.yaml` are the only inputs, and `kurrent init` / `kurrent join` validate and converge them. Container orchestration is an internal detail. Admission means the platform is ready; master images, binding, disk creation and the first system boot belong to system delivery, covered in [System Disk Customization](./system-disk.md) and [First Delivery](./usage.md). Isolate deployment failures by component per [Troubleshooting](./troubleshooting.md); declaration fields and defaults are in the [Configuration Reference](../reference/configuration.md), and host prerequisites are in the [Deployment Prerequisites](../reference/host-prerequisites.md).
+**Done when** the cold boot reaches a login prompt.
+
+References: [Configuration](../reference/configuration.md) (declarations), [CLI](../reference/cli.md) (commands), [Architecture](../architecture/index.md) (ports), [Security Model](../architecture/security.md) (trust boundaries).
 
 ## Preparation
 
-### Hosts and roles
+- Hosts and devices meet the [deployment prerequisites](../reference/host-prerequisites.md): x86_64 UEFI, TPM 2.0, Secure Boot, SNP NIC;
+- the PXE segment is dedicated and the controller is its only DHCP/TFTP/4443 provider;
+- the repository, `kurrent` CLI and WebUI build dependencies are ready (installation in the [CLI Reference](../reference/cli.md#install-and-credentials));
+- both repositories use `main`; devices without a TPM use `legacy/no-tpm` on both sides (see [Repositories and Branches](../reference/branches.md)).
 
-The deployment units are a controller server plus one or more storage nodes; they may share a host, but the roles stay separate. Host minimums, kernel and `tlshd` versions, data disks and the host baseline are in [Deployment Prerequisites](../reference/host-prerequisites.md). The controller must have an address on the PXE subnet; browsers, the API and Agent callbacks use the management address. Do not mix the two.
-
-### Network planning
-
-The controller needs three reachable paths:
-
-- **Management plane**: administrator browsers and storage nodes reach 443; the controller uses this address to issue tokens and call Agents.
-- **Boot plane**: bare-metal devices reach DHCP (67/UDP) and TFTP (69/UDP); `spec.networking.interface` binds this side, and that interface must hold an address on the PXE subnet.
-- **Boot HTTPS**: devices reach 4443 to report, fetch challenges and boot variables; the port is set by `KURRENT_BOOT_HTTPS_PORT`, the certificate comes from a dedicated boot CA, and only the boot segment needs access. See [Secure Boot Boot](../firmware/secure-boot.md).
-
-Prefer two NICs or VLAN subinterfaces to separate the boot plane from the other paths. If one NIC carries the management and boot planes, the PXE segment must be isolated and must not share the office network. Booting clients must be able to route to the storage node's **4421** data-plane port; add explicit routes and firewall rules when the segments differ.
-
-Replace these with the actual environment:
-
-- PXE subnet `192.168.80.0/24`: `spec.networking.subnet`
-- Controller PXE address `192.168.80.1`: dnsmasq bind address, inside the PXE subnet
-- DHCP pool `192.168.80.50 – .100`: handed out to bare-metal devices
-- Gateway / DNS `192.168.80.2` / `223.5.5.5`: DHCP options 3 / 6
-- Controller management address `192.168.1.10`: WebUI / API / `--cp-url`
-- Storage management address `192.168.1.20`: how the controller reaches the Agent (4840)
-- Storage data-plane address `192.168.1.20` (or a dedicated data IP): how booting clients reach 4421; must be client-reachable
-- Storage hostname `storage-01`: arbitrary; the control plane allocates the node identity at bootstrap-token issuance and join stores it in the node state file, independent of the hostname
-
-Ports and listener boundaries are in [Architecture](../architecture/index.md#ports) and [Deployment Prerequisites](../reference/host-prerequisites.md#network-and-ports). The control-plane management plane publishes no TCP port; 443 carries both management and boot traffic, while 4443 proxies only the three boot endpoints (`/boot-vars`, `/devices/report`, `/devices/challenge`) and returns 404 for everything else. The interactive control-plane API docs (`/openapi.json`, `/docs`) are off by default and can be enabled for debugging with `KURRENT_CP_OPENAPI=1`.
-
-### Repository and CLI
-
-Both the controller and storage nodes need the repository and the `kurrent` CLI. On split hosts, run this once per host; on a co-located host, run it once.
+Run the commands below from the main repository root; to fetch it:
 
 ```bash
-git clone https://github.com/dutyc/kurrent
-cd kurrent
-
-# Release CLI binary (v0.3.0+; Linux amd64/arm64, Windows)
-mkdir -p bin
-BASE=https://github.com/dutyc/kurrent/releases/download/v0.3.0
-curl -sL -o bin/kurrent "$BASE/kurrent-linux-amd64"
-chmod +x bin/kurrent
-# Global install; the rest of this guide uses plain `kurrent`
-sudo install -m 0755 bin/kurrent /usr/local/bin/kurrent
-kurrent version   # verify
+git clone https://github.com/dutyc/kurrent && cd kurrent
 ```
 
-> Versions move with the Releases page (https://github.com/dutyc/kurrent/releases; Windows: `kurrent-windows-amd64.exe`). Alternatively build from source instead of downloading (`mkdir -p bin && cd cli && go build -o ../bin/kurrent .`, needs Go 1.27+). Build output goes to the repository-level `bin/`, never the source directory.
+A co-located deployment shares one state root; it defaults to `~/.local/state/kurrent`, and backup is in [Operations](./operations.md#backup-and-restore).
 
-### State root and deployment record
+### Network
 
-Runtime state lives outside the repository. The checkout supplies declarations, code and build artifacts only; ledgers, PKI, bootstrap credentials and logs live in the host state root, so moving or renaming the checkout does not change the deployment identity.
+| Path | Content | Ports |
+| --- | --- | --- |
+| Management | Browsers, storage nodes | 443 |
+| Boot | DHCP, TFTP, boot HTTPS (`spec.networking.interface` binds this side) | 67, 69, 4443 |
+| Data | Devices to storage nodes | 4421 |
 
-- The state root defaults to `$XDG_STATE_HOME/kurrent` (`~/.local/state/kurrent` when unset); `KURRENT_STATE_DIR` or `--state-dir` overrides it.
-- The deployment record `~/.kurrent/deployment.yaml` (0600) stores the pinned project names (`kurrent`, `kurrent-storage`), repository root, state root and role status. `kurrent deployment show` prints it; `-o env` renders the variables needed for manual compose runs.
-- The management credential snapshot lives in `~/.kurrent/` (0700) and is installed by `kurrent init` on first deployment.
+Example: PXE `192.168.80.0/24`, controller `192.168.80.1`, pool `.50–.100`, gateway `.2`, DNS `223.5.5.5`; management `192.168.1.10`, storage `192.168.1.20`.
 
-Layout under the state root:
-
-| Path | Content | In-container mount |
-|---|---|---|
-| `<state>/control-plane/state` | device/Worker ledgers, PKI, certificates and `admin.conf` | `/app/state` |
-| `<state>/control-plane/config/agents.yml` | Agent ledger | `/app/config/agents.yml` |
-| `<state>/control-plane/dnsmasq` | rendered configuration, DHCP hosts and leases | `/app/dnsmasq` |
-| `<state>/control-plane/bootstrap` | one-shot management credential exchange | `/app/bootstrap` |
-| `<state>/storager/state` | node identity `agent.id` | `/etc/kurrent/state` |
-| `<state>/storager/bootstrap` | `agent.token` and derived credentials | `/etc/kurrent/bootstrap` |
-| `<state>/storager/pki/agent-<id>`, `pki/nvmet-<id>` | component certificates | `/etc/kurrent/pki` |
-| `<state>/storager/logs` | agent and nvmet-host logs | `/var/log/kurrent` |
-| `<state>/storager/certs/cp-ca.crt` | controller TOFU trust anchor | `/etc/kurrent/cp-ca.crt` |
-
-Co-located deployments share one state root; on split hosts each storage node uses its own, and the controller trust anchor is supplied through join's `--cp-ca`. A host supports one deployment: container and compose project names are fixed, and a second deployment needs a separate host.
+The full port table is in [Architecture](../architecture/index.md#ports).
 
 ### Host dependencies
 
-Both hosts need Docker, Compose v2, `git`, `curl`, `jq` and `openssl`; the **control-plane host additionally needs Node.js 18+ and npm** to build the WebUI static assets. Install Docker and Compose from the distribution or the official Docker instructions; the remaining tools on Debian/Ubuntu:
+Both hosts: Docker, Compose v2, `git`, `curl`, `jq` and `openssl`, plus Go to build the CLI (1.27+, or allow the `toolchain` download); the controller additionally needs Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and npm.
 
 ```bash
 sudo apt install -y git curl jq openssl
-docker --version && docker compose version && node --version && npm --version
+docker --version && docker compose version && go version && node --version && npm --version
 ```
 
-**Storage nodes** additionally prepare the data-plane host; the full prerequisites and diagnostic semantics are in [Deployment Prerequisites](../reference/host-prerequisites.md#storage-node-kernel-and-tlshd). Confirm the data-disk device name first; the `mkfs` example below is for an empty data disk and must never point at a system disk:
+Docker/Compose and Node.js are not covered by the apt command above; install them beforehand through the distribution's method.
+
+Storage nodes prepare the data-plane host and mount a data disk (`mkfs` targets an empty disk only):
 
 ```bash
-# 1. nvmet host prerequisites (modules, configfs, tlshd; idempotent)
 sudo bash storager/nvmeof/host-prepare.sh
-#    Read-only diagnosis (no root, for pre-deployment checks; run at the repo root):
-#    kurrent host check --role storage
+kurrent host check --role storage
 
-# 2. Confirm kernel NVMe/TCP TLS support
-grep -E 'CONFIG_NVME_(TCP_TLS|TARGET_TCP_TLS|KEYRING)' \
-  /boot/config-$(uname -r)
-sudo apt install -y ktls-utils
-sudo systemctl enable --now tlshd
-
-# 3. Data disk (btrfs/xfs support reflink)
 sudo mkfs.btrfs /dev/sdb
-sudo mkdir -p /pool1 /pool1/storager_img
-sudo mount /dev/sdb /pool1
+sudo mkdir -p /pool1 && sudo mount /dev/sdb /pool1
 ```
 
-Persist the data-disk mount in `/etc/fstab` (prefer the UUID from `blkid`) or an equivalent systemd mount so it returns after reboot; otherwise `diskDir` lands in an empty directory on the root filesystem.
-
-### Boot network boundary
-
-The first hop of the boot chain (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: TFTP must deliver an image signed with the site certificate that is enrolled in the target's `db`, and the static scripts, boot CA and controller address are embedded in that signed binary. The boot HTTPS that follows trusts only that boot CA; there is no first-contact trust.
-
-The boot segment is still deployed as an isolated zone, because it decides whether devices can boot and whether they can be dragged into a denial of service:
-
-- The PXE segment is a dedicated VLAN or physical port; the controller is the only host serving DHCP, TFTP and 4443 on it.
-- Enable DHCP snooping (only the controller uplink is trusted), Dynamic ARP Inspection, RA guard and port security; use 802.1X or MAB to restrict attachable ports where available.
-- Open the registration window only when needed, set a quota, and close it afterwards; the TFTP root mounts only `snponly.efi` and `boot.ipxe`.
-
-Forged DHCP/ARP can still stall a device or make it retry, but it cannot make the device run unsigned code or connect to an unauthorized boot server. The full threat model, residual risks and deployment checklist are in the [Security Model](../architecture/security.md#deployment-checklist).
+Persist the mount in `/etc/fstab` (UUID) or a systemd mount, or `diskDir` lands on the root filesystem.
 
 ## Step 1: Controller Server
 
-### 1.1 Declare the PXE network
-
-The controller declaration `control_plane/kurrent.yaml` is the only input. Generate the annotated template, then fill the five `spec.networking` keys:
+### 1.1 Declare
 
 ```bash
 kurrent config print init-defaults > control_plane/kurrent.yaml
-vim control_plane/kurrent.yaml
 ```
-
-The minimum bootable content is below; leave the other blocks at their template defaults:
 
 ```yaml
 apiVersion: kurrent.io/v1
@@ -147,133 +78,79 @@ spec:
     dns: 223.5.5.5
 ```
 
-- `interface` is the **PXE-facing interface**, not the management NIC. This is the most common mistake on multi-NIC hosts.
-- `dhcpRange` is one `start,end` string, not two list items.
-- The server certificate SAN defaults to `127.0.0.1` and `localhost` only. To open the WebUI by management IP or verify curl certificates, add that IP before the first `kurrent init`:
+- `interface`: the PXE-facing interface, not the management NIC.
+- `dhcpRange`: one `start,end` string.
+
+To open the WebUI by management IP, add the SAN first:
 
 ```yaml
   serverCert:
     san: "IP:192.168.1.10,IP:192.168.80.1,IP:127.0.0.1,DNS:localhost"
 ```
 
-Validate against the runtime schema before writing, then inspect the effective declaration with defaults injected:
-
 ```bash
-# Unknown fields, cross-field semantics and policy caps fail before writing
-kurrent config validate
-kurrent config show                # effective declaration
+kurrent config validate && kurrent config show
 ```
 
-### 1.2 Initialize and bring up the control plane
+### 1.2 Start
 
 ```bash
-# WebUI static assets (dist is not committed; build before the first up)
 (cd webui/app && npm ci && npm run build && test -f dist/index.html)
-
 kurrent init
 ```
 
-`webui/app/dist` is a build artifact bind-mounted read-only into nginx by the control-plane container. Build it before the first `docker compose up`: a missing `dist` is created by compose as a root-owned empty directory, after which a normal user's `npm run build` fails on permissions (run `sudo rm -rf webui/app/dist` and rebuild). `kurrent init` preflights that directory and fails with the same remediation when it is missing or owned by another user.
+A failure rolls back to the previous declaration; a failed credential exchange resumes when re-run. The full flow is in the [CLI Reference](../reference/cli.md#control-plane-initialization).
 
-`kurrent init` is a complete first-deployment transaction:
-
-1. Preflight Docker/Compose v2, the repository layout, the WebUI build output, and ownership/writability of the state root and `~/.kurrent`; legacy in-repository state requires `--adopt-state`.
-2. Fully validate the declaration against the runtime schema inside the controller image, then apply it.
-3. Create the state directories, seed the compose file mount points (`agents.yml`, dnsmasq configuration and leases), and write the deployment record as `bootstrapping`.
-4. Start the stack under the pinned project `kurrent` and wait for `/healthz`.
-5. The controller publishes the management credential (entry URL, admin client certificate and trust anchor) into a one-shot exchange directory; the CLI verifies it, installs `~/.kurrent/admin.conf`, and runs an mTLS `GET /whoami` self-test with the installed copy.
-6. The exchange bundle is consumed and removed, dnsmasq is restarted and verified to stay running, and the record becomes `ready`.
-
-The command is idempotent: re-run it after editing the declaration; after moving the checkout it reuses the recorded state root, recreates the containers with `--force-recreate` and updates the recorded repository root while ledgers stay unchanged. **Failure semantics**: an invalid declaration is never written; if the controller does not become healthy or dnsmasq does not stay running, the command exits non-zero and automatically rolls back to the previous declaration and running state; if the credential exchange or self-test fails, the bundle and the `bootstrapping` record stay in place and a rerun resumes from that step.
-
-The controller renders `<state>/control-plane/dnsmasq/dnsmasq.conf` from `spec.networking` (the declaration is authoritative, the conf is derived — do not hand-edit it) and generates the TOFU server certificate and component PKI under the state root. Files written by the containers as root are re-owned to the state directory's owner, so host-side backups and migration do not need `sudo`.
-
-### 1.3 Verify the service
+### 1.3 Verify
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
-curl -k https://127.0.0.1/healthz           # {"status":"ok"}
-curl -ks https://127.0.0.1/ | grep -q '<div id="root">'   # WebUI assets are mounted
-head -5 "$STATE/control-plane/dnsmasq/dnsmasq.conf"        # interface=... matches the declaration
-kurrent config status                       # configHash + derived artifacts
-kurrent deployment show                     # repository root, state root, projects, status
-docker ps                                   # control plane / WebUI / dnsmasq
+curl -k https://127.0.0.1/healthz
+curl -ks https://127.0.0.1/ | grep -q '<div id="root">'
+kurrent config status
 ```
 
-Open `https://<controller-management-address>/` in a browser (WebUI; the only entry on 443 — plain HTTP is 301-redirected). For token sign-in, issue `kurrent token create --usage admin` and submit it on the login page to obtain an HttpOnly session cookie (12-hour TTL by default, sliding renewal only in the second half). For automatic browser mTLS, convert the admin certificate to PKCS#12 and import it into the system trust store:
+Open `https://<controller-management-address>/` and sign in with a token from `kurrent token create --usage admin`; browser mTLS import is in [Operations](./operations.md#management-entry-points).
+
+The CLI credential is installed by `kurrent init`; after rotation re-run `kurrent init` or `kurrent credentials install`.
+
+Later steps use:
 
 ```bash
 STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
-openssl pkcs12 -export -out kurrent-admin.p12 \
-  -inkey "$STATE/control-plane/state/pki/users/admin/client.key" \
-  -in "$STATE/control-plane/state/pki/users/admin/client.crt"
-# Double-click kurrent-admin.p12 to import (Windows/macOS system store;
-# Firefox keeps its own store and needs a separate import)
+P=$STATE/control-plane/state
+api() { curl -sS --cert "$P/pki/users/admin/client.crt" --key "$P/pki/users/admin/client.key" \
+  --cacert "$STATE/control-plane/state/certs/server.crt" "https://<controller-management-address>/api/cp$1" "${@:2}"; }
 ```
-
-**CLI credentials**: `kurrent init` installed `~/.kurrent/admin.conf` through the one-shot exchange (entry URL, admin client certificate and trust anchor, 0600) and verified it with mTLS before reporting success. Discovery order is `--credentials` > `KURRENT_CREDENTIALS` > the record's `<state>/control-plane/state/admin.conf` > walking up from the current directory to the legacy `control_plane/state/admin.conf` → the repo layout next to the executable → the user-level snapshot `~/.kurrent/admin.conf`. The CLI works from any directory; after credential rotation re-run `kurrent init` or `kurrent credentials install` to refresh the snapshot.
-
-How the exchange works: `<state>/control-plane/bootstrap` (0700, owned by the deploying user) is mounted as `/app/bootstrap`. `init` writes `request`; once PKI and `admin.conf` are ready, the control plane copies `admin.conf` and the server CA, admin certificate and key it references into `pki/`, rewrites the paths to be bundle-relative, writes them 0700/0600 with the exchange directory's owner, then writes `ready` (per-file SHA-256) last and removes `request`. The CLI verifies that paths stay inside the bundle, that hashes match, that certificate and key pair up, and that the server URL is usable, only then installs the snapshot; the bundle is consumed and deleted only after the mTLS self-test passes. The bundle is a copy — the authoritative file remains `<state>/control-plane/state/admin.conf` — and any failure leaves `consumed` unwritten so a rerun resumes from that step. The trust boundary is same-host filesystem ownership: the directory belongs to the deploying user and the container root can write it; credentials never appear in logs, command-line arguments or environment variables.
 
 ### 1.4 Firewall and host baseline
 
 ```bash
-# Controller server
 sudo ufw allow 67,69/udp && sudo ufw allow 80,443/tcp && sudo ufw reload
-
-# Host precondition for the auth model: read-only checks of listeners,
-# Docker exposure and credential-file permissions
+sudo ufw allow 53 && sudo ufw reload    # only when spec.networking.dns points at the controller
 sudo kurrent host check
 ```
 
-Expected listeners, file permissions and Docker port confinement are in [Deployment Prerequisites](../reference/host-prerequisites.md#host-baseline) and the [Security Model](../architecture/security.md#deployment-checklist). Treat FAIL items as blockers (`--strict` also counts SKIP as failure): host root or a compromised nginx process is equivalent to a compromised management plane.
+4443 is a Docker-published port and bypasses ufw; restrict it to the boot segment at the network layer per the [Security Checklist](#security-checklist).
 
-### 1.5 Issue the storage-node bootstrap credential
+### 1.5 Issue the node token
 
 ```bash
 kurrent token create --agent-id 3f2a9c1d8b7e --cp-url https://192.168.1.10
-# omitting --agent-id makes the control plane allocate a new 12-lowercase-hex identity
 ```
 
-`--cp-url` must be the **HTTPS entry of the control plane as reachable from the storage node** (port 443 `/api/cp` reverse proxy — Agents enroll/renew through it; derived from the `--server` host otherwise). `--agent-id` is the node identity and accepts only 12 lowercase hex characters; the token is bound to it. When omitted the control plane allocates a new identity and returns it (an explicit value binds an existing identity, e.g. for recovery). Nicknames belong to the control-plane ledger and are set after join in the WebUI or with `kurrent agents edit`. The output contains a join command that can run directly on the storage node:
+- `--agent-id`: 12 lowercase hex; allocated by the control plane when omitted.
+- The token is single-use with a 60-minute TTL; use `--uses N` for bulk onboarding.
 
-```
-bootstrap token: <token> (expires ...; bound to node 3f2a9c1d8b7e; 0/1)
-
-# Run on the bound node (--agent-id is written into storager/state/agent.id under the node state root):
-kurrent join https://192.168.1.10 --token <token> --agent-id 3f2a9c1d8b7e
-```
-
-> The token is **bound to the node identity and single-use by default**: enroll only accepts that `agent_id`; an allowance is reserved atomically before issuance and released if issuance fails. TTL defaults to 60 minutes (`spec.pki.bootstrapTokenTtlMinutes`) with a 24-hour cap (`spec.pki.bootstrapTokenMaxTtlMinutes`); for bulk onboarding use `kurrent token create --agent-id ... --uses N` (1..1000, no higher than `spec.pki.bootstrapTokenMaxUses`, default 100). Re-issue after expiry or revocation. **No nvmet-host credential needs issuing**: it is derived by the control plane when the agent enrolls with `backend=nvmet`.
-
-### 1.6 Update the declaration later
-
-```bash
-vim control_plane/kurrent.yaml
-# Full validation before writing; nothing changes on failure
-kurrent config validate
-# Apply and converge; automatic rollback on failure
-kurrent init
-# Effective declaration, configHash, derived artifacts and certificate drift
-kurrent config status
-```
-
-SAN/days changes are **reported as drift only** by default (`derived.serverCert.drift`) and do not change the TOFU fingerprint. To deliberately make devices trust a new certificate, set `spec.serverCert.rotateOnChange: true` and re-run `kurrent init`. See [Configuration Reference](../reference/configuration.md) and [Operations](./operations.md) for policy blocks and temporary overrides.
-
-Component certificate revocation, CRL timing and node recovery are outside the deployment mainline; see [Operations](./operations.md#component-certificates).
+The nvmet-host credential is derived at enroll. The output is the join command for the next step.
 
 ## Step 2: Storage Node
 
-### 2.1 Declare the node configuration (before join)
-
-The node declaration `storager/kurrent.yaml` decides the data-plane address, disk directory and NQN namespace. **Declare it before join**, rather than editing defaults afterwards: on split hosts the default `advertiseUrl` points at the controller, so the controller cannot reach the Agent.
+### 2.1 Declare
 
 ```bash
 kurrent config print node-defaults > storager/kurrent.yaml
-vim storager/kurrent.yaml
 ```
-
-Keys to fill in:
 
 ```yaml
 apiVersion: kurrent.io/v1
@@ -288,149 +165,160 @@ spec:
     url: https://192.168.1.10
 ```
 
-- `advertiseUrl` is the **controller → Agent 4840** address. Split hosts must use the storage management address; co-located hosts can keep the default, or use `https://host.docker.internal:4840` when the controller runs on a bridge network and cannot reach the host.
-- `diskDir` must be an absolute host path on a mounted data disk. join injects it as `KURRENT_DISK_DIR` when it starts the containers — no second copy is written to disk. Create the directory first if it does not exist.
-- `nqnBase` is the single namespace for host and disk NQNs; keep it consistent across the cluster.
+- `advertiseUrl`: controller → Agent 4840 address; must be the storage management address on split hosts.
+- `diskDir`: absolute path on a mounted data disk.
+- `nqnBase`: consistent across the cluster.
 
-The node identity is not part of the declaration: the control plane allocates it at bootstrap-token issuance and join writes it to `storager/state/agent.id` under the node state root, which both containers mount read-only. The declaration therefore holds only parameters a human chooses, and `kurrent config validate --node storager/kurrent.yaml` works before join.
+Co-located deployment (controller and storage node on one host): the controller runs in a container, so use `https://host.docker.internal:4840` for `advertiseUrl` (compose already maps it to the host); set `storager_ip` on the WebUI Agents detail page to the PXE-side address (for example `192.168.80.1`) so devices reach 4421; run the host baseline with `kurrent host check --role all`.
 
-### 2.2 Join the cluster
+The identity is not in the declaration; join writes it to `storager/state/agent.id`.
 
-Run the command from the token output inside the repository on the storage node:
+### 2.2 Join
 
 ```bash
 kurrent join https://192.168.1.10 --token <token> --agent-id 3f2a9c1d8b7e
 ```
 
-`kurrent join` performs four operations (idempotent and safe to re-run):
-
-1. Validates `storager/kurrent.yaml`: creates it from the template when missing, merges it when present (hand edits are kept), and syncs `spec.controlPlane.url`.
-2. Creates `storager/{state,bootstrap,pki,logs,certs}` under the node state root and persists the identity `state/agent.id` and the node-bound bootstrap credential `bootstrap/agent.token` (0600). The first run requires `--agent-id`; later runs may omit it, but once the state file exists a given `--agent-id` must match it. `nvmet-host.token` is derived by the agent's enroll — nothing to provide by hand.
-3. Resolves the controller trust anchor and copies it to `certs/cp-ca.crt`: `--cp-ca` first, then the co-located controller's `control-plane/state/certs/server.crt`, then an existing node copy. When none exists, join fails and prints the command that copies it from the controller.
-4. Injects `diskDir`, the node state root and the trust anchor as compose variables and starts/restarts the agent; on the nvmet backend it then restarts nvmet-host to consume the derived credential. The backend picks the orchestration directory (nvmet → `storager/nvmeof`, stgt/lio → `storager/iscsi`) and the compose project is pinned to `kurrent-storage`.
-
-Before writing anything, join validates the merged declaration inside the agent image against the same schema, so unknown fields, non-absolute paths and invalid NQNs fail immediately rather than after container startup. The default `diskDir` (`storager_img`) sits inside the checkout, so moving the repository would move the disk images; join warns about this, and a fixed location needs an absolute path outside the repository in the declaration.
-
-On split hosts, the first join supplies the controller `server.crt` with `--cp-ca`:
+Split hosts supply the controller trust anchor on the first join. Replace `<state>` with the controller's real state root (default `~/.local/state/kurrent`) and use an absolute remote path:
 
 ```bash
-scp admin@192.168.1.10:<state>/control-plane/state/certs/server.crt /tmp/cp-ca.crt
+scp admin@192.168.1.10:/home/admin/.local/state/kurrent/control-plane/state/certs/server.crt /tmp/cp-ca.crt
 kurrent join https://192.168.1.10 --token <token> --agent-id 3f2a9c1d8b7e --cp-ca /tmp/cp-ca.crt
 ```
 
-The node state root also defaults to `$XDG_STATE_HOME/kurrent`; `--state-dir` or `KURRENT_STATE_DIR` selects another location such as a dedicated data disk.
+Validation failures write nothing; reruns are idempotent. The flow is in the [CLI Reference](../reference/cli.md#node-join).
 
-### 2.3 Verify the storage node
+### 2.3 Verify
 
 ```bash
-docker ps    # storager-agent / kurrent-nvmet-host
-
 docker logs storager-agent 2>&1 | grep pki
-docker logs kurrent-nvmet-host 2>&1 | grep -i "数据面端口就绪"
 docker exec kurrent-nvmet-host python /app/healthcheck.py; echo $?
 ```
 
-Expected: the agent prints `pki: client cert ok`, nvmet-host prints `4421 tsas=tls1.3`, and the health check returns 0 (UDS + mTLS + configfs). For stgt/lio backends, inspect the corresponding containers.
-
-Back on the controller, confirm registration and health:
+Expect `pki: client cert ok` and a health check exit of 0. On the controller:
 
 ```bash
-kurrent agents list
-# ID             REMARK       HEALTH  BASE_URL
-# 0d26b6f33a89   storage-01   ok      https://192.168.1.20:4840
+kurrent agents list    # HEALTH=ok
 ```
 
-The output also includes ROLE, ENABLED and TAGS; `HEALTH=ok` is a live probe from the controller to the Agent.
+`advertiseUrl` (controller → 4840) and `storager_ip` (devices → 4421) are distinct; set the latter in the WebUI Agent detail when the data plane uses a separate segment.
 
-**Keep the two addresses distinct**: `advertiseUrl` is the controller-to-Agent 4840 address; `storager_ip` is the data-plane address written into `/boot-vars` for booting clients to reach 4421. When the data plane uses a separate segment, set `storager_ip` in the WebUI Agent detail so clients can reach it.
-
-**Firewall** (storage node):
+Firewall (storage node):
 
 ```bash
 sudo ufw allow 4840,4421/tcp && sudo ufw reload
 ```
 
-> nvmet-host's management plane uses a shared-volume UDS (`/run/kurrent/nvmet/nvmet-host.sock`, directory 0700): no TCP port, unreachable from the LAN. `4421` is the only data-plane port — restrict its sources as needed, but the booting clients' segment must be able to reach it.
-
-### 2.4 Master images and system disks
-
-`diskDir` holds two kinds of files:
-
-- **Master images** are prepared once and carry a `_tpl_` marker in the filename (for example `_tpl_ubuntu2404.img`). They must be whole-disk images with a 4K-native GPT. After being placed in `diskDir`, the agent scans them into the master list; a master is only a clone source and is never exported to a device.
-- **System disks** are cloned from a master by the controller per Worker, each with its own `os_tag`, disk NQN and authentication credential. Creation and first boot are covered in [First Delivery](./usage.md).
-
-See [System Disk Customization](./system-disk.md) for building and validating a master image. A new storage node can join without any master image; before the first disk creation, at least one healthy node must hold the target master, because the placement policy only selects nodes that hold it.
-
 ## Step 3: Firmware and Device Admission
 
-### 3.1 Install the firmware artifact
+Before starting, generate the offline signing key and import the site signing certificate plus the Microsoft UEFI CA into the target's `db` as described in [Secure Boot](../firmware/secure-boot.md#provisioning-the-target-trust-store), then verify with `tools/secureboot/check-host.sh`. The boot CA is created by `kurrent init` (`<state-root>/control-plane/state/pki/ca/boot/ca.crt`).
 
-The platform repository does not contain firmware binaries. Device firmware is built by the companion repository [kurrent-firmware](https://github.com/dutyc/kurrent-firmware); the platform accepts signed artifacts only, produced by the firmware repository's `build/build-sb.sh`. Full inputs, provisioning and verification steps are in [Secure Boot Boot](../firmware/secure-boot.md).
-
-Devices support x86_64 UEFI boot only; Legacy BIOS (CSM) is no longer supported. Secure Boot must be enabled and the site signing certificate enrolled in the target's `db`. See [Deployment Prerequisites](../reference/host-prerequisites.md#host-roles) for the remaining device requirements.
+### 3.1 Firmware
 
 ```bash
-# Firmware repository: the boot CA is generated when the control plane first starts
-# and is embedded into the firmware as the fixed trust anchor.
-SB_KEY=/path/to/artifact-signing.key \
-SB_CERT=/path/to/artifact-signing.crt \
+# Firmware repository: the boot CA comes from the controller state root
+SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
-BOOT_HTTPS_PORT=4443 \
-./build/build-sb.sh
-```
+BOOT_HTTPS_PORT=4443 ./build/build-sb.sh
 
-```bash
-# Platform repository: keep artifacts in tftp/secureboot/ for /boot-assets,
-# and install a copy as the TFTP first hop.
+# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hop
 sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
-  /path/to/kurrent/tftp/secureboot/
-sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi \
-  /path/to/kurrent/tftp/snponly.efi
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
 cd /path/to/kurrent
-eval "$(kurrent deployment show -o env)"   # state root and other interpolation variables
+eval "$(kurrent deployment show -o env)"
 docker compose restart kurrent-dnsmasq
 ```
 
-`tftp/snponly.efi` is a file-level mount; restart the container after replacing it, otherwise it keeps the old inode.
-
-Mainline currently fixes the PXE first hop to `snponly.efi` and does not switch artifacts per device. Machines that need `pxe-uefi/ipxe.efi` cannot share the same PXE segment with the default first hop, so the first-hop artifact must be unified before deployment; artifact forms and selection are in [Firmware Build and Deployment](../firmware/build-deploy.md#_2-select-artifacts).
-
-Confirm status (Secure Boot artifacts, HTTPS boot, TPM AK and PCR quote) in the WebUI **Boot Chain** page, or query the API from the controller repository with the admin certificate:
+The first hop is fixed to `snponly.efi`; restart dnsmasq after replacing it. The image embeds the boot CA and the 4443 port, so changing either requires a rebuild; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
 
 ```bash
-STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
-curl -sS \
-  --cert "$STATE/control-plane/state/pki/users/admin/client.crt" \
-  --key "$STATE/control-plane/state/pki/users/admin/client.key" \
-  --cacert "$STATE/control-plane/state/certs/server.crt" \
-  https://<controller-management-address>/api/cp/boot-assets | jq '{firmware, secureboot}'
+api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
 ```
 
-`secureboot.status=ok` means the image matches the manifest, the 4443 port matches the firmware build, and the boot CA is present with a matching fingerprint.
+### 3.2 Admit
 
-### 3.2 First boot and admission
-
-Open the registration window in WebUI → **Devices** first (TTL is bounded by `spec.registration.windowMaxTtlMinutes`, default 60 minutes; optional admission quota `max_devices`), then connect the bare-metal device to the PXE segment, enable UEFI network boot and enable Secure Boot. The window must be open before the device reports; after it closes, reports only refresh the fingerprint and never admit the device.
+WebUI → **Devices** → open the registration window, then connect the device to the PXE segment, enable UEFI network boot and Secure Boot; or:
 
 ```bash
-# On the controller: watch the DHCP/boot flow
+api /settings/registration-window -X POST -H 'Content-Type: application/json' \
+  -d '{"ttl_minutes": 30, "max_devices": 20}'
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-Expected chain: the device gets an address via DHCP → TFTP pulls the signed first hop → the first hop reports device information and obtains a nonce over 4443 → the TPM creates an AK (the private key cannot be exported) → `/devices/report` sends the fingerprint, AK public key and name → **the device appears under Devices and completes AK claim**; every later boot receives boot variables only after passing a PCR quote.
+Chain: DHCP → TFTP first hop → report and nonce over 4443 → TPM creates the AK → `/devices/report` admits the device and claims the AK; later boots require a PCR quote.
 
-Close the registration window after the device is admitted. TPM attestation enforcement is on by default: `/boot-vars` serves only bound devices that pass PCR quote attestation. Disable it only temporarily for migration or troubleshooting, then restore it.
+```bash
+api /settings/registration-window -X DELETE
+```
 
-Admission only proves that the platform side and the registration path work; the device has no bootable system yet. A real boot takes three steps: a master image for the target distribution on a storage node → clone a system disk for the Worker and make it the default → cold boot to a login prompt. See [System Disk Customization](./system-disk.md) for the master image and [First Delivery](./usage.md) for the last two.
+Disable enforcement only for migration or troubleshooting: `api /settings/enforcement -X PUT -H 'Content-Type: application/json' -d '{"enabled": false}'`, then restore it.
 
-## Migration and repository moves
+## Step 4: System Disks and the First Boot
 
-With runtime state decoupled from the repository, the checkout location only affects code, declarations and build artifacts:
+Run these on the controller with the `api` helper from 1.3; every step also works in the WebUI.
 
-- **Moving or renaming the checkout**: after the move, run `kurrent init --dir <new repository root>` in the new location. The command reuses the recorded state root and pinned projects, recreates the containers with `--force-recreate` (mount sources remain absolute), and updates the recorded repository root; ledgers, PKI and credentials stay unchanged.
-- **Storage nodes**: run `kurrent join <cp-url> --dir <new repository root>` in the new location; the node state root, identity and credentials are unchanged.
-- **Legacy layout migration** (early deployments whose state still lives in the repository): the first `kurrent init` detects `control_plane/state`, `storager/state` and similar legacy paths and refuses to continue, pointing at `--adopt-state`. The migration stops the legacy stack, copies and verifies every file into the state root, then starts the stack and completes the credential self-test; the legacy copies are removed only after all of that succeeds, and a failure leaves them intact. Ownership is checked for both the control-plane and co-located node legacy state before any stack is stopped; when files belong to another user (for example, created by Docker as root), the command lists every path to fix in a single `sudo chown` remediation and stops without copying anything.
-- **Lost state root**: when the deployment record exists but the state root does not, `kurrent init` refuses to create an empty deployment; restore the state root from a backup, or remove the record and deploy again.
+### 4.1 Master image
 
-Backup, restore and the downtime requirements before migration are covered in [Operations](./operations.md#backup-and-recovery).
+The master must be a whole-disk image (GPT, ESP and root partition) with `_tpl_` in the filename, placed in the storage node's `diskDir`; partition images, archives and installation media cannot be used directly. Building it is in [System Disk Customization](./system-disk.md).
+
+```bash
+# Build host: convert qcow2 to a whole-disk raw image (skip if already raw)
+qemu-img convert -O raw master.qcow2 _tpl_ubuntu2404.img
+scp _tpl_ubuntu2404.img admin@192.168.1.20:/pool1/storager_img/
+```
+
+```bash
+api /masters | jq '.agents[] | {agent, masters: [.masters[] | {name, gpt}]}'
+```
+
+`gpt` must be `4k`, otherwise boot fails with `0x7f22208e`.
+
+### 4.2 Bind a Worker
+
+WebUI Devices page, or:
+
+```bash
+api /workers -X POST -H 'Content-Type: application/json' \
+  -d '{"worker_id":"worker-01","hostname":"worker-01","mac":"00:0c:29:b9:8b:2d"}'
+```
+
+### 4.3 Create a system disk
+
+```bash
+api /workers/worker-01/luns/disk -X POST -H 'Content-Type: application/json' \
+  -d '{"type":"master","os":"ubuntu","os_version":"24.04","name":"_tpl_ubuntu2404.img"}'
+```
+
+Placement is decided by the control plane; the response carries the `os_tag` and disk NQN; the first disk becomes the default.
+
+### 4.4 Switch the default disk (optional)
+
+The first disk already becomes the default; pick another only when a Worker has multiple disks:
+
+```bash
+api /workers/worker-01/default-disk -X PUT -H 'Content-Type: application/json' \
+  -d '{"disk":"<os_tag>"}'
+```
+
+Without a default disk `/boot-vars` returns `menu-default=reboot`.
+
+### 4.5 Cold-boot acceptance
+
+```text
+DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 → GRUB → kernel → initramfs (NBFT/NBCT) → rootfs → login
+```
+
+For an empty menu, a data-plane connection failure, an authentication failure or `0x7f22208e`, see [Troubleshooting](./troubleshooting.md); for `0x7f22208e` check that `gpt` is `4k` in `/masters` first.
+
+## Security Checklist
+
+| Item | Requirement |
+| --- | --- |
+| Network and switching | Dedicated PXE segment with the control plane as the only DHCP/TFTP provider; TFTP root mounts only `snponly.efi` and `boot.ipxe`; switches enable DHCP snooping, DAI, RA guard and port security |
+| Exposed ports | Control plane 22, 53/67/69, 80/443/4443 (4443 boot segment only); storage nodes 4840/4421 |
+| Host baseline | `sudo kurrent host check --strict` with no FAIL or SKIP; CA keys, `admin.conf`, credentials and audit files at 600 |
+| Registration and attestation | Registration window opened on demand with a quota and closed afterwards; TPM attestation on by default; devices without a TPM are not admitted |
+| Secure Boot and artifacts | Site signing certificate and the Microsoft UEFI CA in `db`; artifacts from a `build-sb.sh` signed build, with `secureboot.status=ok` in `/boot-assets` |
+| Certificates and audit | User certificates issued on demand and revoked on departure or compromise; CRL refresh, credential pushes and audit alarms reviewed regularly |
+| Backup and firmware | Encrypted backups with tested recovery; firmware artifacts verified with `SHA256SUMS` |

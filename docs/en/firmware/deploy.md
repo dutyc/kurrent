@@ -1,0 +1,131 @@
+# Deployment and Provisioning
+
+A signed artifact has to enter the device's boot path — a PXE segment or local media — and the site certificate must be provisioned into the target's `db`. After deployment, the first boot should pool the device within the registration window.
+
+## Goals and Prerequisites
+
+- the target satisfies the [bare-metal requirements](../reference/host-prerequisites.md#bare-metal-requirements): x86_64 UEFI, TPM 2.0, Secure Boot enabled and the site signing certificate imported into `db`; legacy BIOS (Legacy/CSM) boot is no longer supported;
+- the control plane, dnsmasq and the PXE segment are set up as described in [Deployment](../guide/deployment.md);
+- signed artifacts and `manifest.json` were produced as described in [Build](./build.md).
+
+## Deployment Paths
+
+| Condition | Path |
+| --- | --- |
+| Mainboard has UEFI Network Boot / PXE | PXE, using `snponly.efi` served by the platform TFTP |
+| No PXE entry, or PXE settings unusable | Local media (USB / ESP / local disk / GRUB chainload) |
+| Batch provisioning with BMC virtual media | BMC / Redfish media mount, optional |
+
+### PXE
+
+1. Obtain `dist/secureboot/snponly-sb.efi` and `manifest.json`.
+2. Install them into the main repository's TFTP root and restart dnsmasq:
+
+   ```bash
+   sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
+     /path/to/kurrent/tftp/secureboot/
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+   cd /path/to/kurrent
+   eval "$(kurrent deployment show -o env)"
+   docker compose restart kurrent-dnsmasq
+   ```
+
+   `tftp/snponly.efi` is a file-level mount; restart the container after replacing it, or the container keeps the old inode. `tftp/secureboot/` serves as the artifact source for `/boot-assets` verification and export.
+
+3. In the device UEFI settings, enable the network stack and Secure Boot, and put network boot first.
+4. Boot the device and confirm DHCP assignment, the TFTP first-stage download, and the first stage's report and challenge over 4443.
+
+TFTP serves only the first stage `snponly.efi` (plus the `boot.ipxe` pointer); the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../architecture/security.md). Machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage.
+
+### Local Media
+
+Use a `direct-uefi` artifact: it embeds `auto.ipxe`, performs DHCP at startup and jumps to the control plane's TFTP boot chain.
+
+USB / ESP:
+
+1. prepare a FAT32 partition (a USB stick or the local ESP);
+2. create `EFI/BOOT/`;
+3. copy `dist/direct-uefi/ipxe.efi` to `EFI/BOOT/BOOTX64.EFI`;
+4. select the USB/ESP in the device boot menu.
+
+If the mainboard only recognizes the fixed ESP, place the file at the same path on the internal disk and select it in the boot entries.
+
+GRUB chainload:
+
+```text
+menuentry "Kurrent firmware" {
+    chainloader /boot/efi/EFI/kurrent/ipxe.efi
+}
+```
+
+BMC / Redfish virtual media has been verified at the protocol level only, and capabilities differ by model; it is not a Kurrent deployment dependency and does not replace the PXE segment isolation requirement.
+
+## First Boot and Identity
+
+On first boot, firmware:
+
+1. runs `akgen` to create the AK inside the TPM (non-exportable private key);
+2. exports the AK public key, name and algorithm with `akpub`;
+3. reports the fingerprint, AK and Secure Boot state to `/devices/report`;
+4. obtains a nonce from `/devices/challenge` on every boot and produces a quote over PCR 0/2/4/7 with `quote`;
+5. fetches boot variables over 4443, trusting only the boot CA pinned at build time.
+
+A device must report `sb=1` to be pooled; with Secure Boot off, enrollment-period reports write no ledger entry and leave only a rejection audit record.
+
+Identity semantics:
+
+- device identity is carried by the AK inside the TPM; the boot HTTPS trust anchor is the boot CA embedded in the signed firmware; updating firmware or replacing TFTP files does not clear the AK;
+- clearing the TPM or replacing the mainboard loses the AK, equivalent to a new device identity: delete the entry and re-pool during a registration window;
+- rotating the boot CA equals reflashing firmware: rebuild the signed artifacts and re-provision the `db` certificate on the target;
+- new hardware or a whole-machine replacement forms a new device; system disks and the Worker identity stay in the control plane and move by rebinding.
+
+NVRAM cleanup should go through a firmware interactive environment or a controlled provisioning flow. AK lifecycle, quote format and trust boundaries are in the [Firmware Contract](../reference/firmware-contract.md).
+
+## Verification
+
+| Check | Expectation |
+| --- | --- |
+| Device boot | Reaches the iPXE menu and shows that Worker's system disks |
+| WebUI → Devices | The device is pooled within the registration window |
+| WebUI → Boot chain / `/boot-assets` | Firmware `status=ok` with all capabilities; `secureboot.status=ok` |
+| Control-plane logs / audit | Records for `/devices/report`, `/devices/challenge` and `/boot-vars` |
+| Data plane | After selecting the default disk, the NVMe/TCP connection completes and the system boots |
+
+`/boot-assets` requires `status=ok` with TPM identity and quote capabilities. `incomplete` usually means the TFTP root holds stock iPXE. When `secureboot.status` is not `ok`, check the image hash, port and boot CA separately.
+
+QEMU/OVMF verification needs KVM, OVMF firmware and an available nvmet target. The firmware repository provides scripts:
+
+```bash
+sudo AUTH=1 bash test/nvmet-setup.sh
+python3 test/cred-server.py &
+# Test script: test/nvmeof-auth-test.ipxe
+bash test/run-qemu-auth.sh
+```
+
+Acceptance: the serial console shows authentication success, Property Set, I/O queues and GRUB output; the target shows two controller records, one for the firmware segment and one for the kernel segment; in packet captures the first byte of each client TCP stream is `0x16`, the plaintext port carries zero packets, and the payload contains no PSK or DH-HMAC-CHAP key plaintext. `test/cred-server.py` is for verification only and must not serve as a production credential endpoint.
+
+## Update and Rollback
+
+- replacing `tftp/snponly.efi` and restarting dnsmasq updates the PXE first stage;
+- local-media devices need the new `direct-uefi` artifact written again;
+- keep the previous artifact for rollback; NVRAM identity and fingerprints do not change with firmware files;
+- after an update, verify at least one device reaches the menu and boots a system once.
+
+## Common Failures
+
+- **No DHCP response**: is the device on the PXE segment; check dnsmasq `interface=` and firewall ports 67/69.
+- **No TFTP download after DHCP**: does the TFTP root mount only `snponly.efi` and `boot.ipxe`; check file permissions.
+- **Stuck in firmware boot**: unsigned artifact, signing certificate absent from the target's `db`, or Secure Boot off; verify with `sbverify --cert` and `tools/secureboot/check-host.sh`, and confirm the artifact matches the architecture and form.
+- **Boot HTTPS certificate error**: the `BOOT_CA_CERT` used at build time differs from `state/pki/ca/boot/ca.crt`, or the 4443 leaf SAN does not cover the address the device uses, or the port differs from `BOOT_HTTPS_PORT`.
+- **Device not pooled**: is the registration window open; does the report carry a valid TPM AK; is the device revoked.
+- **Empty menu or boot loop**: is the device bound to a Worker; does the Worker have a system disk and default disk.
+- **Data-plane connection failure**: `tlshd`, kernel TLS support, port 4421 and credential push status.
+
+## Related Pages
+
+- Back to the [Firmware Overview](./index.md)
+- Artifacts and signing: [Build](./build.md)
+- Trust store provisioning: [Secure Boot Provisioning](./secure-boot.md)
+- Boot-chain admission: [Boot Chain](../concepts/boot-chain.md)
+- Troubleshooting: [Troubleshooting](../guide/troubleshooting.md)

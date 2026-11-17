@@ -4,6 +4,8 @@
 
 ## Install and credentials
 
+Build from the `main` branch of the main repository (Go 1.27+, or allow the `toolchain` download):
+
 ```bash
 mkdir -p bin
 cd cli
@@ -12,6 +14,8 @@ sudo install -m 0755 ../bin/kurrent /usr/local/bin/kurrent
 kurrent init                   # first deployment: also installs management credentials into ~/.kurrent
 kurrent credentials install    # refresh the snapshot after rotation
 ```
+
+[Releases](https://github.com/dutyc/kurrent/releases) also ship `kurrent-linux-amd64`, `kurrent-linux-arm64` and `kurrent-windows-amd64.exe`. A release can lag `main`; building from source is authoritative for the deployment line.
 
 `kurrent init` installs `~/.kurrent/admin.conf` and certificate copies through the one-shot exchange (directory 0700, files 0600), so a PATH-installed binary works outside the repository over 443 mTLS. Re-run `kurrent init` or `kurrent credentials install` after credential rotation.
 
@@ -25,6 +29,16 @@ Credential discovery order:
 6. The user-level snapshot `~/.kurrent/admin.conf`
 
 Without management credentials, `--server` and `--token` must be given explicitly for the Bearer channel.
+
+### One-shot credential exchange
+
+The exchange directory `<state>/control-plane/bootstrap` (0700, owned by the deploying user) is mounted as `/app/bootstrap`:
+
+1. `init` writes `request`.
+2. Once PKI and `admin.conf` are ready, the control plane copies `admin.conf` and the server CA, admin certificate and key it references into `pki/`, rewrites the paths to be bundle-relative, writes them 0700/0600 with the exchange directory's owner, then writes `ready` (per-file SHA-256) last and removes `request`.
+3. The CLI verifies that paths stay inside the bundle, that hashes match, that certificate and key pair up, and that the server URL is usable, then installs the snapshot; only a passing mTLS self-test writes `consumed` and deletes the copies.
+
+The bundle is a copy — the authoritative file remains `<state>/control-plane/state/admin.conf`. Any failure leaves `consumed` unwritten, so a rerun resumes from that step. The trust boundary is same-host filesystem ownership: the directory belongs to the deploying user and the container root can write it; credentials never appear in logs, command-line arguments or environment variables.
 
 ## Command surface
 
@@ -67,7 +81,7 @@ kurrent config status
 
 - preflights Docker/Compose v2, the WebUI build output, and ownership/writability of the state root and `~/.kurrent`;
 - builds the validation image and fully validates the declaration, writing nothing on failure;
-- creates the state root (default `~/.local/state/kurrent`), seeds the compose mount points, and writes the deployment record as `bootstrapping`;
+- creates the state root (default `~/.local/state/kurrent`), seeds the compose mount points, and writes the deployment record as `bootstrapping`; files written by the containers as root are re-owned to the directory's owner, so host-side backup and migration need no `sudo`;
 - starts the stack under the pinned project `kurrent`, restarts the control plane, and waits for `/healthz`; rolls back to the previous declaration and restores service on startup failure;
 - waits for the one-shot credential exchange, verifies it, installs it into `~/.kurrent`, and runs an mTLS `GET /whoami` self-test with the installed copy;
 - consumes the bundle, restarts dnsmasq, confirms it stays up, and moves the record to `ready`;
@@ -195,4 +209,4 @@ Positional arguments can be mixed freely with `--key value`, `--key=value`, and 
 - [Deployment](../guide/deployment.md)
 - [Daily Operations](../guide/operations.md)
 - [Configuration Reference](./configuration.md)
-- [API Reference](./api.md)
+- [API Reference](./api/index.md)

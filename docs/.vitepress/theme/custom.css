@@ -88,6 +88,14 @@
   letter-spacing: 0.04em;
 }
 
+/* 搜索框占满导航中部可用空间，避免只剩图标与快捷键的窄条 */
+@media (min-width: 768px) {
+  .VPNavBarSearch #local-search {
+    width: 100%;
+    max-width: 480px;
+  }
+}
+
 /* 统一侧边栏：当前页用字重与左侧竖线定位 */
 .VPSidebarItem.level-1.is-active > .item > .link > .text {
   font-weight: 600;

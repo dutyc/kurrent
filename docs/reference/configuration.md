@@ -56,15 +56,15 @@ PXE 部署网络声明，也是 `dnsmasq.conf` 的唯一权威来源。
 
 ### `spec.serverCert`
 
-TOFU 引导链的 nginx 443 自签服务器证书。
+nginx 443 管理证书；其 SAN 同时用于 4443 引导叶证书。
 
 | 字段 | 默认值 | 范围 | 说明 |
 | --- | --- | --- | --- |
 | `san` | `IP:127.0.0.1,DNS:localhost` | 至少一项，不可重复 | 逗号分隔的 `IP:` / `DNS:` 条目 |
 | `days` | `3650` | 1–36500 | 证书有效期 |
-| `rotateOnChange` | `false` | — | 声明变化时是否自动重签；重签会改变 TOFU 指纹 |
+| `rotateOnChange` | `false` | — | 声明变化时是否自动重签；重签叶证书，不改变设备信任的 boot CA |
 
-SAN 或天数变化默认只报告漂移；`rotateOnChange: true` 才会自动重签。已入池设备需要重新固定服务器指纹。
+SAN 或天数变化默认只报告漂移；`rotateOnChange: true` 才会自动重签。设备信任的是 boot CA，叶证书重签不需要重新入池。
 
 ### `spec.boot`
 
@@ -160,7 +160,9 @@ spec:
 | `kind` | string | 是 | 固定 `NodeConfiguration` |
 | `spec` | object | 是 | 见下 |
 
-节点声明没有 `metadata` 块：节点身份（12 位小写十六进制，与盘 `os_tag` 同构）由控制面在签发 bootstrap token 时分配，join 写入 `storager/state/agent.id`，两个组件容器只读挂载。它同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定，不应手工改写；昵称属于控制面台账，用 WebUI 或 `kurrent agents edit` 设置。
+节点声明没有 `metadata` 块。节点身份（12 位小写十六进制，与盘 `os_tag` 同构）由控制面在签发 bootstrap token 时分配，join 写入 `storager/state/agent.id`，两个组件容器只读挂载。
+
+身份同时是控制面登记键与组件证书 CN，由 bootstrap token 绑定，不应手工改写；昵称属于控制面台账，用 WebUI 或 `kurrent agents edit` 设置。
 
 ### `spec.agent`
 
@@ -251,5 +253,5 @@ kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 - [声明式配置](../concepts/configuration.md)
 - [日常运维](../guide/operations.md)
 - [CLI 参考](./cli.md)
-- [API 参考](./api.md)
+- [API 参考](./api/index.md)
 - [术语表](./glossary.md)

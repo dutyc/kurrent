@@ -1,6 +1,6 @@
 # 固件契约
 
-本页描述固件与主仓库之间的接口：TPM 身份命令、NV 设置、TOFU 行为、挑战-证明格式、控制面上报与启动变量。字段级权威定义在固件仓库的 `docs/device-trust-usage.md`、`docs/capability-reference.md` 与 `patches/README`；控制面端点细节以 `api/control-plane-api.zh-CN.md` 为准。
+固件与主仓库之间的接口包括 TPM 身份命令、NV 设置、TOFU 行为、挑战-证明格式、控制面上报与启动变量。字段级权威定义在固件仓库的 `docs/device-trust-usage.md`、`docs/capability-reference.md` 与 `patches/README`；控制面端点细节以[API 参考](./api/index.md)为准。
 
 ## 设备身份命令
 
@@ -21,6 +21,8 @@
 
 ## NV 设置
 
+`server-fingerprint` 与 `trust` 只用于未签名调试产物；部署路径使用签名固件，引导 HTTPS 只信任构建时嵌入的 boot CA。
+
 | 设置名 | 类型 | DHCP 标签 | 持久性 | 写入方 |
 | --- | --- | --- | --- | --- |
 | `server-fingerprint` | hexraw | 0x5f | NVRAM | TOFU |
@@ -32,17 +34,19 @@
 | `quote` | hexraw | 0x61 | 内存 | `quote` |
 | `quote-sig` | hexraw | 0x62 | 内存 | `quote` |
 
-清除持久设置必须带 `nvo/` 块前缀：
+清除持久设置用 `nvclear`：它把 `server-fingerprint` 与 `trust` 作为 `nvo` 块中的设置逐项删除，并分别报告 `cleared`、`not present` 或 `could not clear`；任一项失败时以非零退出并输出 `incomplete`。
+
+等价的单条写法为：
 
 ```text
 clear nvo/server-fingerprint  # 解除 TOFU pin，下次 HTTPS 重新固定
 ```
 
-裸 `clear server-fingerprint` 或空值 `set server-fingerprint` 对 NVS 后端无效。AK 不使用 iPXE 设置持久化；清除 TPM 或更换主板会失去原 AK，只能删除登记后重新入池。
+裸 `clear server-fingerprint` 或空值 `set server-fingerprint` 只删除内存块，不触及 NVS 后端。AK 不使用 iPXE 设置持久化；清除 TPM 或更换主板会失去原 AK，只能删除登记后重新入池。
 
-## TOFU
+## TOFU（未签名调试产物）
 
-TOFU 在 TLS 握手路径自动生效，没有命令与配置项。
+TOFU 只适用于未签名调试产物，不属于部署路径；签名固件的引导 HTTPS 只信任构建时嵌入的 boot CA。以下行为在 TLS 握手路径自动生效，没有命令与配置项。
 
 | 状态 | 条件 | 行为 |
 | --- | --- | --- |
@@ -55,7 +59,7 @@ TOFU 在 TLS 握手路径自动生效，没有命令与配置项。
 - 指纹是**叶证书 DER 的 SHA-256**，可用 `openssl x509 -outform DER | sha256sum` 独立核对。
 - pin 是全局单锚：固件只信任首个 HTTPS 连接固定的证书。所有 HTTPS 目标必须共用同一证书或可链到该证书；其余流量走 TFTP/HTTP。
 - HTTPS 由 iPXE 原生 TLS 实现，版本上限为 1.2。
-- 控制面证书轮换后，设备必须清除 `server-fingerprint` 重新固定，否则引导会被拒绝。
+- 未签名产物在控制面证书轮换后，必须清除 `server-fingerprint` 重新固定，否则引导会被拒绝。
 
 ## 挑战-证明
 
@@ -97,7 +101,7 @@ GET /devices/report?mac=<MAC>&ak_public=<hex>&ak_name=<hex>&ak_type=ecc_p256&sb=
 | `mac` | 必填，设备网卡 MAC |
 | `ak_public` | AK 公钥 SPKI DER hex；与 `ak_name` 配对，注册与 AK 认领的必要条件 |
 | `ak_name` | TPM2B_NAME hex（68 hex：算法前缀 + 公钥摘要） |
-| `ak_type` | `ecc_p256`（默认）或 `rsa2048`；与实际公钥算法不符则视为无身份 |
+| `ak_type` | `ecc_p256` 或 `rsa2048`；携带 `ak_public` 时必须同时提供且与实际算法一致，缺失或不符则视为无身份 |
 | `sb` | Secure Boot 状态，`1` = 已开启；注册期必须为 `1` |
 | `uuid` | SMBIOS UUID，已有值不会被自报值覆盖 |
 | `manufacturer` / `product` / `serial` | 厂商、型号、序列号 |
@@ -124,7 +128,7 @@ GET /boot-vars?mac=<MAC>&hostname=<name>&nonce=<nonce>&quote=<hex>&quote_sig=<he
 
 准入顺序：
 
-1. **识别**：MAC → 设备台账 → `bound_worker_id`；主机名仅作存量兜底。
+1. **识别**：MAC → 设备台账 → `bound_worker_id`；主机名仅作存量设备的回退依据。
 2. **绑定校验**：带 MAC 的请求必须来自该 Worker 绑定的设备，否则返回空脚本。
 3. **证明**：校验 quote 结构、AK 签名与 `extraData == nonce`，再比对 PCR 摘要与平台基线。未通过证明的请求拿不到任何密钥；证明强制（默认开启）下直接拒绝。
 4. **数据面就绪**：nvmet 后端必须同时具备认证密钥与就绪的数据面端口，否则拒绝下发。
@@ -205,9 +209,9 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 
 - [固件概述](../firmware/index.md)
 - [固件平台参考](./firmware-platform.md)
-- [构建与产物](../firmware/build-deploy.md)
-- [预置与刷写](../firmware/build-deploy.md)
-- [设备身份与信任](../firmware/index.md#设备身份与信任)
+- [构建](../firmware/build.md)
+- [部署与预置](../firmware/deploy.md)
+- [设备身份](../firmware/index.md#设备身份)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../architecture/security.md)
-- [API 参考](./api.md)
+- [API 参考](./api/index.md)

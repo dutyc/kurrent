@@ -1,6 +1,6 @@
 # Operations
 
-This page addresses environments that have completed deployment and entered system delivery. It covers declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For initial deployment, see [Deployment](./deployment.md); for cross-component fault isolation, see [Troubleshooting](./troubleshooting.md).
+After deployment, routine work centers on declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For initial deployment, see [Deployment](./deployment.md); for cross-component fault isolation, see [Troubleshooting](./troubleshooting.md).
 
 ## Changing Configuration
 
@@ -22,8 +22,8 @@ Common changes:
 | `spec.networking` | `kurrent init` | Regenerates `dnsmasq.conf` and restarts dnsmasq |
 | `spec.auth` / `spec.registration` / `spec.credentials` | `kurrent init` | New values are read on the next request or background cycle |
 | `spec.pki` | `kurrent init` | CRL refresh period and token caps change accordingly |
-| `spec.serverCert.san` / `days` | `kurrent init` | Reports drift by default; does not change the TOFU fingerprint |
-| `spec.serverCert.rotateOnChange: true` | `kurrent init` | Reissues the certificate; enrolled devices must re-trust it |
+| `spec.serverCert.san` / `days` | `kurrent init` | Reports drift by default; affects the 443 management certificate and the 4443 boot leaf |
+| `spec.serverCert.rotateOnChange: true` | `kurrent init` | Reissues leaf certificates under the existing CA; devices trust only the boot CA and need no reprovisioning |
 | `spec.boot` | `kurrent init` | Affects menu timeout and default `/boot-vars` behaviour |
 
 Do not edit `$STATE/control-plane/dnsmasq/dnsmasq.conf` by hand: it is derived from `spec.networking` and regenerated at control-plane startup. `$STATE` is the state root from the deployment record (default `~/.local/state/kurrent`); `kurrent deployment show` prints it.
@@ -38,16 +38,17 @@ kurrent join https://<controller-address>    # --token can be omitted when boots
 
 `kurrent join` revalidates the declaration, injects `diskDir` and the PKI directories as compose variables, and restarts the agent (on the nvmet backend it also restarts nvmet-host). Changing `spec.agent.diskDir` changes the disk directory; changing `spec.agent.advertiseUrl` changes the address the control plane uses to reach the Agent; changing `spec.agent.backend` switches the compose directory (nvmet / iscsi). Confirm how existing disk files will be moved before changing directories.
 
-The node identity lives in `<state>/storager/state/agent.id`; component certificates, bootstrap credentials and logs sit under `<state>/storager/`, so the whole node state root needs backup. A lost identity cannot be restored from the declaration: delete `agent.id`, issue a new token with `kurrent token create`, and re-run join with the new identity. The controller trust anchor is `<state>/storager/certs/cp-ca.crt`; after a server-certificate rotation, update that file (or pass `--cp-ca` to join) and restart the node components.
+The node identity lives in `<state>/storager/state/agent.id`; component certificates, bootstrap credentials and logs sit under `<state>/storager/`, so the whole node state root needs backup. A lost identity cannot be restored from the declaration: delete `agent.id`, issue a new token with `kurrent token create`, and re-run join with the new identity. The controller trust anchor is `<state>/storager/certs/cp-ca.crt`; after a control-plane CA rotation, update that file (or pass `--cp-ca` to join) and restart the node components.
 
 ### Server certificate drift
 
-`derived.serverCert.drift` in `config status` lists SAN or validity differences from the declaration. The default behaviour is **report only**: the certificate and the pinned TOFU fingerprint are unchanged. To rotate deliberately:
+`derived.serverCert.drift` in `config status` lists SAN or validity differences from the declaration. The default behaviour is **report only**; certificates are not reissued. To rotate deliberately:
 
-1. Confirm that every device can accept a new trust anchor (or is scheduled for reprovisioning).
-2. Set `spec.serverCert.rotateOnChange: true` and run `kurrent init`.
-3. The new fingerprint differs; enrolled devices reject the old certificate on the next HTTPS handshake and need their NVRAM fingerprint reprovisioned.
-4. Set the flag back to `false` when done.
+1. Set `spec.serverCert.rotateOnChange: true` and run `kurrent init`.
+2. The control plane reissues the 443 management certificate and the 4443 boot leaf under the existing CA. Devices trust only the boot CA embedded at build time, so a leaf change does not affect admission and requires no NVRAM change.
+3. Set the flag back to `false` when done.
+
+Rotating the boot CA itself is a different operation: rebuild the signed firmware and re-enroll the site signing certificate in each target's `db`.
 
 ## Identity and Credentials
 
@@ -61,6 +62,15 @@ kurrent token revoke <token_id>                    # invalid immediately
 kurrent sessions list                              # session ledger
 kurrent sessions revoke <session_id>               # revoke one session
 kurrent sessions revoke-all                        # sign out all sessions
+```
+
+For automatic browser mTLS, export the admin certificate as PKCS#12 and import it into the system trust store (Firefox keeps its own store):
+
+```bash
+STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
+openssl pkcs12 -export -out kurrent-admin.p12 \
+  -inkey "$STATE/control-plane/state/pki/users/admin/client.key" \
+  -in "$STATE/control-plane/state/pki/users/admin/client.crt"
 ```
 
 Rotating the management certificate: note the current serial (`kurrent cert list`) → stop the control plane and delete `<state>/control-plane/state/pki/users/admin/client.crt` and `client.key` → start the control plane (it re-issues the certificate and rewrites `admin.conf`) → revoke the old serial with the new credential: `kurrent cert revoke admin --serial <old serial> --reason superseded` (effective on the next handshake) → run `kurrent credentials install` to refresh the `~/.kurrent` snapshot. `kurrent credentials show` reports the active `admin.conf`.
@@ -161,6 +171,8 @@ Because the state root is decoupled from the repository, moving or renaming the 
 
 Storage nodes follow the same steps with `kurrent join <cp-url> --dir <new repository root>`. Do not hand-edit `~/.kurrent/deployment.yaml`: repository root, state root and project names must agree, or the next init misidentifies the deployment.
 
+Legacy layouts (state still inside the repository) are detected by the first `kurrent init`, which refuses to continue and points at `--adopt-state`; the migration stops the legacy stack and copies every file into the state root, removing the old copies only after success. If the deployment record exists but the state root does not, `kurrent init` refuses to create an empty deployment; restore from backup or remove the record and deploy again.
+
 ## Backup and Recovery
 
 Back up:
@@ -169,7 +181,7 @@ Back up:
 | --- | --- | --- |
 | `control_plane/kurrent.yaml` | Control-plane declaration (in the repository) | 644 |
 | `storager/kurrent.yaml` | Node declaration (in the repository) | 644 |
-| `$STATE/control-plane/state/` | Ledgers, credentials, audit, sessions, certificate records, PKI and TOFU certificate | Directories 700, files 600 |
+| `$STATE/control-plane/state/` | Ledgers, credentials, audit, sessions, certificate records, PKI and server certificates | Directories 700, files 600 |
 | `$STATE/control-plane/config/agents.yml` | Agent ledger | 644 |
 | `$STATE/control-plane/dnsmasq/` | Rendered configuration and leases (regenerable) | 644 |
 | `$STATE/storager/` | Node identity, bootstrap credentials, component PKI, logs and trust anchor | Directories 700, private keys 600 |

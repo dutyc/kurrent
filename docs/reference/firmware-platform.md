@@ -1,10 +1,10 @@
 # 固件平台参考
 
-本页是固件平台侧的参考：补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NV、TOFU、挑战-证明与启动变量）见[固件契约](./firmware-contract.md)；构建、产物选择与部署见[固件构建与部署](../firmware/build-deploy.md)。
+固件平台侧的参考包括补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NV、未签名调试的 TOFU、挑战-证明与启动变量）见[固件契约](./firmware-contract.md)；构建与产物选择见[构建](../firmware/build.md)，部署见[部署与预置](../firmware/deploy.md)。
 
 ## 补丁集
 
-补丁按文件名顺序应用，任一补丁无法应用到固定基线即构建失败。当前补丁链为 10 个：
+补丁按文件名顺序应用，任一补丁无法应用到固定基线即构建失败。当前补丁链为 11 个：
 
 | 编号 | 名称 | 内容 |
 | --- | --- | --- |
@@ -15,9 +15,10 @@
 | 0005 | `nvmeof-adaptation` | NVMe/TCP SAN 驱动、DH-HMAC-CHAP、认证时序修复与 `hostnqn` |
 | 0006 | `efi-nvs-backend` | EFI 变量 NVS 后端，含空块删除语义 |
 | 0007 | `tofu-fingerprint` | TOFU 指纹固定与校验 |
-| 0008 | `devicekey-commands` | ECDSA P-256 设备身份命令 |
+| 0008 | `nvclear-command` | 清除 NVRAM 中 TOFU 指纹与信任锚的 `nvclear` 命令 |
 | 0009 | `nvmetcp-nbct-acpi-table` | NBCT ACPI 表与内核凭据交接 |
 | 0010 | `tls13-psk` | TLS 1.3 PSK 客户端与记录层 |
+| 0011 | `tpm-attestation` | TPM 2.0 AK 创建与持久化、PCR quote，导出 `akgen` / `akpub` / `quote` |
 
 除补丁外，`embed/auto.ipxe` 是构建级 EMBED 资产，经 `EMBED=` 编译进 `direct-uefi` 产物，不参与补丁序列。补丁的许可边界不完全一致：RTL8125/8126 适配部分仅按 GPL-2.0 授权，不得以 UBDL 再分发；其余自研补丁按其文件头声明授权。再分发前应阅读 `patches/README`。
 
@@ -32,7 +33,9 @@
 | 内存 | `mem-total`、`mem-type`、`mem-speed` | SMBIOS type 17（补丁 0004） |
 | 网卡 | `netX/mac`、`netX/chip`、`netX/busid`、`netX/bustype`、`netX/linktype` | netdev 设置；`chip` 由补丁 0004 启用 |
 
-数值设置按 iPXE 约定以十六进制展开，服务端需同时兼容十六进制与十进制解析。字符串可能包含空格与特殊字符，上报前应确认 URL 编码行为。无 SMBIOS type 17 的环境取不到内存字段；SNP 引导时 `${netX/chip}` 显示 `snpnet`，只有原生驱动才显示芯片型号。字段级契约见[固件契约](./firmware-contract.md#设备上报)。
+数值设置按 iPXE 约定以十六进制展开，服务端需同时兼容十六进制与十进制解析。字符串可能包含空格与特殊字符，上报前应确认 URL 编码行为。
+
+无 SMBIOS type 17 的环境取不到内存字段；SNP 引导时 `${netX/chip}` 显示 `snpnet`，只有原生驱动才显示芯片型号。字段级契约见[固件契约](./firmware-contract.md#设备上报)。
 
 ## 网卡支持
 
@@ -74,7 +77,7 @@
 
 ### 已知问题
 
-- **Realtek RTL8168 部分版本**：原生驱动初始化挂起，需走 `snponly` 兜底。
+- **Realtek RTL8168 部分版本**：原生驱动初始化挂起，需回退到 `snponly`。
 - **SNP 的 iSCSI 挂起缺陷**：影响所有只能走固件 SNP 驱动的网卡；`snponly` 路径同样有此风险。
 - **Intel I219**：带 `INTEL_PBSIZE_RST` / `NO_PHY_RST` 特殊处理，属于历史缺陷修复。
 - **Marvell/Aquantia AQC**：官方轻量实现，链路依赖硬件自协商；AQC113 动态固件加载未实现，固件空白时返回 `-ENOTSUP`。
@@ -85,15 +88,21 @@
 | 日期 | 网卡 | 固件 | 结果 |
 | --- | --- | --- | --- |
 | 2026-08-07 | Realtek RTL8125 | SNP 固件 | iSCSI 挂载挂起 |
-| 2026-08-09 | Realtek RTL8168 | 原生驱动 | 部分版本初始化挂起，SNP 兜底 |
+| 2026-08-09 | Realtek RTL8168 | 原生驱动 | 部分版本初始化挂起，SNP 回退 |
 | 2026-08-10 | Intel e1000（82540EM 等） | `direct-uefi` | 通过 |
 | 2026-08-11 | Realtek RTL8125 | 定制固件（0001） | 正常 |
 
-选择顺序：优先使用原生驱动覆盖的网卡；无原生驱动但自带 UEFI 引导 ROM 的服务器卡使用 `snponly` 产物，并评估 SNP 的 iSCSI 挂起风险；RTL8126 在生产部署前应在目标主板验证；USB 网卡与 WiFi 不作为无盘引导路径。
+选择顺序：
+
+1. 优先使用原生驱动覆盖的网卡。
+2. 无原生驱动但自带 UEFI 引导 ROM 的服务器卡使用 `snponly` 产物，并评估 SNP 的 iSCSI 挂起风险。
+3. RTL8126 在生产部署前应在目标主板验证。
+
+USB 网卡与 WiFi 不作为无盘引导路径。
 
 ## Target 配置
 
-以下 NQN 与地址用于本地验证，示例使用生产格式 `nqn.2026-07.com.kurrent:worker-01.ubuntu.0123456789ab`；生产盘 NQN 由控制面按节点 `spec.agent.nqnBase` 生成，默认前缀为 `nqn.2026-07.com.kurrent`，`sanboot` URI 中的 NQN 必须与 target 实际子系统一致。
+以下 NQN 与地址用于本地验证，示例使用生产格式 `nqn.2026-07.com.kurrent:worker-01.ubuntu.0123456789ab`。生产盘 NQN 由控制面按节点 `spec.agent.nqnBase` 生成，默认前缀为 `nqn.2026-07.com.kurrent`。`sanboot` URI 中的 NQN 必须与 target 实际子系统一致。
 
 无认证：
 
@@ -176,7 +185,9 @@ sanboot nvme://10.0.2.2:4420/nqn.2026-07.com.kurrent:worker-01.ubuntu.0123456789
 
 成功时日志应出现 `sending Property Set (CC)`、`namespace 1: N blocks of 4096 bytes` 与 `I/O queue established`，随后控制权交给盘上的 GRUB。
 
-密钥不固化在固件中。设备身份是 TPM 2.0 AK（私钥不可导出）：首次启动由 `akgen` 创建并持久化，`akpub` 导出 SPKI 与 TPM2B_NAME，随 `/devices/report` 入池；之后每次启动用 `quote` 对 PCR 0/2/4/7 做 SHA-256 证明，控制面在 `/boot-vars` 验证签名、nonce 绑定与 PCR 基线后才注入凭据：
+密钥不固化在固件中。设备身份是 TPM 2.0 AK（私钥不可导出）：首次启动由 `akgen` 创建并持久化，`akpub` 导出 SPKI 与 TPM2B_NAME，随 `/devices/report` 入池。
+
+之后每次启动用 `quote` 对 PCR 0/2/4/7 做 SHA-256 证明，控制面在 `/boot-vars` 验证签名、nonce 绑定与 PCR 基线后才注入凭据：
 
 ```ipxe
 dhcp || goto failed
@@ -190,7 +201,9 @@ sanboot nvme://<traddr>:<trsvcid>/<nqn>?secret=${nbft-secret}
 shell
 ```
 
-启用数据面 TLS 时，控制面同时下发 `nbft-tls-psk` 与 `nbft-tls-port`，脚本在 URI 追加 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}`。端口或密钥缺失时，引导脚本应进入失败分支，不回落明文端口。`/boot-vars` 不要求登录会话，凭据只在一次性 nonce 与设备 quote 证明（AK 签名有效、`extraData` 等于 nonce、PCR 与基线一致）通过后注入；未证明的请求只能取得非凭据变量。
+启用数据面 TLS 时，控制面同时下发 `nbft-tls-psk` 与 `nbft-tls-port`，脚本在 URI 追加 `&tls_psk=${nbft-tls-psk}&tls_trsvcid=${nbft-tls-port}`。端口或密钥缺失时，引导脚本应进入失败分支，不回落明文端口。
+
+`/boot-vars` 不要求登录会话，凭据只在一次性 nonce 与设备 quote 证明（AK 签名有效、`extraData` 等于 nonce、PCR 与基线一致）通过后注入；未证明的请求只能取得非凭据变量。
 
 当 `sanboot` URI 的端口等于 `tls_trsvcid` 时，固件对该连接执行 TLS 1.3 PSK 握手：
 
@@ -204,7 +217,7 @@ shell
 
 - [固件概述](../firmware/index.md)
 - [固件契约](./firmware-contract.md)
-- [固件构建与部署](../firmware/build-deploy.md)
+- [构建](../firmware/build.md)、[部署与预置](../firmware/deploy.md)
 - [发行版矩阵](./distributions.md)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../architecture/security.md)

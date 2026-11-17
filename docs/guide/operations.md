@@ -1,6 +1,6 @@
 # 日常运维
 
-本页面向已完成部署并进入系统交付阶段的环境，覆盖声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署参见[部署](./deployment.md)；跨组件的故障定位见[故障排查](./troubleshooting.md)。
+部署完成后，日常操作集中在声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署见[部署](./deployment.md)，跨组件故障定位见[故障排查](./troubleshooting.md)。
 
 ## 配置修改
 
@@ -22,8 +22,8 @@ kurrent config status       # 生效声明、configHash、dnsmasq.conf 一致性
 | `spec.networking` | `kurrent init` | 重新生成 `dnsmasq.conf` 并重启 dnsmasq |
 | `spec.auth` / `spec.registration` / `spec.credentials` | `kurrent init` | 下次请求或后台周期任务读取新值 |
 | `spec.pki` | `kurrent init` | CRL 重签周期与 token 上限随之变化 |
-| `spec.serverCert.san` / `days` | `kurrent init` | 默认只报告漂移，不改变 TOFU 指纹 |
-| `spec.serverCert.rotateOnChange: true` | `kurrent init` | 重签证书；已入池设备需要重新信任 |
+| `spec.serverCert.san` / `days` | `kurrent init` | 默认只报告漂移；影响 443 管理证书与 4443 引导叶证书 |
+| `spec.serverCert.rotateOnChange: true` | `kurrent init` | 按现有 CA 重签叶证书；设备只信任 boot CA，不需要重新预置 |
 | `spec.boot` | `kurrent init` | 影响菜单超时与 `/boot-vars` 默认行为 |
 
 `$STATE/control-plane/dnsmasq/dnsmasq.conf` 不得手工编辑：它是 `spec.networking` 的派生物，控制面启动时会重新生成。`$STATE` 指部署记录中的状态根（默认 `~/.local/state/kurrent`），可用 `kurrent deployment show` 查看。
@@ -36,18 +36,31 @@ kurrent config validate --node
 kurrent join https://<控制面地址>    # 已有 bootstrap/agent.token 时可省略 --token
 ```
 
-`kurrent join` 会重新校验声明、按 `diskDir`、节点状态根与信任锚注入 compose 变量并重启 agent（nvmet 后端同时重启 nvmet-host）。修改 `spec.agent.diskDir` 会改变盘文件目录；修改 `spec.agent.advertiseUrl` 会改变控制面访问 Agent 的地址；修改 `spec.agent.backend` 会切换编排目录（nvmet / iscsi）。变更目录前先确认旧目录中的盘文件如何迁移。
+`kurrent join` 会重新校验声明，按 `diskDir`、节点状态根与信任锚注入 compose 变量并重启 agent（nvmet 后端同时重启 nvmet-host）。
 
-节点身份保存在 `<state>/storager/state/agent.id`，组件证书、引导凭据与日志同在 `<state>/storager/` 下，备份需覆盖整个节点状态根。身份丢失后无法从声明恢复：删除 `agent.id`，用 `kurrent token create` 签发新 token，再以新身份重跑 join。控制面信任锚是 `<state>/storager/certs/cp-ca.crt`；服务器证书轮换后更新该文件（或 join 时用 `--cp-ca`）并重启节点组件。
+不同字段的修改效果：
+
+- `spec.agent.diskDir`：改变盘文件目录。
+- `spec.agent.advertiseUrl`：改变控制面访问 Agent 的地址。
+- `spec.agent.backend`：切换编排目录（nvmet / iscsi）。
+
+变更目录前先确认旧目录中的盘文件如何迁移。
+
+节点身份保存在 `<state>/storager/state/agent.id`，组件证书、引导凭据与日志同在 `<state>/storager/` 下，备份需覆盖整个节点状态根。
+
+身份丢失后无法从声明恢复：删除 `agent.id`，用 `kurrent token create` 签发新 token，再以新身份重跑 join。
+
+控制面信任锚是 `<state>/storager/certs/cp-ca.crt`；控制面 CA 轮换后更新该文件（或 join 时用 `--cp-ca`）并重启节点组件。
 
 ### 服务器证书漂移
 
-`config status` 的 `derived.serverCert.drift` 列出与声明不一致的 SAN 或天数。默认行为是**只报告**，不改变证书与已固定的 TOFU 指纹。需要真正轮换时：
+`config status` 的 `derived.serverCert.drift` 列出与声明不一致的 SAN 或天数。默认行为是**只报告**，不重签。需要轮换时：
 
-1. 确认所有设备可以接受重新信任（或已计划重新预置）。
-2. 设置 `spec.serverCert.rotateOnChange: true`，执行 `kurrent init`。
-3. 新证书指纹变化，已入池设备在下一次 HTTPS 握手时拒绝旧证书；需要重新预置 NVRAM 指纹。
-4. 完成后可以恢复为 `false`。
+1. 设置 `spec.serverCert.rotateOnChange: true`，执行 `kurrent init`。
+2. 控制面按现有 CA 重签 443 管理证书与 4443 引导叶证书。设备只信任构建时嵌入的 boot CA，叶证书更换不影响准入，也不需要改动任何 NVRAM 状态。
+3. 完成后可以恢复为 `false`。
+
+boot CA 本身轮换是另一件事：需要重新构建签名固件，并在目标机重新预置 `db` 中的站点签名证书。
 
 ## 身份与凭据
 
@@ -63,7 +76,24 @@ kurrent sessions revoke <session_id>               # 逐个下线
 kurrent sessions revoke-all                        # 全部下线
 ```
 
-管理证书轮换：记录当前序列号（`kurrent cert list`）→ 停控制面后删除 `<state>/control-plane/state/pki/users/admin/client.crt` 与 `client.key` → 启动控制面（自动重签并重写 `admin.conf`）→ 用新凭据吊销旧序列号 `kurrent cert revoke admin --serial <旧序列号> --reason superseded`（握手立即生效）→ `kurrent credentials install` 刷新 `~/.kurrent` 快照。`kurrent credentials show` 可查看当前使用的 `admin.conf`。
+浏览器自动 mTLS：把 admin 证书导出为 PKCS#12 后导入系统证书库（Firefox 需单独导入）：
+
+```bash
+STATE=${KURRENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/kurrent}
+openssl pkcs12 -export -out kurrent-admin.p12 \
+  -inkey "$STATE/control-plane/state/pki/users/admin/client.key" \
+  -in "$STATE/control-plane/state/pki/users/admin/client.crt"
+```
+
+管理证书轮换：
+
+1. 记录当前序列号：`kurrent cert list`。
+2. 停止控制面，删除 `<state>/control-plane/state/pki/users/admin/client.crt` 与 `client.key`。
+3. 启动控制面，自动重签并重写 `admin.conf`。
+4. 用新凭据吊销旧序列号：`kurrent cert revoke admin --serial <旧序列号> --reason superseded`，握手立即生效。
+5. `kurrent credentials install` 刷新 `~/.kurrent` 快照。
+
+`kurrent credentials show` 可查看当前使用的 `admin.conf`。
 
 ### 人员证书
 
@@ -86,12 +116,12 @@ kurrent cert revoke-component <agent_id>           # 写 nodes CRL + 删除该�
 ```
 
 - 控制面生成两张组件 CRL：`state/pki/nginx/nodes.crl`（nodes CA，校验同伴组件）与 `control.crl`（control CA，校验控制面客户端）；nginx 另用 `clients.crl` 管管理面握手。
-- 组件用自身 client cert 从 `/api/cp/enroll/crl` 取表，默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`）；控制面出站与 agent → nvmet-host 在每次建连时加载 `nodes.crl` 并检查 `nextUpdate`。
+- 组件用自身 client cert 从 `/api/cp/enroll/crl` 取表，默认每 60 秒刷新（`KURRENT_COMPONENT_CRL_REFRESH_SECONDS`）。控制面出站与 agent → nvmet-host 在每次建连时加载 `nodes.crl` 并检查 `nextUpdate`。
 - **fail-closed**：CRL 缺失或过期时组件/出站连接直接拒绝，不降级放行；`nodes.crl` / `control.crl` 的 `nextUpdate` 为 30 天，容忍控制面长时间不可达。
 - 吊销入口：`DELETE /api/cp/pki/components/{agent_id}`（nodes 域）与 `DELETE /api/cp/pki/control/{cn}`（control 域），均可加 `serial` 精确到一张。
 - **升级顺序**：先升级并重启控制面（生成 CRL、开放分发端点），再重建组件容器；旧组件不认识 `/enroll/crl` 时会保留原有链校验行为，不会因此拒绝启动。
 - 生效时间 = 控制面写入 CRL 后的下一次组件刷新（≤60 秒），无需重启组件。
-- **启动自检**：被吊销的证书无法完成 `/enroll/crl` 的 mTLS，组件改为在启动时从公开只读入口 `GET /crl/nodes.crl`（无认证、仅 GET/HEAD）取表，用本地 nodes CA 校验签名后比对 client / serving 序列号，命中即用引导凭据重新 enroll（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。
+- **启动自检**：被吊销的证书无法完成 `/enroll/crl` 的 mTLS。组件改为在启动时从公开只读入口 `GET /crl/nodes.crl`（无认证、仅 GET/HEAD）取表，用本地 nodes CA 校验签名后比对 client / serving 序列号，命中即用引导凭据重新 enroll（`KURRENT_PKI_SELF_CHECK=0` 可关闭）。
 - **管理入口**：WebUI「身份与访问」页按 users / nodes / control 三个域展示到期与状态，可吊销人员与节点证书；节点证书异常时同一行提供「恢复」。
 
 吊销后的节点恢复：
@@ -157,6 +187,8 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 
 存储节点按同样步骤用 `kurrent join <cp-url> --dir <新仓库根>` 收敛。不要手工编辑 `~/.kurrent/deployment.yaml`：仓库根、状态根与项目名三者必须一致，写错会让下一次 init 认错部署。
 
+旧布局（状态仍在仓库内）首次 `kurrent init` 会检测 `control_plane/state`、`storager/state` 等路径并拒绝继续，提示带 `--adopt-state` 重跑；迁移先停旧编排、逐文件校验复制到状态根，成功后才删除旧副本。部署记录存在而状态根不存在时，`kurrent init` 拒绝新建空部署，需先从备份恢复或删除记录后重新部署。
+
 ## 备份与恢复
 
 需要备份：
@@ -165,7 +197,7 @@ nvmet 后端建盘时自动签发，上述命令用于显式轮换与吊销。�
 | --- | --- | --- |
 | `control_plane/kurrent.yaml` | 控制面声明（随仓库） | 644 |
 | `storager/kurrent.yaml` | 节点声明（随仓库） | 644 |
-| `$STATE/control-plane/state/` | 台账、凭据、审计、会话、证书台账、PKI 与 TOFU 证书 | 目录 700，文件 600 |
+| `$STATE/control-plane/state/` | 台账、凭据、审计、会话、证书台账、PKI 与服务器证书 | 目录 700，文件 600 |
 | `$STATE/control-plane/config/agents.yml` | Agent 台账 | 644 |
 | `$STATE/control-plane/dnsmasq/` | 渲染配置与租约（可再生） | 644 |
 | `$STATE/storager/` | 节点身份、引导凭据、组件 PKI、日志与信任锚 | 目录 700，私钥 600 |
@@ -203,5 +235,5 @@ sudo kurrent host check --role all    # 同机部署；分机时分别用 contro
 - nvmet-host 管理面走共享卷 UDS，不产生 TCP 监听。
 - 控制面容器不挂载 `docker.sock`。
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600。
-- Docker 发布端口不受 ufw 过滤；需要入站限制时在 `DOCKER-USER` 链收口。
+- Docker 发布端口不受 ufw 过滤；需要入站限制时在 `DOCKER-USER` 链集中配置。
 - PXE 网段按[部署](./deployment.md)页所述的边界隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。

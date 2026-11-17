@@ -2,7 +2,7 @@
 
 Kurrent organizes physical devices, storage nodes and a control plane into a bootable, migratable compute system. Devices hold no persistent state: on power-up they complete identity verification over the network, receive a system disk and boot parameters, and boot with NVMe-oF as the root device; system disks are provided by storage nodes, and block I/O stays between the device and the storage node.
 
-This page covers the roles, main data flows, trust boundaries, state ownership and failure domains.
+The system has three roles.
 
 ![Architecture](/architecture.svg)
 
@@ -14,7 +14,7 @@ The system is split along one clean line: the control plane handles identity, sc
 
 ### Controller
 
-The Controller is the brain of the cluster. The control-plane HTTP service listens only on an in-container unix socket; nginx exposes `:443` as the only external entry for the WebUI, the management API, boot-chain bare paths and iPXE menus, with `:80` only redirecting. dnsmasq runs on the host network and serves DHCP, TFTP and boot files. State is persisted as plain files (YAML / JSONL) in the state root outside the repository (`control-plane/state/`, `control-plane/config/`, `control-plane/dnsmasq/`); there is no database. The control-plane declaration is authoritative, and artifacts such as `dnsmasq.conf` are rendered from it at startup. The WebUI and CLI are just REST clients, and the state location is decoupled from the repository.
+The Controller is the brain of the cluster. The control-plane HTTP service listens only on an in-container unix socket; nginx exposes `:443` as the management entry for the WebUI and management API. Signed firmware uses `:4443` for boot HTTPS, which proxies only `/boot-vars`, `/devices/report` and `/devices/challenge`; `:80` only redirects. dnsmasq runs on the host network and serves DHCP, TFTP and boot files. State is persisted as plain files (YAML / JSONL) in the state root outside the repository (`control-plane/state/`, `control-plane/config/`, `control-plane/dnsmasq/`); there is no database. The control-plane declaration is authoritative, and artifacts such as `dnsmasq.conf` are rendered from it at startup. The WebUI and CLI are just REST clients, and the state location is decoupled from the repository.
 
 ### Storager
 
@@ -89,13 +89,13 @@ Device identity rests on the TPM AK, single-use nonce PCR quotes, the platform b
 
 The control-plane declaration and the node declaration are the only inputs; the former defines networking, PKI, the registration window and boot policy, while the latter defines the data directory, backend and NQN namespace. Runtime state lives under `<state>`, defaulting to `~/.local/state/kurrent` and pinned by `~/.kurrent/deployment.yaml`; ledgers, sessions, tokens, audit and PKI all live there, decoupled from the repository.
 
-Trust material also lives under the state root: three root CAs (users, nodes, control) issue human, component and control-plane certificates; the TOFU server certificate and CRLs serve nginx and the boot chain; node identity, bootstrap credentials, component PKI and logs live under `<state>/storager`. On first deployment the management credential is handed to the deploying user through the one-shot exchange at `<state>/control-plane/bootstrap`; the bundle is deleted once consumed, while the authoritative `admin.conf` stays in the control-plane state directory.
+Trust material also lives under the state root: three root CAs (users, nodes, control) issue human, component and control-plane certificates; server certificates and CRLs serve nginx, while the boot chain is anchored by the boot CA embedded in the signed firmware; node identity, bootstrap credentials, component PKI and logs live under `<state>/storager`. On first deployment the management credential is handed to the deploying user through the one-shot exchange at `<state>/control-plane/bootstrap`; the bundle is deleted once consumed, while the authoritative `admin.conf` stays in the control-plane state directory.
 
 Derived artifacts flow one way from authority: the dnsmasq configuration is rendered from `spec.networking`, the boot menu and default disk are projected by the control plane, and the WebUI and boot scripts are built from the repository. There is no database; the control plane is a single node with plain-file state, so state backup, file permissions and single-node failure boundaries are the deployment's responsibility. With state outside the repository, moving the checkout no longer affects ledgers or boot identities.
 
 ## Ports
 
-Ports are grouped by ownership to make the exposed surface explicit: the control-plane host offers 443 (80 only redirects) plus the DNS, DHCP and TFTP ports required for boot, while the management plane itself has no TCP listener; storage nodes expose 4840 and 4421, where 4840 accepts only control-plane mTLS and 4421 enforces TLS 1.3; devices need only DHCP, TFTP, HTTPS and the storage-node data plane.
+Ports are grouped by ownership to make the exposed surface explicit: the control-plane host offers 443 (management, 80 only redirects), 4443 (boot HTTPS) plus the DNS, DHCP and TFTP ports required for boot, while the management plane itself has no TCP listener; storage nodes expose 4840 and 4421, where 4840 accepts only control-plane mTLS and 4421 enforces TLS 1.3; devices need only DHCP, TFTP, HTTPS and the storage-node data plane.
 
 ### Control-Plane Host
 
@@ -104,7 +104,8 @@ Ports are grouped by ownership to make the exposed surface explicit: the control
 | 53 | UDP/TCP | dnsmasq DNS |
 | 67 / 69 | UDP | DHCP / TFTP |
 | 80 | TCP | 301 redirect to 443 only |
-| 443 | TCP | The only HTTPS entry |
+| 443 | TCP | Management entry: WebUI, management API and unsigned debugging scripts |
+| 4443 | TCP | Boot HTTPS: `/boot-vars`, `/devices/report`, `/devices/challenge`; boot segment only |
 | — | unix socket | Control-plane management plane; nginx and health checks |
 
 The control plane has no TCP listener and does not mount `docker.sock`.
@@ -137,13 +138,13 @@ Failure impact follows process ownership: a stopped control plane, nginx or dnsm
 
 ## Protocol Evolution
 
-The data plane has moved from iSCSI to NVMe-oF (NVMe/TCP). The firmware main branch carries the complete patch set (`0001`–`0010`), and cold boot has been verified on several distributions. The semantics — stateless compute, disk/machine decoupling and an identity chain from MAC to boot — do not depend on a particular protocol: the Storager backend is abstracted by the Agent, so replacing the transport does not touch the architecture. iSCSI has no live boot path on the main branch; its historical implementation lives in the `iscsi-classic` branch.
+The data plane has moved from iSCSI to NVMe-oF (NVMe/TCP). The firmware main branch carries the complete patch set (`0001`–`0011`), and cold boot has been verified on several distributions. The semantics — stateless compute, disk/machine decoupling and an identity chain from MAC to boot — do not depend on a particular protocol: the Storager backend is abstracted by the Agent, so replacing the transport does not touch the architecture. iSCSI has no live boot path on the main branch; its historical implementation lives in the `iscsi-classic` branch.
 
 ## Extension Points
 
 Storage backend differences are encapsulated inside the Agent, and the control plane only speaks HTTP; the boot menu, timeout and default disk are projected by the control plane and never written into the disk; firmware is built from patches in a separate repository and can be rebuilt on any upstream baseline. Future directions (high availability, IPv6, ARM, data disks) are in the [Roadmap](../about/roadmap.md).
 
-This page describes the architecture at the current stage: the better solution under today's constraints, not a final form. The goal is stateless cloud-native operation — compute, storage and identity decoupled from individual machines, so the system as a whole can be scheduled, migrated and rebuilt; today's components, protocols and deployment model are one implementation on that path and will keep changing. There is no best architecture, only a better one.
+The current architecture is a trade-off under today's constraints and will keep changing as they do. The goal is to decouple compute, storage and identity from individual machines so the system as a whole can be scheduled, migrated and rebuilt; the present components, protocols and deployment model are one way to get there.
 
 ## Further Reading
 
