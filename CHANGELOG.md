@@ -13,6 +13,14 @@
 
 ---
 
+## 2026-11-17
+
+### 变更
+
+- **依赖安全更新**：三个 Python 镜像的 `opentelemetry-api` 升级到 1.45.2（修复 traceparent 解析的二次时间复杂度拒绝服务，GHSA-mf5v-w3w3-f6cg）；控制面、agent、nvmet-host 的基础镜像更新到最新的 `python:3.11-slim` 摘要（Python 3.11.18、apt 3.0.4，修复 CVE-2026-109518）；nginx 镜像更新到最新 `nginx:1.31-alpine` 摘要，dnsmasq 基础镜像更新到 Alpine 3.24.4。
+- **CLI 工具链**：`cli/go.mod` 的 `toolchain` 升级到 `go1.27.4`（修复 net/http 的 `MaxBytesReader` 头部竞态导致 HTTP/1 服务端崩溃，GO-2026-6859）。
+- **WebUI 依赖**：vite 5.4 → 7.3.8、`@vitejs/plugin-react` 4 → 5.2.0、`react-router-dom` 6.30.6 → 7.18.5，修复开发服务器的路径读取与命令执行类公告，以及 react-router 的开放重定向与 SSR 反序列化注入；`npm audit` 归零。构建要求 Node.js 22.23.4+、24.22.1+ 或 26.12.1+（含 Brotli 解码器越界写修复 CVE-2026-111497），部署前置文档已同步。
+
 ## 2026-11-12
 
 ### 新增

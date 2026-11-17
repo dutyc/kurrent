@@ -3,7 +3,7 @@
 # 内核 nvmet target 始终在宿主（modprobe nvmet nvmet-tcp + 挂载 configfs），
 # 本镜像只承载 Python 管理进程：bind mount /sys/kernel/config 后，容器内 root
 # 写 configfs 是普通文件操作，无需 privileged（与 LIO 的 targetclid/dbus 依赖无关）。
-FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 WORKDIR /app
 

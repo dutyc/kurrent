@@ -5,7 +5,7 @@ docker==7.2.0
 cryptography==50.0.2
 pyyaml==6.0.3
 
-# 传递依赖（pip 解析结果，含安全修复：urllib3 2.8.0 / certifi 2026.10.19 / opentelemetry-api 1.45.1）
+# 传递依赖（pip 解析结果，含安全修复：urllib3 2.8.0 / certifi 2026.10.19 / opentelemetry-api 1.45.2）
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -15,7 +15,7 @@ charset-normalizer==3.5.2
 click==8.5.0
 h11==0.16.0
 idna==3.20
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
 packaging==26.3
 pycparser==3.0
 pydantic==2.13.5

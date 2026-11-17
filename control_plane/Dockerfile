@@ -1,4 +1,4 @@
-FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 # apt 走阿里云源（国内网络环境更新更快）。bookworm 源在 deb822 格式的
 # debian.sources（URIs 字段），老镜像才在 sources.list；只替换域名，

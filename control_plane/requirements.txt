@@ -5,7 +5,7 @@ httpx==0.28.1
 PyYAML==6.0.3
 cryptography==50.0.2
 
-# 传递依赖（pip 解析结果，含安全修复：certifi 2026.10.19 / opentelemetry-api 1.45.1）
+# 传递依赖（pip 解析结果，含安全修复：certifi 2026.10.19 / opentelemetry-api 1.45.2）
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -15,7 +15,7 @@ click==8.5.0
 h11==0.16.0
 httpcore==1.0.9
 idna==3.20
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
 packaging==26.3
 pycparser==3.0
 pydantic==2.13.5
