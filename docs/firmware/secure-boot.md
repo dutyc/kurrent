@@ -51,13 +51,13 @@ BOOT_CA_CERT=/path/to/boot-ca.crt \
 
 - 设备上报 `sb=1` 并携带有效 TPM AK，才能进入设备池。
 - `/api/cp/boot-assets` 的 `secureboot` 段为 `ok`。
-- 首次冷启动到 iPXE 菜单、完成证明并进入 `login:`；负向用例见[故障排查](../guide/troubleshooting.md)。
+- 首次冷启动到 iPXE 菜单、完成证明并进入 `login:`；负向用例见[故障排查](../tasks/troubleshooting.md)。
 
-## 相关页面
+## 接下来
 
 - [固件概述](./index.md)、[固件组成](./composition.md)
 - [引导信任](./trust.md)
 - [构建](./build.md)、[部署与预置](./deploy.md)
 - [设备身份与证明](../concepts/identity.md)
 - [引导链](../concepts/boot-chain.md)
-- [安全模型](../architecture/security.md)
+- [安全模型](../concepts/architecture/security.md)

@@ -179,3 +179,60 @@
     max-height: none;
   }
 }
+
+/* —— 说明框：以加粗标签开头的引用块渲染为提示卡 —— */
+.vp-doc blockquote:has(> p:first-child > strong:first-child) {
+  margin: 1.25rem 0;
+  padding: 0.8rem 1.05rem;
+  border: 1px solid var(--vp-c-divider);
+  border-left: 3px solid var(--vp-c-text-1);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+}
+
+.vp-doc blockquote:has(> p:first-child > strong:first-child) > p {
+  margin: 0;
+  font-size: 0.95em;
+  line-height: 1.7;
+}
+
+.vp-doc blockquote:has(> p:first-child > strong:first-child) > p + p {
+  margin-top: 0.45em;
+}
+
+.vp-doc blockquote:has(> p:first-child > strong:first-child) > p:first-child > strong:first-child {
+  display: inline-block;
+  margin-right: 0.55em;
+  padding: 0.05em 0.55em;
+  font-family: var(--vp-font-family-base);
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--vp-c-text-1);
+  border: 1px solid var(--vp-c-text-3);
+  border-radius: 999px;
+  vertical-align: 0.06em;
+}
+
+/* —— 代码块复制按钮：缩小尺寸 —— */
+.vp-doc [class*='language-'] > button.copy {
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background-size: 15px;
+}
+
+/* —— 复制成功提示：与按钮同高、加粗，更醒目 —— */
+.vp-doc [class*='language-'] > button.copy.copied::before,
+.vp-doc [class*='language-'] > button.copy:hover.copied::before {
+  height: 28px;
+  line-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  background-color: var(--vp-c-bg-elv);
+}

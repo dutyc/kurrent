@@ -29,7 +29,7 @@ After exchanging a certificate or token for a session, the client carries only t
 - deleting the entry or incrementing the epoch invalidates sessions immediately;
 - write requests require `Origin` and `Host` to match.
 
-## Related Pages
+## What's next
 
 - Back to [Identity and Access](../identity.md)
 - User certificates and the three CAs: [People and Certificates](./people.md)

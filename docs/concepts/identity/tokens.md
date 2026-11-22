@@ -1,6 +1,6 @@
 # 管理 token 与会话
 
-客户端证书适合长期身份，但自动化脚本与浏览器需要更轻的凭据。因此除客户端证书外，管理面还接受 Bearer token 与 Cookie 会话。三种凭据由同一条认证器链处理，产出统一的 `Identity` 供授权判定。
+管理面接受三种凭据：mTLS 客户端证书、**管理 token** 与 Cookie **会话**。三种凭据由同一条认证器链处理，产出统一的 `Identity` 供授权判定。
 
 | 凭据 | 载体 | 有效期与存储 |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ kurrent token create --usage admin [--scope admin,readonly,enroll] [--ttl 24h]
 
 Cookie 本身不含身份信息，只含一个指向服务端登记的索引。身份以服务端台账为准，因此吊销不需要等 Cookie 过期。
 
-## 相关页面
+## 接下来
 
 - 返回[身份与访问](../identity.md)
 - 人员证书与三类 CA：[人员与证书](./people.md)

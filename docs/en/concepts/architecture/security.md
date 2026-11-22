@@ -125,11 +125,11 @@ DHHC-1 keys, derived PSKs and CA keys exist in plaintext where the chain require
 
 Kurrent does not add another application-layer encryption layer. Deployments own disk/backup encryption, host root boundaries and physical security.
 
-## Related Pages
+## What's next
 
-- Admission decisions at boot: [Boot Chain](../concepts/boot-chain.md)
-- Firmware trust boundary and residual risk: [Device Identity and Trust](../firmware/index.md)
-- Identity types and lifecycle: [Identity and Access](../concepts/identity.md)
-- Credentials and the data plane: [Storage and Data Plane](../concepts/storage.md)
-- Deployment steps and the security checklist: [Deployment](../guide/deployment.md)
+- Admission decisions at boot: [Boot Chain](../boot-chain.md)
+- Firmware trust boundary and residual risk: [Device Identity and Trust](../../firmware/index.md)
+- Identity types and lifecycle: [Identity and Access](../identity.md)
+- Credentials and the data plane: [Storage and Data Plane](../storage.md)
+- Deployment steps and the security checklist: [Deployment](../../setup/deployment.md)
 - Components and ports: [Architecture](./index.md)

@@ -29,7 +29,7 @@ pooled ──bind──► bound ──revoke──► revoked
 - Automatic admission happens only while the registration window is open and the report carries a valid AK; once the window closes, reports from known devices still update the fingerprint, while unknown devices are neither pooled nor written to the ledger. Manual registration and revocation cleanup are not limited by the window.
 - A `revoked` device no longer accepts reports; the dnsmasq binding file writes `MAC,ignore`, so a revoked device gets no lease.
 
-## Related Pages
+## What's next
 
 - Back to the [Entity Model](../entities.md)
 - Binding and rebinding: [Binding and Placement](./binding.md)

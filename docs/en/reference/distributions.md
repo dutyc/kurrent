@@ -1,6 +1,6 @@
 # Distribution Matrix
 
-The firmware repository provides a self-contained master-image script per distribution, all following the same six phases A–F. The tables below summarize the distributions verified through a full cold boot, the acceptance criteria and family differences. Master preparation is documented in [System Disk Customization](../guide/system-disk.md).
+The firmware repository provides a self-contained master-image script per distribution, all following the same six phases A–F. The tables below summarize the distributions verified through a full cold boot, the acceptance criteria and family differences. Master preparation is documented in [System Disk Customization](../tasks/system-disk.md).
 
 ## Verified Distributions
 
@@ -78,9 +78,9 @@ RHEL 9.x has not been tested. Its 5.14 kernel predates the upstream NVMe/TCP TLS
 4. Complete PXE cold-boot acceptance on an isolated network: two controller records on the target, the packet-capture criteria and a login prompt.
 5. After component changes, rerun `embed-components.py` and run `test/test-nbft-connect-nbct.sh` under both dash and bash.
 
-## Related Pages
+## What's next
 
-- [System Disk Customization](../guide/system-disk.md)
+- [System Disk Customization](../tasks/system-disk.md)
 - [Firmware Overview](../firmware/index.md)
 - [Firmware Contract](./firmware-contract.md)
 - Firmware distribution matrix: <https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>

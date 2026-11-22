@@ -44,9 +44,9 @@ Platform-side identity semantics and failure reasons are in [Device Identity](..
 - There is no rollback protection: a previously signed firmware still verifies, so rollback control depends on the release process.
 - Some PXE firmware does not verify the downloaded network boot program; prefer local media or controlled HTTP boot where possible.
 
-## Related Pages
+## What's next
 
 - [Firmware Overview](./index.md)
 - [Secure Boot Provisioning](./secure-boot.md)
 - [Firmware Contract](../reference/firmware-contract.md)
-- [Security Model](../architecture/security.md)
+- [Security Model](../concepts/architecture/security.md)

@@ -47,7 +47,7 @@ kurrent join <cp-url> [--token <token>]
 
 A failed declaration validation writes no files.
 
-## Related Pages
+## What's next
 
 - Back to [Declarative Configuration](../configuration.md)
 - Control-plane declaration: [Control-Plane Declaration](./control-plane.md)

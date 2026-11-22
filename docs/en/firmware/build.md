@@ -71,7 +71,7 @@ sha256sum -c SHA256SUMS
 
 Signed artifact hashes come from `artifact_sha256` in `dist/secureboot/manifest.json`, and `/boot-assets` compares them with the actual image hash. Release assets use flat names (such as `pxe-uefi-snponly.efi`) while the checksum file keeps the `pxe-uefi/` directory layout; place downloads in that layout before verifying, or compare the target file's digest alone.
 
-## Related Pages
+## What's next
 
 - Back to the [Firmware Overview](./index.md)
 - Deploying artifacts and first boot: [Deployment and Provisioning](./deploy.md)

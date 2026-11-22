@@ -201,12 +201,12 @@ When the `sanboot` URI port equals `tls_trsvcid`, firmware performs a TLS 1.3 PS
 
 The default path encrypts both the firmware segment and the kernel segment. HTTPS boot assets still use iPXE native TLS (up to 1.2), independent of data-plane TLS 1.3.
 
-## Related pages
+## What's next
 
 - [Firmware Overview](../firmware/index.md)
 - [Firmware Contract](./firmware-contract.md)
 - [Build](../firmware/build.md), [Deployment and Provisioning](../firmware/deploy.md)
 - [Distribution Matrix](./distributions.md)
 - [Boot Chain](../concepts/boot-chain.md)
-- [Security Model](../architecture/security.md)
+- [Security Model](../concepts/architecture/security.md)
 - Firmware repository source, patches and research notes: <https://github.com/dutyc/kurrent-firmware>

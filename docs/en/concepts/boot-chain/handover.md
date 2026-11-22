@@ -22,7 +22,7 @@ No machine identity is written into the disk: identity, credentials and connecti
 
 > NBCT is produced by firmware; iPXE-side NBFT generation is still pending. The verified whole-machine chain injects an NBFT table to emulate the "firmware pre-generated" stage.
 
-## Related Pages
+## What's next
 
 - Back to the [Boot Chain](../boot-chain.md)
 - How the connection is established: [Data Plane](./data-plane.md)

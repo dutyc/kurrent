@@ -204,9 +204,9 @@ Positional arguments can be mixed freely with `--key value`, `--key=value`, and 
 | `join` reports a missing controller trust anchor | Supply the controller `server.crt` with `--cp-ca` (see the split-host step in deployment) |
 | Token invalid or expired | Run `token create` again; confirm `--agent-id` matches `<state>/storager/state/agent.id` |
 
-## Related pages
+## What's next
 
-- [Deployment](../guide/deployment.md)
-- [Daily Operations](../guide/operations.md)
+- [Deployment](../setup/deployment.md)
+- [Daily Operations](../tasks/operations.md)
 - [Configuration Reference](./configuration.md)
 - [API Reference](./api/index.md)

@@ -51,13 +51,13 @@ The loader after `sanboot` is decided by the distribution signing chain: the mas
 
 - The device reports `sb=1` with a valid TPM AK before it can enter the device pool.
 - The `secureboot` section of `/api/cp/boot-assets` is `ok`.
-- The first cold boot reaches the iPXE menu, passes attestation, and reaches `login:`; negative cases are in [Troubleshooting](../guide/troubleshooting.md).
+- The first cold boot reaches the iPXE menu, passes attestation, and reaches `login:`; negative cases are in [Troubleshooting](../tasks/troubleshooting.md).
 
-## Related pages
+## What's next
 
 - [Firmware Overview](./index.md), [Firmware Composition](./composition.md)
 - [Boot Trust](./trust.md)
 - [Build](./build.md), [Deployment and Provisioning](./deploy.md)
 - [Identity and Access](../concepts/identity.md)
 - [Boot Chain](../concepts/boot-chain.md)
-- [Security Model](../architecture/security.md)
+- [Security Model](../concepts/architecture/security.md)

@@ -1,6 +1,6 @@
 # Kurrent (周流)
 
-![Cloud Native](https://img.shields.io/badge/Cloud%20Native-True%20Cloud%20Native-18181b) [![NVMe-oF](https://img.shields.io/badge/Data%20Plane-NVMe--oF%20First-00D4FF)](https://dutyc.github.io/kurrent/guide/deployment.html) [![Stars](https://img.shields.io/github/stars/dutyc/kurrent)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent)](LICENSE) [![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-2563eb)](https://dutyc.github.io/kurrent/)
+![Cloud Native](https://img.shields.io/badge/Cloud%20Native-True%20Cloud%20Native-18181b) [![NVMe-oF](https://img.shields.io/badge/Data%20Plane-NVMe--oF%20First-00D4FF)](https://dutyc.github.io/kurrent/setup/deployment.html) [![Stars](https://img.shields.io/github/stars/dutyc/kurrent)](https://github.com/dutyc/kurrent/stargazers) [![Release](https://img.shields.io/github/v/release/dutyc/kurrent)](https://github.com/dutyc/kurrent/releases) [![License](https://img.shields.io/github/license/dutyc/kurrent)](LICENSE) [![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-2563eb)](https://dutyc.github.io/kurrent/)
 
 [中文版](./README.zh-CN.md) | [English](./README.md)
 
@@ -17,23 +17,23 @@ Kurrent 是一套云原生无状态裸金属交付范式。它将“无状态”
 
 ## 安全
 
-设备身份由 TPM 内的 AK 承载：设备在注册窗口内上报公钥，每次引导针对一次性 nonce 提交 PCR 0/2/4/7 quote，证明通过后才下发凭据；无 TPM 或未开启 Secure Boot 的设备在注册期被拒绝入池。Secure Boot 以 UEFI `db` 校验签名首跳，引导 HTTPS 只信任构建时固定的 boot CA。管理面使用双向 TLS，NVMe/TCP 数据面使用 TLS 1.3 与按 Worker 跟盘的 DHHC-1 凭据。详见[安全模型](https://dutyc.github.io/kurrent/architecture/security.html)。
+设备身份由 TPM 内的 AK 承载：设备在注册窗口内上报公钥，每次引导针对一次性 nonce 提交 PCR 0/2/4/7 quote，证明通过后才下发凭据；无 TPM 或未开启 Secure Boot 的设备在注册期被拒绝入池。Secure Boot 以 UEFI `db` 校验签名首跳，引导 HTTPS 只信任构建时固定的 boot CA。管理面使用双向 TLS，NVMe/TCP 数据面使用 TLS 1.3 与按 Worker 跟盘的 DHHC-1 凭据。详见[安全模型](https://dutyc.github.io/kurrent/concepts/architecture/security.html)。
 
 ## 快速开始
 
-数分钟内拉起控制面并接入存储节点，见文档站的[部署](https://dutyc.github.io/kurrent/guide/deployment.html)章节。`kurrent` CLI 随 [Releases](https://github.com/dutyc/kurrent/releases) 提供 Linux amd64/arm64 与 Windows amd64 预编译二进制。
+数分钟内拉起控制面并接入存储节点，见文档站的[部署](https://dutyc.github.io/kurrent/setup/deployment.html)章节。`kurrent` CLI 随 [Releases](https://github.com/dutyc/kurrent/releases) 提供 Linux amd64/arm64 与 Windows amd64 预编译二进制。
 
 ## 文档
 
-[文档站](https://dutyc.github.io/kurrent/)覆盖部署、系统盘定制、日常运维、故障排查与参考手册：[CLI 参考](https://dutyc.github.io/kurrent/reference/cli.html)、[API 参考](https://dutyc.github.io/kurrent/reference/api/)、[架构总览](https://dutyc.github.io/kurrent/architecture/)。
+[文档站](https://dutyc.github.io/kurrent/)覆盖部署、系统盘定制、日常运维、故障排查与参考手册：[CLI 参考](https://dutyc.github.io/kurrent/reference/cli.html)、[API 参考](https://dutyc.github.io/kurrent/reference/api/)、[架构总览](https://dutyc.github.io/kurrent/concepts/architecture/)。
 
 ## 交付流程
 
-设备首启入池；在 WebUI 完成绑定 Worker、创建系统盘、设置默认盘后即可开机。一台 Worker 可挂多块系统盘并在菜单中切换。母盘与系统盘制备、首次启动见[系统盘定制](https://dutyc.github.io/kurrent/guide/system-disk.html)与[部署](https://dutyc.github.io/kurrent/guide/deployment.html)。整机冷启动已在 **Debian 12/13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2、openSUSE Leap 16.0 与 Arch Linux（rolling）** 验证，详见[发行版矩阵](https://dutyc.github.io/kurrent/reference/distributions.html)，验证范围不构成发行版限制。
+设备首启入池；在 WebUI 完成绑定 Worker、创建系统盘、设置默认盘后即可开机。一台 Worker 可挂多块系统盘并在菜单中切换。母盘与系统盘制备、首次启动见[系统盘定制](https://dutyc.github.io/kurrent/tasks/system-disk.html)与[部署](https://dutyc.github.io/kurrent/setup/deployment.html)。整机冷启动已在 **Debian 12/13、Ubuntu 24.04/26.04、Fedora 44、AlmaLinux 10.2、openSUSE Leap 16.0** 验证，详见[发行版矩阵](https://dutyc.github.io/kurrent/reference/distributions.html)，验证范围不构成发行版限制。
 
 ## 固件仓库
 
-引导固件由配套仓库 **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)** 构建：Kurrent 让算力无状态，固件仓库让引导固件无状态。构建与部署步骤见[固件构建与部署](https://dutyc.github.io/kurrent/firmware/build-deploy.html)。
+引导固件由配套仓库 **[Kurrent Firmware](https://github.com/dutyc/kurrent-firmware)** 构建：Kurrent 让算力无状态，固件仓库让引导固件无状态。构建与部署步骤见[固件构建与部署](https://dutyc.github.io/kurrent/firmware/index.html)。
 
 ## 路线图
 

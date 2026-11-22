@@ -35,9 +35,9 @@ Every management request writes one audit record with the principal class, princ
 
 Audit fields and alarm delivery are covered in [Audit and Alarms](./identity/audit.md).
 
-## Related Pages
+## What's next
 
 - How the boot chain uses device identity: [Boot Chain](./boot-chain.md)
 - Declared users and groups: [Declarative Configuration](./configuration.md)
-- Threat model and residual risk: [Security Model](../architecture/security.md)
-- Day-to-day commands: [Operations](../guide/operations.md)
+- Threat model and residual risk: [Security Model](../concepts/architecture/security.md)
+- Day-to-day commands: [Operations](../tasks/operations.md)

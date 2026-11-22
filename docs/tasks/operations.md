@@ -1,6 +1,6 @@
 # 日常运维
 
-部署完成后，日常操作集中在声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署见[部署](./deployment.md)，跨组件故障定位见[故障排查](./troubleshooting.md)。
+部署完成后，日常操作集中在声明修改、身份与凭据、设备与节点生命周期、升级回滚、备份与可观测性。首次部署见[部署](../setup/deployment.md)，跨组件故障定位见[故障排查](./troubleshooting.md)。
 
 ## 配置修改
 
@@ -236,4 +236,4 @@ sudo kurrent host check --role all    # 同机部署；分机时分别用 contro
 - 控制面容器不挂载 `docker.sock`。
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 应为 600。
 - Docker 发布端口不受 ufw 过滤；需要入站限制时在 `DOCKER-USER` 链集中配置。
-- PXE 网段按[部署](./deployment.md)页所述的边界隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。
+- PXE 网段按[部署](../setup/deployment.md)页所述的边界隔离，并启用 DHCP snooping、动态 ARP 检测与端口安全。

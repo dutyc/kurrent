@@ -205,7 +205,7 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 - 首跳依赖 Secure Boot 验证签名固件；签名固件只信任构建时嵌入的 boot CA，不使用首次连接信任。
 - TPM 或主板被清除/更换后原 AK 丢失，需删除登记后重新入池；退役设备应清除 `server-fingerprint`。
 
-## 相关页面
+## 接下来
 
 - [固件概述](../firmware/index.md)
 - [固件平台参考](./firmware-platform.md)
@@ -213,5 +213,5 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 - [部署与预置](../firmware/deploy.md)
 - [设备身份](../firmware/index.md#设备身份)
 - [引导链](../concepts/boot-chain.md)
-- [安全模型](../architecture/security.md)
+- [安全模型](../concepts/architecture/security.md)
 - [API 参考](./api/index.md)

@@ -216,9 +216,9 @@ kurrent workers credential revoke storage-worker-01
 | `join` 报缺少控制面信任锚 | 用 `--cp-ca` 提供控制面的 `server.crt`（见部署页分机步骤） |
 | token 无效或已过期 | 重新 `token create`；确认 `--agent-id` 与节点状态文件 `<state>/storager/state/agent.id` 一致 |
 
-## 相关页面
+## 接下来
 
-- [部署](../guide/deployment.md)
-- [日常运维](../guide/operations.md)
+- [部署](../setup/deployment.md)
+- [日常运维](../tasks/operations.md)
 - [配置参考](./configuration.md)
 - [API 参考](./api/index.md)

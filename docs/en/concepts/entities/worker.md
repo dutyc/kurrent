@@ -23,7 +23,7 @@ A Worker is a compute identity. `worker_id` doubles as the hostname and is the i
 | `partial` | Only a bound device, or only a system disk |
 | `idle` | Neither |
 
-## Related Pages
+## What's next
 
 - Back to the [Entity Model](../entities.md)
 - System disks and the default disk: [System Disks](./system-disk.md)

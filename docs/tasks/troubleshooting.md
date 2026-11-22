@@ -1,6 +1,6 @@
 # 故障排查
 
-故障按现象定位：先判断失败发生在哪一段边界，再进入对应组件检查。任务页保留局部失败表，这里负责跨组件定位、证据采集与恢复路径。
+故障按现象定位：先判断失败发生在哪一段边界，再进入对应组件检查。单组件的局部失败表见对应任务页，跨组件定位、证据采集与恢复路径集中于此。
 
 ## 先定位失败边界
 
@@ -139,9 +139,9 @@ kurrent cert list
 
 审计写入失败时请求返回 503（fail-closed）。提交问题时附上时间窗口、设备 MAC 与 Worker id，不要附带私钥、token、PSK 或 `admin.conf`。
 
-## 相关页面
+## 接下来
 
-- [部署](../guide/deployment.md)
+- [部署](../setup/deployment.md)
 - [日常运维](./operations.md)
 - [引导链](../concepts/boot-chain.md)
 - [存储与数据面](../concepts/storage.md)

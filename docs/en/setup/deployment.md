@@ -4,11 +4,11 @@
 
 **Done when** the cold boot reaches a login prompt.
 
-References: [Configuration](../reference/configuration.md) (declarations), [CLI](../reference/cli.md) (commands), [Architecture](../architecture/index.md) (ports), [Security Model](../architecture/security.md) (trust boundaries).
+References: [Configuration](../reference/configuration.md) (declarations), [CLI](../reference/cli.md) (commands), [Architecture](../concepts/architecture/index.md) (ports), [Security Model](../concepts/architecture/security.md) (trust boundaries).
 
 ## Preparation
 
-- Hosts and devices meet the [deployment prerequisites](../reference/host-prerequisites.md): x86_64 UEFI, TPM 2.0, Secure Boot, SNP NIC;
+- Hosts and devices meet the [deployment prerequisites](../setup/host-prerequisites.md): x86_64 UEFI, TPM 2.0, Secure Boot, SNP NIC;
 - the PXE segment is dedicated and the controller is its only DHCP/TFTP/4443 provider;
 - the repository, `kurrent` CLI and WebUI build dependencies are ready (installation in the [CLI Reference](../reference/cli.md#install-and-credentials));
 - both repositories use `main`; devices without a TPM use `legacy/no-tpm` on both sides (see [Repositories and Branches](../reference/branches.md)).
@@ -19,7 +19,7 @@ Run the commands below from the main repository root; to fetch it:
 git clone https://github.com/dutyc/kurrent && cd kurrent
 ```
 
-A co-located deployment shares one state root; it defaults to `~/.local/state/kurrent`, and backup is in [Operations](./operations.md#backup-and-restore).
+A co-located deployment shares one state root; it defaults to `~/.local/state/kurrent`, and backup is in [Operations](../tasks/operations.md#backup-and-restore).
 
 ### Network
 
@@ -31,7 +31,7 @@ A co-located deployment shares one state root; it defaults to `~/.local/state/ku
 
 Example: PXE `192.168.80.0/24`, controller `192.168.80.1`, pool `.50–.100`, gateway `.2`, DNS `223.5.5.5`; management `192.168.1.10`, storage `192.168.1.20`.
 
-The full port table is in [Architecture](../architecture/index.md#ports).
+The full port table is in [Architecture](../concepts/architecture/index.md#ports).
 
 ### Host dependencies
 
@@ -110,7 +110,7 @@ curl -ks https://127.0.0.1/ | grep -q '<div id="root">'
 kurrent config status
 ```
 
-Open `https://<controller-management-address>/` and sign in with a token from `kurrent token create --usage admin`; browser mTLS import is in [Operations](./operations.md#management-entry-points).
+Open `https://<controller-management-address>/` and sign in with a token from `kurrent token create --usage admin`; browser mTLS import is in [Operations](../tasks/operations.md#management-entry-points).
 
 The CLI credential is installed by `kurrent init`; after rotation re-run `kurrent init` or `kurrent credentials install`.
 
@@ -215,6 +215,12 @@ Before starting, generate the offline signing key and import the site signing ce
 
 ### 3.1 Firmware
 
+Build the signed first hop in the firmware repository, then place the artifacts in the platform repository's TFTP root:
+
+```bash
+git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
+```
+
 ```bash
 # Firmware repository: the boot CA comes from the controller state root
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
@@ -260,7 +266,7 @@ Run these on the controller with the `api` helper from 1.3; every step also work
 
 ### 4.1 Master image
 
-The master must be a whole-disk image (GPT, ESP and root partition) with `_tpl_` in the filename, placed in the storage node's `diskDir`; partition images, archives and installation media cannot be used directly. Building it is in [System Disk Customization](./system-disk.md).
+The master must be a whole-disk image (GPT, ESP and root partition) with `_tpl_` in the filename, placed in the storage node's `diskDir`; partition images, archives and installation media cannot be used directly. Building it is in [System Disk Customization](../tasks/system-disk.md).
 
 ```bash
 # Build host: convert qcow2 to a whole-disk raw image (skip if already raw)
@@ -309,7 +315,7 @@ Without a default disk `/boot-vars` returns `menu-default=reboot`.
 DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 → GRUB → kernel → initramfs (NBFT/NBCT) → rootfs → login
 ```
 
-For an empty menu, a data-plane connection failure, an authentication failure or `0x7f22208e`, see [Troubleshooting](./troubleshooting.md); for `0x7f22208e` check that `gpt` is `4k` in `/masters` first.
+For an empty menu, a data-plane connection failure, an authentication failure or `0x7f22208e`, see [Troubleshooting](../tasks/troubleshooting.md); for `0x7f22208e` check that `gpt` is `4k` in `/masters` first.
 
 ## Security Checklist
 

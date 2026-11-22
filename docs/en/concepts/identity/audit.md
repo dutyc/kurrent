@@ -21,8 +21,8 @@ Eight event classes are written as `event=alarm`:
 
 With `KURRENT_CP_ALARM_WEBHOOK` set, alarm events are POSTed as JSON by a background queue; delivery stays outside the request path.
 
-## Related Pages
+## What's next
 
 - Back to [Identity and Access](../identity.md)
-- Audit constraints in the threat model: [Security Model](../../architecture/security.md)
-- Alarm troubleshooting: [Troubleshooting](../../guide/troubleshooting.md)
+- Audit constraints in the threat model: [Security Model](../../concepts/architecture/security.md)
+- Alarm troubleshooting: [Troubleshooting](../../tasks/troubleshooting.md)

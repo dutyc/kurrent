@@ -12,15 +12,23 @@ const zhSidebar = [
     text: '入门',
     collapsed: false,
     items: [
-      { text: '项目概述', link: '/guide/overview' },
-      { text: '架构总览', link: '/architecture/' },
+      { text: '部署前置', link: '/setup/host-prerequisites' },
+      { text: '部署与首次启动', link: '/setup/deployment' },
     ],
   },
   {
     text: '概念',
     collapsed: false,
     items: [
+      { text: '概述', link: '/concepts/overview' },
       {
+        text: '架构',
+        collapsed: true,
+        items: [
+          { text: '架构总览', link: '/concepts/architecture/' },
+          { text: '安全模型', link: '/concepts/architecture/security' },
+        ],
+      },      {
         text: '实体模型',
         collapsed: true,
         items: [
@@ -74,24 +82,16 @@ const zhSidebar = [
           { text: '漂移与覆盖', link: '/concepts/configuration/drift' },
         ],
       },
-      { text: '安全模型', link: '/architecture/security' },
     ],
   },
   {
-    text: '部署',
+    text: '任务',
     collapsed: false,
     items: [
-      { text: '部署前置', link: '/reference/host-prerequisites' },
-      { text: '部署与首次启动', link: '/guide/deployment' },
-      { text: '系统盘定制', link: '/guide/system-disk' },
-    ],
-  },
-  {
-    text: '运维',
-    collapsed: false,
-    items: [
-      { text: '日常运维', link: '/guide/operations' },
-      { text: '故障排查', link: '/guide/troubleshooting' },
+      { text: '定制母盘', link: '/tasks/system-disk' },
+      { text: '从母盘创建系统盘', link: '/tasks/create-system-disk' },
+      { text: '日常运维', link: '/tasks/operations' },
+      { text: '故障排查', link: '/tasks/troubleshooting' },
     ],
   },
   {
@@ -142,15 +142,23 @@ const enSidebar = [
     text: 'Getting Started',
     collapsed: false,
     items: [
-      { text: 'Overview', link: '/en/guide/overview' },
-      { text: 'Architecture', link: '/en/architecture/' },
+      { text: 'Deployment Prerequisites', link: '/en/setup/host-prerequisites' },
+      { text: 'Deployment and First Boot', link: '/en/setup/deployment' },
     ],
   },
   {
     text: 'Concepts',
     collapsed: false,
     items: [
+      { text: 'Overview', link: '/en/concepts/overview' },
       {
+        text: 'Architecture',
+        collapsed: true,
+        items: [
+          { text: 'Architecture Overview', link: '/en/concepts/architecture/' },
+          { text: 'Security Model', link: '/en/concepts/architecture/security' },
+        ],
+      },      {
         text: 'Entity Model',
         collapsed: true,
         items: [
@@ -204,24 +212,16 @@ const enSidebar = [
           { text: 'Drift and Overrides', link: '/en/concepts/configuration/drift' },
         ],
       },
-      { text: 'Security Model', link: '/en/architecture/security' },
     ],
   },
   {
-    text: 'Deployment',
+    text: 'Tasks',
     collapsed: false,
     items: [
-      { text: 'Deployment Prerequisites', link: '/en/reference/host-prerequisites' },
-      { text: 'Deployment and First Boot', link: '/en/guide/deployment' },
-      { text: 'System Disk Customization', link: '/en/guide/system-disk' },
-    ],
-  },
-  {
-    text: 'Operations',
-    collapsed: false,
-    items: [
-      { text: 'Operations', link: '/en/guide/operations' },
-      { text: 'Troubleshooting', link: '/en/guide/troubleshooting' },
+      { text: 'Customize a Master Image', link: '/en/tasks/system-disk' },
+      { text: 'Create a System Disk from a Master Image', link: '/en/tasks/create-system-disk' },
+      { text: 'Operations', link: '/en/tasks/operations' },
+      { text: 'Troubleshooting', link: '/en/tasks/troubleshooting' },
     ],
   },
   {
@@ -345,7 +345,6 @@ export default defineConfig({
         logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: '首页', link: '/' },
-          { text: '项目概述', link: '/guide/overview' },
           { text: '路线图', link: '/about/roadmap' },
           { text: '参与贡献', link: '/about/contributing' },
         ],
@@ -372,7 +371,6 @@ export default defineConfig({
         logo: { light: '/logo.svg', dark: '/logo-dark.svg' },
         nav: [
           { text: 'Home', link: '/en/' },
-          { text: 'Overview', link: '/en/guide/overview' },
           { text: 'Roadmap', link: '/en/about/roadmap' },
           { text: 'Contributing', link: '/en/about/contributing' },
         ],

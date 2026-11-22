@@ -20,8 +20,8 @@ The storage node's Agent and nvmet-host use certificates issued by the nodes CA.
 
 Recovering a revoked node: issue a new bootstrap token and rerun `kurrent join`. The agent startup self-check discovers the local certificate in the public CRL and re-enrolls with the new token.
 
-## Related Pages
+## What's next
 
 - Back to [Identity and Access](../identity.md)
 - User certificates and the three CAs: [People and Certificates](./people.md)
-- Node join steps: [Deployment](../../guide/deployment.md)
+- Node join steps: [Deployment](../../setup/deployment.md)

@@ -46,9 +46,9 @@ UEFI 在执行首跳之前用 `db` 校验其签名。签名证书是一次性预
 - 不做防回滚：旧版本签名固件仍可通过校验，回滚控制依赖发布流程。
 - 部分 PXE 固件不校验下载的网络引导程序；条件允许时优先使用本地介质或受控 HTTP 引导。
 
-## 相关页面
+## 接下来
 
 - [固件概述](./index.md)
 - [Secure Boot 预置](./secure-boot.md)
 - [固件契约](../reference/firmware-contract.md)
-- [安全模型](../architecture/security.md)
+- [安全模型](../concepts/architecture/security.md)

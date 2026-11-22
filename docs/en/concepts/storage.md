@@ -30,9 +30,9 @@ There is exactly one data-plane path between a device and a storage node: the fi
 
 Ports and readiness conditions are covered in [Data Plane and Readiness](./storage/data-plane.md).
 
-## Related Pages
+## What's next
 
 - The system-disk object and the default disk: [System Disks](./entities/system-disk.md)
 - Credential projection at boot: [Boot Chain](./boot-chain.md)
-- Node deployment and host prerequisites: [Deployment](../guide/deployment.md)
-- Credential operations: [Operations](../guide/operations.md)
+- Node deployment and host prerequisites: [Deployment](../setup/deployment.md)
+- Credential operations: [Operations](../tasks/operations.md)

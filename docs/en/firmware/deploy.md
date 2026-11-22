@@ -4,8 +4,8 @@ A signed artifact has to enter the device's boot path — a PXE segment or local
 
 ## Goals and Prerequisites
 
-- the target satisfies the [bare-metal requirements](../reference/host-prerequisites.md#bare-metal-requirements): x86_64 UEFI, TPM 2.0, Secure Boot enabled and the site signing certificate imported into `db`; legacy BIOS (Legacy/CSM) boot is no longer supported;
-- the control plane, dnsmasq and the PXE segment are set up as described in [Deployment](../guide/deployment.md);
+- the target satisfies the [bare-metal requirements](../setup/host-prerequisites.md#bare-metal-requirements): x86_64 UEFI, TPM 2.0, Secure Boot enabled and the site signing certificate imported into `db`; legacy BIOS (Legacy/CSM) boot is no longer supported;
+- the control plane, dnsmasq and the PXE segment are set up as described in [Deployment](../setup/deployment.md);
 - signed artifacts and `manifest.json` were produced as described in [Build](./build.md).
 
 ## Deployment Paths
@@ -36,7 +36,7 @@ A signed artifact has to enter the device's boot path — a PXE segment or local
 3. In the device UEFI settings, enable the network stack and Secure Boot, and put network boot first.
 4. Boot the device and confirm DHCP assignment, the TFTP first-stage download, and the first stage's report and challenge over 4443.
 
-TFTP serves only the first stage `snponly.efi` (plus the `boot.ipxe` pointer); the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../architecture/security.md). Machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage.
+TFTP serves only the first stage `snponly.efi` (plus the `boot.ipxe` pointer); the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../concepts/architecture/security.md). Machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage.
 
 ### Local Media
 
@@ -122,10 +122,10 @@ Acceptance: the serial console shows authentication success, Property Set, I/O q
 - **Empty menu or boot loop**: is the device bound to a Worker; does the Worker have a system disk and default disk.
 - **Data-plane connection failure**: `tlshd`, kernel TLS support, port 4421 and credential push status.
 
-## Related Pages
+## What's next
 
 - Back to the [Firmware Overview](./index.md)
 - Artifacts and signing: [Build](./build.md)
 - Trust store provisioning: [Secure Boot Provisioning](./secure-boot.md)
 - Boot-chain admission: [Boot Chain](../concepts/boot-chain.md)
-- Troubleshooting: [Troubleshooting](../guide/troubleshooting.md)
+- Troubleshooting: [Troubleshooting](../tasks/troubleshooting.md)

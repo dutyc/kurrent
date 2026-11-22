@@ -1,8 +1,8 @@
 # 审计与告警
 
-管理面的每一次操作都要留痕，事后才能回答「谁在什么时候做了什么」。每个管理请求写一条 `state/audit.jsonl`，包含主体类、主体、issuer、serial、fingerprint、路由、决策、原因与 request_id，不记录 secret 与 token 明文。
+**审计**记录管理面的每一次操作，用于事后回答谁在什么时候做了什么。每个管理请求写一条 `state/audit.jsonl`，包含主体类、主体、issuer、serial、fingerprint、路由、决策、原因与 request_id，不记录 secret 与 token 明文。
 
-写入失败时请求返回 503（fail-closed）：审计记不下来，请求就不放行。
+写入失败时请求返回 503（fail-closed）：审计未写入，请求不放行。
 
 ## 告警事件
 
@@ -21,8 +21,8 @@
 
 配置 `KURRENT_CP_ALARM_WEBHOOK` 后，告警事件以 JSON POST 外投；投递在后台队列中完成，不进入请求路径。
 
-## 相关页面
+## 接下来
 
 - 返回[身份与访问](../identity.md)
-- 威胁模型中的审计约束：[安全模型](../../architecture/security.md)
-- 告警排查：[故障排查](../../guide/troubleshooting.md)
+- 威胁模型中的审计约束：[安全模型](../../concepts/architecture/security.md)
+- 告警排查：[故障排查](../../tasks/troubleshooting.md)

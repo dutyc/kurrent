@@ -1,6 +1,6 @@
 # 发行版矩阵
 
-固件仓库为每个发行版提供自包含的母盘定制脚本，统一按 A–F 六阶段执行。下表汇总已完成整机冷启动验收的发行版、验收判据与家族差异；母盘制作步骤见[系统盘定制](../guide/system-disk.md)。
+固件仓库为每个发行版提供自包含的母盘定制脚本，统一按 A–F 六阶段执行。下表汇总已完成整机冷启动验收的发行版、验收判据与家族差异；母盘制作步骤见[系统盘定制](../tasks/system-disk.md)。
 
 ## 已验证发行版
 
@@ -80,9 +80,9 @@ RHEL 9.x 尚未实测；其内核为 5.14 系，NVMe/TCP TLS 是上游 6.7+ 特�
 4. 在隔离网络完成 PXE 冷启动验收：target 端两条控制器记录、抓包判据与登录提示符。
 5. 组件变更后重跑 `embed-components.py`，并以 dash 与 bash 各跑一次 `test/test-nbft-connect-nbct.sh`。
 
-## 相关页面
+## 接下来
 
-- [系统盘定制](../guide/system-disk.md)
+- [系统盘定制](../tasks/system-disk.md)
 - [固件概述](../firmware/index.md)
 - [固件契约](./firmware-contract.md)
 - 固件仓库发行版矩阵：<https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>

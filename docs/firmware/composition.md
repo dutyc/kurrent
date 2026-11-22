@@ -49,7 +49,7 @@
 
 网卡矩阵、已知问题与实测记录见[固件平台参考](../reference/firmware-platform.md#网卡支持)。
 
-## 相关页面
+## 接下来
 
 - [固件概述](./index.md)
 - [引导信任](./trust.md)

@@ -85,9 +85,9 @@
 
 不以提交数量、代码行数或路线图勾选数衡量进度。
 
-## 相关页面
+## 接下来
 
-- [项目概述](../guide/overview.md)
-- [架构总览](../architecture/index.md)
-- [安全模型](../architecture/security.md)
+- [项目概述](../concepts/overview.md)
+- [架构总览](../concepts/architecture/index.md)
+- [安全模型](../concepts/architecture/security.md)
 - [参与贡献](./contributing.md)

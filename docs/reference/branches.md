@@ -23,4 +23,4 @@ Kurrent 的代码分属两个仓库：主仓库 [kurrent](https://github.com/dut
 
 两侧同名分支配套使用：`main` 按 TPM AK 与 PCR 基线准入设备，固件侧缺少 AK、quote 或签名首跳时引导不会完成；`legacy/no-tpm` 以注册的设备公钥验签，不使用 TPM 与签名首跳。
 
-信任链细节见[固件概述](../firmware/index.md)与[安全模型](../architecture/security.md)。
+信任链细节见[固件概述](../firmware/index.md)与[安全模型](../concepts/architecture/security.md)。

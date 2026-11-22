@@ -34,7 +34,7 @@ The default disk decides which system boots after the menu timeout:
 | Delete a disk (`delete_file=true`) | Also delete the backing file; irreversible |
 | Delete the default disk | Promote a remaining disk; clear the default when none remain |
 
-## Related Pages
+## What's next
 
 - Back to the [Entity Model](../entities.md)
 - Which node holds the disk: [Binding and Placement](./binding.md)

@@ -139,9 +139,9 @@ Device identity is a TPM 2.0 AK, and attestation is submitted with `/boot-vars`.
 
 Audit write failures return 503 (fail-closed). When reporting an issue, include the time window, device MAC, and Worker id; do not attach private keys, tokens, PSKs, or `admin.conf`.
 
-## Related pages
+## What's next
 
-- [Deployment](../guide/deployment.md)
+- [Deployment](../setup/deployment.md)
 - [Operations](./operations.md)
 - [Boot chain](../concepts/boot-chain.md)
 - [Storage and data plane](../concepts/storage.md)

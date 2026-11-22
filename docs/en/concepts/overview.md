@@ -41,7 +41,7 @@ The device lifecycle is `pooled → bound → revoked`. A Worker's `readiness` i
 
 ![Deployment topology: the management and data planes between control plane, storage nodes and devices](/diagrams/topology.svg)
 
-The control plane handles provisioning, identity and configuration and is not on the data path between devices and storage nodes; the control plane and storage nodes may be separate or co-located, but the roles stay separate. Components, ports and failure domains are covered in the [Architecture](../architecture/index.md).
+The control plane handles provisioning, identity and configuration and is not on the data path between devices and storage nodes; the control plane and storage nodes may be separate or co-located, but the roles stay separate. Components, ports and failure domains are covered in the [Architecture](../concepts/architecture/index.md).
 
 ## One run: from power-on to login
 
@@ -66,7 +66,7 @@ Any credential step that fails refuses the boot instead of falling back to plain
 - **Credentials (system disk)** — DHHC-1 issued at disk creation, with rotation, revocation and push reconciliation; revocation refuses the boot and does not fall back to plaintext.
 - **Operations (global)** — declaration drift, audit, alarms and node draining; a control-plane outage refuses new provisioning and boots.
 
-Entry points are the WebUI, the CLI and the REST API; commands and endpoints are in [Deployment](./deployment.md), [Operations](./operations.md) and the [API Reference](../reference/api/).
+Entry points are the WebUI, the CLI and the REST API; commands and endpoints are in [Deployment](../setup/deployment.md), [Operations](../tasks/operations.md) and the [API Reference](../reference/api/).
 
 ## Current boundaries
 
@@ -77,14 +77,14 @@ Entry points are the WebUI, the CLI and the REST API; commands and endpoints are
 - The Secure Boot first hop requires a per-model trust store, and per-model validation on real hardware is not complete.
 - The PXE segment must be an independent trust boundary, with the control plane as its only DHCP, TFTP and boot HTTPS provider.
 
-See the [Roadmap](../about/roadmap.md) for complete boundaries and the [Security Model](../architecture/security.md) for trust assumptions.
+See the [Roadmap](../about/roadmap.md) for complete boundaries and the [Security Model](../concepts/architecture/security.md) for trust assumptions.
 
-## Reading paths
+## What's next
 
 - Understand objects and binding: [Devices, Workers and System Disks](../concepts/entities.md)
 - Understand boot and identity: [Boot Chain](../concepts/boot-chain.md), [Identity and Access](../concepts/identity.md)
 - Understand storage and the data plane: [Storage and Data Plane](../concepts/storage.md)
-- Start deploying: [Deployment](./deployment.md), [System Disk Customization](./system-disk.md)
-- Operate and troubleshoot: [Operations](./operations.md), [Troubleshooting](./troubleshooting.md)
+- Start deploying: [Deployment](../setup/deployment.md), [System Disk Customization](../tasks/system-disk.md)
+- Operate and troubleshoot: [Operations](../tasks/operations.md), [Troubleshooting](../tasks/troubleshooting.md)
 - Look up parameters and interfaces: [Configuration](../reference/configuration.md), [CLI](../reference/cli.md), [API](../reference/api/)
 - Firmware and branches: [Firmware Overview](../firmware/index.md), [Repositories and Branches](../reference/branches.md)

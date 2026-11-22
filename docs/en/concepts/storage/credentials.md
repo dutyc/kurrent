@@ -51,9 +51,9 @@ Key plaintext exists only where the chain requires it:
 
 These files and interfaces are not additionally encrypted at the application layer; the deployment owns disk encryption, host root boundaries and encrypted backups. APIs and logs never print keys.
 
-## Related Pages
+## What's next
 
 - Back to [Storage and Data Plane](../storage.md)
 - How credentials enter boot variables: [Data Plane](../boot-chain/data-plane.md)
 - Port readiness and handshake failures: [Data Plane and Readiness](./data-plane.md)
-- Rotation and revocation operations: [Operations](../../guide/operations.md)
+- Rotation and revocation operations: [Operations](../../tasks/operations.md)

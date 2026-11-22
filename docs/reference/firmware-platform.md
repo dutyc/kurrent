@@ -213,12 +213,12 @@ shell
 
 默认路径为固件段与内核段双段加密；HTTPS 引导资产仍走 iPXE 原生 TLS（上限 1.2），与数据面 TLS 1.3 相互独立。
 
-## 相关页面
+## 接下来
 
 - [固件概述](../firmware/index.md)
 - [固件契约](./firmware-contract.md)
 - [构建](../firmware/build.md)、[部署与预置](../firmware/deploy.md)
 - [发行版矩阵](./distributions.md)
 - [引导链](../concepts/boot-chain.md)
-- [安全模型](../architecture/security.md)
+- [安全模型](../concepts/architecture/security.md)
 - 固件仓库源码、补丁与研究记录：<https://github.com/dutyc/kurrent-firmware>

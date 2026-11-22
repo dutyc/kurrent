@@ -43,7 +43,7 @@ Batch creation uses the same placement implementation for `dry_run` and executio
 
 After a Worker is deleted, recreating a Worker with the same name does not inherit old credentials: the credential entry was removed with the Worker. A kept disk file can be mounted again, but its NQN and ledger record must be re-established.
 
-## Related Pages
+## What's next
 
 - Back to the [Entity Model](../entities.md)
 - Device registration and revocation: [Devices](./device.md)

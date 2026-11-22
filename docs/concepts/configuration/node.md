@@ -1,6 +1,6 @@
 # 节点声明
 
-节点声明（`NodeConfiguration`）定义存储节点的数据目录、后端、对外地址与 NQN 命名域。节点身份不在声明里：它由控制面在签发 bootstrap token 时分配，join 写入节点状态根。声明描述「这个节点怎么运行」，身份描述「这个节点是谁」，两者分开存放。
+**节点声明**（`NodeConfiguration`）定义存储节点的数据目录、后端、对外地址与 NQN 命名域。节点身份不在声明里：它由控制面在签发 bootstrap token 时分配，join 写入节点状态根。声明描述节点如何运行，身份描述节点是谁，两者分开存放。
 
 ```yaml
 apiVersion: kurrent.io/v1
@@ -20,7 +20,7 @@ spec:
 - `nqnBase` 是 Host NQN 与盘 NQN 的命名域；控制面不另行声明 NQN 域。
 - `advertiseUrl` 是控制面调用 Agent 的地址，必须从控制面可达。
 
-## 相关页面
+## 接下来
 
 - 返回[声明式配置](../configuration.md)
 - 控制面侧声明：[控制面声明](./control-plane.md)

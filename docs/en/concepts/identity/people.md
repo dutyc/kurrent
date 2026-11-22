@@ -36,7 +36,7 @@ Revocation can target one certificate (by serial) or all certificates for a user
 - The `enroll` scope only permits issuing bootstrap tokens.
 - Session-authenticated writes additionally require same-origin.
 
-## Related Pages
+## What's next
 
 - Back to [Identity and Access](../identity.md)
 - Tokens and sessions: [Management Tokens and Sessions](./tokens.md)

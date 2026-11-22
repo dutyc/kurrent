@@ -1,6 +1,6 @@
 # 控制面声明
 
-控制面声明（`ControlPlaneConfiguration`）定义控制面的网络、PKI、服务器证书、引导策略、认证策略、注册窗口与凭据轮换。它是这些参数的唯一输入：dnsmasq 配置与 PKI 都在启动时按它派生，而不是各自维护一份配置。
+**控制面声明**（`ControlPlaneConfiguration`）定义控制面的网络、PKI、服务器证书、引导策略、认证策略、注册窗口与凭据轮换。它是这些参数的唯一输入：dnsmasq 配置与 PKI 都在启动时按它派生，不另行维护配置。
 
 ```yaml
 apiVersion: kurrent.io/v1
@@ -47,7 +47,7 @@ spec:
 | `registration` | 注册窗口 TTL 与放行额度上限；不自动开窗 |
 | `credentials` | DHHC-1 定期轮换与推送对账周期 |
 
-## 相关页面
+## 接下来
 
 - 返回[声明式配置](../configuration.md)
 - 节点侧声明：[节点声明](./node.md)

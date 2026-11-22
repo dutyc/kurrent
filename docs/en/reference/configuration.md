@@ -246,10 +246,10 @@ Runtime settings such as the registration window and TPM attestation enforcement
 
 The declaration is the default source for policy; the two background-task variables are temporary overrides. Container paths and listen addresses are fixed by compose and are not part of the declaration.
 
-## Related pages
+## What's next
 
 - [Declarative Configuration](../concepts/configuration.md)
-- [Daily Operations](../guide/operations.md)
+- [Daily Operations](../tasks/operations.md)
 - [CLI Reference](./cli.md)
 - [API Reference](./api/index.md)
 - [Glossary](./glossary.md)

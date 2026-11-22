@@ -44,7 +44,7 @@
 - **Drift（漂移）**：声明与实际派生文件或证书不一致；`config status` 报告。
 - **Registration quota**：单个注册窗口允许放行的设备数上限。
 
-## 相关页面
+## 接下来
 
 - [设备、Worker 与系统盘](../concepts/entities.md)
 - [引导链](../concepts/boot-chain.md)

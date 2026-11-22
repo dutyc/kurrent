@@ -24,9 +24,9 @@ The signed image embeds the static scripts, the boot CA and the boot HTTPS port,
 - the 4443 handshake fails: the boot CA used at build time differs from `state/pki/ca/boot/ca.crt`, or the leaf SAN or port differs from the build;
 - TFTP or DHCP is unreachable: network boot cannot begin; this only causes denial of service and changes no trust decision.
 
-## Related Pages
+## What's next
 
 - Back to the [Boot Chain](../boot-chain.md)
 - How the device proves itself next: [Device Identity](./device-identity.md)
 - Trust anchors and provisioning: [Secure Boot Provisioning](../../firmware/secure-boot.md)
-- Threat model: [Security Model](../../architecture/security.md)
+- Threat model: [Security Model](../../concepts/architecture/security.md)

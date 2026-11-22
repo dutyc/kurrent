@@ -47,7 +47,7 @@ Firmware prefers its built-in native drivers, covering server NICs mainly at 2.5
 
 The NIC matrix, known issues and recorded tests are in the [Firmware Platform Reference](../reference/firmware-platform.md#nic-support).
 
-## Related Pages
+## What's next
 
 - [Firmware Overview](./index.md)
 - [Boot Trust](./trust.md)

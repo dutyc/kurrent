@@ -20,7 +20,7 @@ spec:
 - `nqnBase` is the namespace for host NQNs and disk NQNs; the control plane declares no separate NQN domain.
 - `advertiseUrl` is the address the control plane uses to reach the Agent and must be reachable from the control plane.
 
-## Related Pages
+## What's next
 
 - Back to [Declarative Configuration](../configuration.md)
 - Control-plane-side declaration: [Control-Plane Declaration](./control-plane.md)

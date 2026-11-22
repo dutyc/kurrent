@@ -79,8 +79,8 @@ const zh = {
     side: '文档',
     items: [
       ['01', '概念', '实体模型、引导链、存储与数据面、身份与访问、声明式配置。', '/concepts/entities'],
-      ['02', '部署', '从空白主机到首次冷启动：部署、固件预置、系统盘与验收。', '/guide/deployment'],
-      ['03', '运维', '日常运维与故障排查。', '/guide/operations'],
+      ['02', '部署', '从空白主机到首次冷启动：部署、固件预置、系统盘与验收。', '/setup/deployment'],
+      ['03', '运维', '日常运维与故障排查。', '/tasks/operations'],
       ['04', '参考', '配置、CLI、固件契约、发行版与完整 API。', '/reference/configuration'],
     ],
   },
@@ -152,8 +152,8 @@ const en = {
     side: 'Docs',
     items: [
       ['01', 'Concepts', 'Entity model, boot chain, storage and data plane, identity, declarative configuration.', '/en/concepts/entities'],
-      ['02', 'Deployment', 'From blank hosts to the first cold boot: deployment, firmware, system disks, acceptance.', '/en/guide/deployment'],
-      ['03', 'Operations', 'Day-to-day operations and troubleshooting.', '/en/guide/operations'],
+      ['02', 'Deployment', 'From blank hosts to the first cold boot: deployment, firmware, system disks, acceptance.', '/en/setup/deployment'],
+      ['03', 'Operations', 'Day-to-day operations and troubleshooting.', '/en/tasks/operations'],
       ['04', 'Reference', 'Configuration, CLI, firmware contract, distributions and the full API.', '/en/reference/configuration'],
     ],
   },
@@ -184,7 +184,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
         </a>
         <div class="mast-meta">{{ c.meta }}</div>
         <nav class="mast-nav">
-          <a :href="docHref(lang === 'en' ? 'en/guide/overview' : 'guide/overview')">{{ c.nav.docs }}</a>
+          <a :href="docHref(lang === 'en' ? 'en/concepts/overview' : 'concepts/overview')">{{ c.nav.docs }}</a>
           <a href="https://github.com/dutyc/kurrent" target="_blank" rel="noopener">{{ c.nav.github }}</a>
           <a class="lang" :href="langHref" :hreflang="langHreflang">{{ langLabel }}</a>
         </nav>
@@ -200,7 +200,7 @@ const c = computed(() => (props.lang === 'en' ? en : zh))
           <h1>{{ c.h1[0] }}<br>{{ c.h1[1] }}</h1>
           <p class="lede" v-html="c.lede"></p>
           <div class="links">
-            <a class="link" :href="docHref(lang === 'en' ? 'en/guide/deployment' : 'guide/deployment')">{{ c.cta[0] }} <span>→</span></a>
+            <a class="link" :href="docHref(lang === 'en' ? 'en/setup/deployment' : 'setup/deployment')">{{ c.cta[0] }} <span>→</span></a>
             <a class="link" href="#unit">{{ c.cta[1] }} <span>↓</span></a>
           </div>
         </div>

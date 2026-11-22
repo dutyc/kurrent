@@ -63,8 +63,8 @@
 - 固件与主仓库之间的命令与变量：[固件契约](../reference/firmware-contract.md)
 - 发行版侧脚本与家族差异：[发行版矩阵](../reference/distributions.md)
 
-## 相关页面
+## 接下来
 
 - [引导链](../concepts/boot-chain.md)
-- [安全模型](../architecture/security.md)
+- [安全模型](../concepts/architecture/security.md)
 - 固件仓库源码、补丁与研究记录：<https://github.com/dutyc/kurrent-firmware>

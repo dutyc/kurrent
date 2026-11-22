@@ -59,8 +59,8 @@ The control plane aggregates firmware status at `/api/cp/boot-assets`: the first
 - Commands and variables between firmware and the main repository: [Firmware Contract](../reference/firmware-contract.md)
 - Distribution scripts and family differences: [Distribution Matrix](../reference/distributions.md)
 
-## Related Pages
+## What's next
 
 - [Boot Chain](../concepts/boot-chain.md)
-- [Security Model](../architecture/security.md)
+- [Security Model](../concepts/architecture/security.md)
 - Firmware sources, patches and research notes: <https://github.com/dutyc/kurrent-firmware>

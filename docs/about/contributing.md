@@ -88,9 +88,9 @@ PR 描述应包含：
 
 项目使用 Apache License 2.0。提交贡献即表示同意以同一许可证发布。
 
-## 相关页面
+## 接下来
 
-- [项目概述](../guide/overview.md)
-- [架构总览](../architecture/index.md)
+- [项目概述](../concepts/overview.md)
+- [架构总览](../concepts/architecture/index.md)
 - [路线图](./roadmap.md)
 - [配置参考](../reference/configuration.md)

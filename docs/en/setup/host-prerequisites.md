@@ -1,6 +1,6 @@
 # Deployment Prerequisites
 
-Deployment requires the following host, network and device prerequisites. The procedure is in [Deployment](../guide/deployment.md), the port table is in [Architecture](../architecture/index.md#ports), and security boundaries are in the [Security Model](../architecture/security.md).
+Deployment requires the following host, network and device prerequisites. The procedure is in [Deployment](../setup/deployment.md), the port table is in [Architecture](../concepts/architecture/index.md#ports), and security boundaries are in the [Security Model](../concepts/architecture/security.md).
 
 ## Host roles
 
@@ -18,7 +18,7 @@ Bare-metal devices support UEFI boot only; Legacy/CSM is no longer supported (ar
 
 ## Bare-metal device requirements
 
-These requirements apply to the `main` line; devices without a TPM use the `legacy/no-tpm` line described in [Repositories and Branches](./branches.md), which does not require a TPM or Secure Boot. All four requirements must hold on the `main` line:
+These requirements apply to the `main` line; devices without a TPM use the `legacy/no-tpm` line described in [Repositories and Branches](../reference/branches.md), which does not require a TPM or Secure Boot. All four requirements must hold on the `main` line:
 
 | Item | Requirement | If missing |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ These requirements apply to the `main` line; devices without a TPM use the `lega
 - A local disk is not a prerequisite; the device holds no persistent state.
 - CPU and memory only need to meet the installed distribution's requirements.
 - Device identity (AK) is bound to the mainboard and TPM: clearing the TPM or replacing the mainboard is equivalent to replacing the device and requires re-admission.
-- USB and wireless NICs are not used for boot; NIC compatibility is in [Firmware Platform Reference](./firmware-platform.md).
+- USB and wireless NICs are not used for boot; NIC compatibility is in [Firmware Platform Reference](../reference/firmware-platform.md).
 - `db` enrollment is covered in [Secure Boot](../firmware/secure-boot.md).
 
 Verify on the target:
@@ -51,11 +51,11 @@ Whether a NIC provides an SNP stack can only be confirmed in UEFI setup or from 
 
 Prefer a dedicated NIC or VLAN for each side; with one NIC the PXE segment must be isolated.
 
-Devices must be able to route to the storage node's 4421. The full port table is in [Architecture](../architecture/index.md#ports).
+Devices must be able to route to the storage node's 4421. The full port table is in [Architecture](../concepts/architecture/index.md#ports).
 
 ## Host dependencies
 
-Both hosts need Docker, Compose v2, `git`, `curl`, `jq`, `openssl` and Go 1.27+ (to build the CLI); the control plane additionally needs Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and npm. Installation commands are in [Deployment](../guide/deployment.md#host-dependencies).
+Both hosts need Docker, Compose v2, `git`, `curl`, `jq`, `openssl` and Go 1.27+ (to build the CLI); the control plane additionally needs Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and npm. Installation commands are in [Deployment](../setup/deployment.md#host-dependencies).
 
 ## Storage-node kernel and tlshd
 
@@ -80,11 +80,11 @@ The control plane should expose only 22, 53/67/69 and 80/443; storage nodes addi
 - CA private keys, `users.yml`, `sessions.yml`, `admin.conf` and `audit.jsonl` are 600.
 - ufw does not filter Docker-published ports; restrict inbound traffic in the `DOCKER-USER` chain.
 
-`sudo kurrent host check` (`--role control|storage` when split, `all` when co-located); `--strict` counts SKIP as failure. The full checklist is in the [Security Checklist](../guide/deployment.md#security-checklist) and [Operations](../guide/operations.md#security-baseline).
+`sudo kurrent host check` (`--role control|storage` when split, `all` when co-located); `--strict` counts SKIP as failure. The full checklist is in the [Security Checklist](../setup/deployment.md#security-checklist) and [Operations](../tasks/operations.md#security-baseline).
 
-## Related pages
+## What's next
 
-- [Deployment](../guide/deployment.md)
-- [Architecture](../architecture/index.md#ports)
-- [Security Model](../architecture/security.md)
-- [Configuration](./configuration.md)
+- [Deployment](../setup/deployment.md)
+- [Architecture](../concepts/architecture/index.md#ports)
+- [Security Model](../concepts/architecture/security.md)
+- [Configuration](../reference/configuration.md)

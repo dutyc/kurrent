@@ -1,6 +1,6 @@
 # 人员与证书
 
-管理面只经 HTTPS `443` 进入。人类用户与 admin 使用 users CA 签发的客户端证书，控制面只接触 CSR（证书签名请求），不接触私钥。
+管理面只经 HTTPS `443` 进入。人类用户与 admin 使用 users CA 签发的**客户端证书**，控制面只接触 CSR（证书签名请求），不接触私钥。
 
 ## 唯一入口
 
@@ -38,7 +38,7 @@ kurrent cert issue alice --csr ./certs/alice.csr
 - `enroll` scope 只放行签发 bootstrap token。
 - 会话写请求额外做同源校验。
 
-## 相关页面
+## 接下来
 
 - 返回[身份与访问](../identity.md)
 - token 与会话：[管理 token 与会话](./tokens.md)

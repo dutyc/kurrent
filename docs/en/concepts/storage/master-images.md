@@ -19,8 +19,8 @@ When a disk is created, the control plane requires the master to exist locally o
 
 A blank disk is the other source: it needs no master and is used for installing a system.
 
-## Related Pages
+## What's next
 
 - Back to [Storage and Data Plane](../storage.md)
 - System-disk identity and the default disk: [System Disks](../entities/system-disk.md)
-- Troubleshooting boot failures: [Troubleshooting](../../guide/troubleshooting.md)
+- Troubleshooting boot failures: [Troubleshooting](../../tasks/troubleshooting.md)

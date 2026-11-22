@@ -1,6 +1,6 @@
 # 部署前置
 
-部署前需要满足以下主机、网络与设备前提。部署步骤见[部署](../guide/deployment.md)，端口表见[架构总览](../architecture/index.md#端口)，安全边界见[安全模型](../architecture/security.md)。
+部署前需要满足以下主机、网络与设备前提。部署步骤见[部署](../setup/deployment.md)，端口表见[架构总览](../concepts/architecture/index.md#端口)，安全边界见[安全模型](../concepts/architecture/security.md)。
 
 ## 主机角色
 
@@ -18,7 +18,7 @@
 
 ## 裸机设备要求
 
-以下要求针对 `main` 线；无 TPM 设备使用[仓库与分支](./branches.md)中的 `legacy/no-tpm` 线，不要求 TPM 与 Secure Boot。`main` 线四项必须同时满足：
+以下要求针对 `main` 线；无 TPM 设备使用[仓库与分支](../reference/branches.md)中的 `legacy/no-tpm` 线，不要求 TPM 与 Secure Boot。`main` 线四项必须同时满足：
 
 | 项 | 要求 | 不满足时 |
 | --- | --- | --- |
@@ -30,7 +30,7 @@
 - 本地磁盘不是前提；设备不持有持久状态。
 - CPU 与内存只需满足所装发行版要求。
 - AK 绑定主板与 TPM：清 TPM 或换主板等同换设备，需删登记后重新入池。
-- 不用 USB 或无线网卡引导；网卡兼容性见[固件平台参考](./firmware-platform.md)。
+- 不用 USB 或无线网卡引导；网卡兼容性见[固件平台参考](../reference/firmware-platform.md)。
 - `db` 预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
 
 在目标机核对：
@@ -51,11 +51,11 @@ SNP 栈只能从 UEFI 设置或厂商文档确认；命令需要 `mokutil` 与 `
 
 两侧建议用独立网卡或 VLAN；单网卡时 PXE 网段必须隔离。
 
-设备必须能路由到存储节点 4421。完整端口表见[架构总览](../architecture/index.md#端口)。
+设备必须能路由到存储节点 4421。完整端口表见[架构总览](../concepts/architecture/index.md#端口)。
 
 ## 主机依赖
 
-两台主机需要 Docker、Compose v2、`git`、`curl`、`jq`、`openssl` 与 Go 1.27+（构建 CLI）；控制面另需 Node.js 22.23.4+、24.22.1+ 或 26.12.1+ 与 npm。安装命令见[部署](../guide/deployment.md#主机依赖)。
+两台主机需要 Docker、Compose v2、`git`、`curl`、`jq`、`openssl` 与 Go 1.27+（构建 CLI）；控制面另需 Node.js 22.23.4+、24.22.1+ 或 26.12.1+ 与 npm。安装命令见[部署](../setup/deployment.md#主机依赖)。
 
 ## 存储节点内核与 tlshd
 
@@ -80,11 +80,11 @@ SNP 栈只能从 UEFI 设置或厂商文档确认；命令需要 `mokutil` 与 `
 - CA 私钥、`users.yml`、`sessions.yml`、`admin.conf`、`audit.jsonl` 为 600。
 - ufw 不过滤 Docker 发布端口；入站限制在 `DOCKER-USER` 链集中配置。
 
-`sudo kurrent host check`（分机用 `--role control|storage`，同机用 `all`）；`--strict` 把 SKIP 计为失败。完整检查项见[安全检查清单](../guide/deployment.md#安全检查清单)与[日常运维](../guide/operations.md#安全基线)。
+`sudo kurrent host check`（分机用 `--role control|storage`，同机用 `all`）；`--strict` 把 SKIP 计为失败。完整检查项见[安全检查清单](../setup/deployment.md#安全检查清单)与[日常运维](../tasks/operations.md#安全基线)。
 
-## 相关页面
+## 接下来
 
-- [部署](../guide/deployment.md)
-- [架构总览](../architecture/index.md#端口)
-- [安全模型](../architecture/security.md)
-- [配置参考](./configuration.md)
+- [部署](../setup/deployment.md)
+- [架构总览](../concepts/architecture/index.md#端口)
+- [安全模型](../concepts/architecture/security.md)
+- [配置参考](../reference/configuration.md)

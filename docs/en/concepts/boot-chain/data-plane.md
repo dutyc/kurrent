@@ -52,7 +52,7 @@ It completes in two layers: DH-HMAC-CHAP answers who may connect, and TLS 1.3 pr
 - with attestation enforcement explicitly disabled, the nvmet backend still refuses credentials as `unverified`;
 - the device-side handshake fails: the PSK never reached the storage node keyring, `tlshd` is below 1.5.0, or the kernel lacks NVMe/TCP TLS support.
 
-## Related Pages
+## What's next
 
 - Back to the [Boot Chain](../boot-chain.md)
 - Where the attestation result comes from: [Device Identity](./device-identity.md)

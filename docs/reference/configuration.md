@@ -248,10 +248,10 @@ kurrent join https://<control-plane> --token <token> --agent-id <agent_id>
 
 声明是策略的缺省来源；后台任务的两个环境变量只作临时覆盖。容器内路径与监听地址由 compose 固化，不属于声明。
 
-## 相关页面
+## 接下来
 
 - [声明式配置](../concepts/configuration.md)
-- [日常运维](../guide/operations.md)
+- [日常运维](../tasks/operations.md)
 - [CLI 参考](./cli.md)
 - [API 参考](./api/index.md)
 - [术语表](./glossary.md)

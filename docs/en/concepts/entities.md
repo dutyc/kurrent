@@ -38,9 +38,9 @@ Binding is one-to-one, and the authority is `bound_worker_id` on the device side
 
 Binding rules and placement are covered in [Binding and Placement](./entities/binding.md).
 
-## Related Pages
+## What's next
 
 - How the objects form one boot: [Boot Chain](./boot-chain.md)
 - Master images, credentials and the data plane: [Storage and Data Plane](./storage.md)
 - Device and human identity: [Identity and Access](./identity.md)
-- Delivery steps: [Deployment](../guide/deployment.md)
+- Delivery steps: [Deployment](../setup/deployment.md)

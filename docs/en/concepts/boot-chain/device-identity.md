@@ -55,9 +55,9 @@ The device never sees the reason code: a rejected `/boot-vars` returns an empty 
 
 ## Boundaries
 
-Attestation proves only that "the caller holds this device's AK and can produce a valid quote over the selected PCRs", not that the running system is uncompromised; a compromised runtime can still obtain the current PSK within the rotation window. PCR selection and AK creation also need per-model verification, and AMD fTPM and discrete TPMs behave differently. See the [Security Model](../../architecture/security.md) for details.
+Attestation proves only that "the caller holds this device's AK and can produce a valid quote over the selected PCRs", not that the running system is uncompromised; a compromised runtime can still obtain the current PSK within the rotation window. PCR selection and AK creation also need per-model verification, and AMD fTPM and discrete TPMs behave differently. See the [Security Model](../../concepts/architecture/security.md) for details.
 
-## Related Pages
+## What's next
 
 - Back to the [Boot Chain](../boot-chain.md)
 - How the first hop establishes trust: [First Hop](./first-hop.md)

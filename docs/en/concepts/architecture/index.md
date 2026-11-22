@@ -77,7 +77,7 @@ device
   → NBFT / NBCT → initramfs
 ```
 
-The control plane participates only in the HTTPS segment; the data plane connects the device directly to the storage node. Step-by-step detail is in [Boot Chain](../concepts/boot-chain.md).
+The control plane participates only in the HTTPS segment; the data plane connects the device directly to the storage node. Step-by-step detail is in [Boot Chain](../boot-chain.md).
 
 ## Security Boundary
 
@@ -142,13 +142,13 @@ The data plane has moved from iSCSI to NVMe-oF (NVMe/TCP). The firmware main bra
 
 ## Extension Points
 
-Storage backend differences are encapsulated inside the Agent, and the control plane only speaks HTTP; the boot menu, timeout and default disk are projected by the control plane and never written into the disk; firmware is built from patches in a separate repository and can be rebuilt on any upstream baseline. Future directions (high availability, IPv6, ARM, data disks) are in the [Roadmap](../about/roadmap.md).
+Storage backend differences are encapsulated inside the Agent, and the control plane only speaks HTTP; the boot menu, timeout and default disk are projected by the control plane and never written into the disk; firmware is built from patches in a separate repository and can be rebuilt on any upstream baseline. Future directions (high availability, IPv6, ARM, data disks) are in the [Roadmap](../../about/roadmap.md).
 
 The current architecture is a trade-off under today's constraints and will keep changing as they do. The goal is to decouple compute, storage and identity from individual machines so the system as a whole can be scheduled, migrated and rebuilt; the present components, protocols and deployment model are one way to get there.
 
-## Further Reading
+## What's next
 
-- Entities and binding: [Devices, Workers and System Disks](../concepts/entities.md)
-- Boot sequence: [Boot Chain](../concepts/boot-chain.md)
+- Entities and binding: [Devices, Workers and System Disks](../entities.md)
+- Boot sequence: [Boot Chain](../boot-chain.md)
 - Trust boundaries and threat model: [Security Model](./security.md)
-- Declarations and convergence: [Declarative Configuration](../concepts/configuration.md)
+- Declarations and convergence: [Declarative Configuration](../configuration.md)

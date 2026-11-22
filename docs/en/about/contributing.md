@@ -88,9 +88,9 @@ Keys, tokens, private keys, PSKs, and unredacted audit logs must not be pasted i
 
 The project uses the Apache License 2.0. Submitting a contribution means agreeing to publish it under the same license.
 
-## Related pages
+## What's next
 
-- [Project Overview](../guide/overview.md)
-- [Architecture Overview](../architecture/index.md)
+- [Project Overview](../concepts/overview.md)
+- [Architecture Overview](../concepts/architecture/index.md)
 - [Roadmap](./roadmap.md)
 - [Configuration Reference](../reference/configuration.md)

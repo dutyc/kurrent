@@ -203,7 +203,7 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 - The first hop depends on Secure Boot verifying signed firmware; signed firmware trusts only the boot CA embedded at build time and never first-contact trust.
 - Clearing the TPM or replacing the mainboard loses the original AK; delete the ledger entry and re-admit the device. Decommissioned devices should clear `server-fingerprint`.
 
-## Related pages
+## What's next
 
 - [Firmware Overview](../firmware/index.md)
 - [Firmware Platform Reference](./firmware-platform.md)
@@ -211,5 +211,5 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 - [Deployment and Provisioning](../firmware/deploy.md)
 - [Device Identity and Trust](../firmware/index.md#device-identity-and-trust)
 - [Boot Chain](../concepts/boot-chain.md)
-- [Security Model](../architecture/security.md)
+- [Security Model](../concepts/architecture/security.md)
 - [API Reference](./api/index.md)

@@ -60,8 +60,8 @@ kurrent config validate --node
 kurrent join <cp-url>
 ```
 
-## Related Pages
+## What's next
 
 - Back to [Declarative Configuration](../configuration.md)
 - Validation and application: [Validation and Application](./validation.md)
-- Operational details, rollback and backup: [Operations](../../guide/operations.md)
+- Operational details, rollback and backup: [Operations](../../tasks/operations.md)

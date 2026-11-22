@@ -4,8 +4,8 @@
 
 ## 目标与前提
 
-- 目标设备满足[裸机设备要求](../reference/host-prerequisites.md#裸机设备要求)：x86_64 UEFI、TPM 2.0、开启 Secure Boot 且 `db` 已导入站点签名证书；传统 BIOS（Legacy/CSM）引导不再支持；
-- 已按[部署](../guide/deployment.md)完成控制面、dnsmasq 与 PXE 网段；
+- 目标设备满足[裸机设备要求](../setup/host-prerequisites.md#裸机设备要求)：x86_64 UEFI、TPM 2.0、开启 Secure Boot 且 `db` 已导入站点签名证书；传统 BIOS（Legacy/CSM）引导不再支持；
+- 已按[部署](../setup/deployment.md)完成控制面、dnsmasq 与 PXE 网段；
 - 已按[构建](./build.md)取得签名产物与 `manifest.json`。
 
 ## 部署路径
@@ -36,7 +36,7 @@
 3. 在设备 UEFI 设置中启用网络栈与 Secure Boot，将网络启动置于启动顺序首位。
 4. 启动设备，确认 DHCP 分配地址、TFTP 下载首跳、首跳经 4443 完成上报与挑战。
 
-TFTP 只交付首跳 `snponly.efi`（与 `boot.ipxe` 指针）；签名首跳内嵌静态脚本、boot CA 与引导 HTTPS 端口，控制面地址默认不入镜像。后续请求走 4443 HTTPS，只信任该 boot CA。PXE 网段必须按[安全模型](../architecture/security.md)隔离。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用。
+TFTP 只交付首跳 `snponly.efi`（与 `boot.ipxe` 指针）；签名首跳内嵌静态脚本、boot CA 与引导 HTTPS 端口，控制面地址默认不入镜像。后续请求走 4443 HTTPS，只信任该 boot CA。PXE 网段必须按[安全模型](../concepts/architecture/security.md)隔离。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用。
 
 ### 本地介质
 
@@ -128,10 +128,10 @@ bash test/run-qemu-auth.sh
 - **菜单为空或启动循环**：设备是否绑定 Worker；Worker 是否有系统盘与默认盘。
 - **数据面连接失败**：`tlshd`、内核 TLS 配置、4421 端口与凭据推送状态。
 
-## 相关页面
+## 接下来
 
 - 返回[固件概述](./index.md)
 - 构建产物与签名：[构建](./build.md)
 - 信任库预置：[Secure Boot 预置](./secure-boot.md)
 - 引导链准入：[引导链](../concepts/boot-chain.md)
-- 故障排查：[故障排查](../guide/troubleshooting.md)
+- 故障排查：[故障排查](../tasks/troubleshooting.md)

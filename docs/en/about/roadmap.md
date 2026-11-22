@@ -85,9 +85,9 @@ A direction is complete only when:
 
 Progress is not measured by commit count, lines of code, or checked roadmap boxes.
 
-## Related pages
+## What's next
 
-- [Project Overview](../guide/overview.md)
-- [Architecture Overview](../architecture/index.md)
-- [Security Model](../architecture/security.md)
+- [Project Overview](../concepts/overview.md)
+- [Architecture Overview](../concepts/architecture/index.md)
+- [Security Model](../concepts/architecture/security.md)
 - [Contributing](./contributing.md)

@@ -138,8 +138,8 @@ The control plane also supports an `empty` disk for manual installation; the pro
 - **Master absent from the list** — filename lacks `_tpl_`, the file is outside `diskDir`, or the Agent cannot read it.
 - **Clone reports 512 GPT** — run phase E on the master and confirm 4K GPT.
 
-## Related pages
+## What's next
 
 - Objects and placement: [Devices, Workers and Disks](../concepts/entities.md)
 - Masters and data plane: [Storage and Data Plane](../concepts/storage.md)
-- Full workflow: [Deployment](./deployment.md)
+- Full workflow: [Deployment](../setup/deployment.md)

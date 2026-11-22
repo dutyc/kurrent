@@ -1,16 +1,16 @@
 # 部署
 
-本页带你从空白主机走到设备冷启动登录。部署单元是**控制面服务器 + 存储节点**：两者可以分开部署，也可以在同一台机器上；每台存储服务器运行一个 Agent。
+本任务从空白主机开始，到设备冷启动登录结束。部署单元是**控制面服务器 + 存储节点**：两者可以分开部署，也可以在同一台机器上；每台存储服务器运行一个 Agent。
 
 **完成判据**：设备冷启动到登录提示符。
 
-参考：[配置参考](../reference/configuration.md)（声明）、[CLI 参考](../reference/cli.md)（命令）、[架构总览](../architecture/index.md)（端口）、[安全模型](../architecture/security.md)（信任边界）。
+参考：[配置参考](../reference/configuration.md)（声明）、[CLI 参考](../reference/cli.md)（命令）、[架构总览](../concepts/architecture/index.md)（端口）、[安全模型](../concepts/architecture/security.md)（信任边界）。
 
 ## 部署准备
 
 开始之前，确认四件事：
 
-- 主机与设备满足[部署前置](../reference/host-prerequisites.md)：x86_64 UEFI、TPM 2.0、Secure Boot、SNP 网卡；
+- 主机与设备满足[部署前置](../setup/host-prerequisites.md)：x86_64 UEFI、TPM 2.0、Secure Boot、SNP 网卡；
 - PXE 网段独立，控制面是该网段唯一的 DHCP/TFTP/4443 提供者；
 - 仓库、`kurrent` CLI 与 WebUI 构建依赖就绪（安装见[CLI 参考](../reference/cli.md#安装与凭据)）；
 - 主仓与固件仓取 `main` 分支；无 TPM 设备取两侧的 `legacy/no-tpm`（见[仓库与分支](../reference/branches.md)）。
@@ -21,7 +21,7 @@
 git clone https://github.com/dutyc/kurrent && cd kurrent
 ```
 
-同机部署共用一个状态根；默认 `~/.local/state/kurrent`，备份见[日常运维](./operations.md#备份与恢复)。
+同机部署共用一个状态根；默认 `~/.local/state/kurrent`，备份见[日常运维](../tasks/operations.md#备份与恢复)。
 
 ### 网络
 
@@ -35,7 +35,7 @@ git clone https://github.com/dutyc/kurrent && cd kurrent
 
 示例：PXE `192.168.80.0/24`，控制面 `192.168.80.1`，池 `.50–.100`，网关 `.2`，DNS `223.5.5.5`；管理 `192.168.1.10`，节点 `192.168.1.20`。
 
-完整端口表见[架构总览](../architecture/index.md#端口)。
+完整端口表见[架构总览](../concepts/architecture/index.md#端口)。
 
 ### 主机依赖
 
@@ -118,7 +118,7 @@ curl -ks https://127.0.0.1/ | grep -q '<div id="root">'
 kurrent config status
 ```
 
-浏览器打开 `https://<控制面管理地址>/`，用 `kurrent token create --usage admin` 签发的 token 登录；浏览器 mTLS 导入见[日常运维](./operations.md#管理入口)。
+浏览器打开 `https://<控制面管理地址>/`，用 `kurrent token create --usage admin` 签发的 token 登录；浏览器 mTLS 导入见[日常运维](../tasks/operations.md#管理入口)。
 
 CLI 凭据由 `kurrent init` 安装；轮换后重跑 `kurrent init` 或 `kurrent credentials install`。
 
@@ -225,7 +225,11 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ### 3.1 固件
 
-在固件仓构建签名首跳，再把产物放进主仓的 TFTP 根：
+先在固件仓构建签名首跳，再把产物放进主仓的 TFTP 根：
+
+```bash
+git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
+```
 
 ```bash
 # 固件仓：boot CA 取自控制面状态根
@@ -274,7 +278,7 @@ api /settings/registration-window -X DELETE
 
 ### 4.1 母盘
 
-母盘必须是整盘镜像（GPT、ESP 与 root 分区），文件名含 `_tpl_`，放入存储节点 `diskDir`；分区镜像、压缩包或安装介质都不能直接使用。制作见[系统盘定制](./system-disk.md)。
+母盘必须是整盘镜像（GPT、ESP 与 root 分区），文件名含 `_tpl_`，放入存储节点 `diskDir`；分区镜像、压缩包或安装介质都不能直接使用。制作见[系统盘定制](../tasks/system-disk.md)。
 
 ```bash
 # 构建机：qcow2 转整盘 raw（已是 raw 可跳过）
@@ -325,7 +329,7 @@ api /workers/worker-01/default-disk -X PUT -H 'Content-Type: application/json' \
 DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 → GRUB → 内核 → initramfs（NBFT/NBCT）→ rootfs → 登录
 ```
 
-菜单为空、数据面连不上、认证失败或报 `0x7f22208e` 时见[故障排查](./troubleshooting.md)；`0x7f22208e` 先查 `/masters` 的 `gpt` 是否为 `4k`。
+菜单为空、数据面连不上、认证失败或报 `0x7f22208e` 时见[故障排查](../tasks/troubleshooting.md)；`0x7f22208e` 先查 `/masters` 的 `gpt` 是否为 `4k`。
 
 ## 安全检查清单
 

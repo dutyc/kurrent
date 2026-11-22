@@ -42,13 +42,13 @@ How credentials reach the kernel is covered in [Hand-over to the Kernel](./boot-
 
 ## Failures and Observability
 
-No stage falls back to another path: when first-hop verification fails, firmware does not run the image; when identity or admission fails, `/boot-vars` returns an empty script; when credentials or the port are not ready, the payload is withheld; a device that keeps rebooting is usually unbound or has no default disk. Reason codes are written to the audit log and the device's attestation state; the operational entry points are in [Operations](../guide/operations.md).
+No stage falls back to another path: when first-hop verification fails, firmware does not run the image; when identity or admission fails, `/boot-vars` returns an empty script; when credentials or the port are not ready, the payload is withheld; a device that keeps rebooting is usually unbound or has no default disk. Reason codes are written to the audit log and the device's attestation state; the operational entry points are in [Operations](../tasks/operations.md).
 
 ## Trust Boundary
 
 The first hop (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: the target's `db` trusts only the site signing certificate, so an unsigned or tampered first stage never runs and the embedded static scripts cannot be replaced either. The 4443 HTTPS that follows is anchored by the embedded boot CA, and device identity is protected by the TPM AK and PCR baseline.
 
-Attackers on the same Layer 2 are therefore limited to denial of service (forged DHCP/ARP, link disruption) and cannot replace the first stage, swap scripts or impersonate the boot server. A compromised host, a compromised running device or physical access is outside this boundary. See the [Security Model](../architecture/security.md) for the full threat model.
+Attackers on the same Layer 2 are therefore limited to denial of service (forged DHCP/ARP, link disruption) and cannot replace the first stage, swap scripts or impersonate the boot server. A compromised host, a compromised running device or physical access is outside this boundary. See the [Security Model](../concepts/architecture/security.md) for the full threat model.
 
 ## Firmware Split
 
@@ -60,7 +60,7 @@ Attackers on the same Layer 2 are therefore limited to denial of service (forged
 | Boot scripts, registration window, `/boot-vars` admission | Platform control plane |
 | System disks, credentials, menu generation | Platform control plane |
 
-## Related Pages
+## What's next
 
 - First-hop verification and embedded content: [First Hop](./boot-chain/first-hop.md)
 - Device AK, registration and attestation: [Device Identity](./boot-chain/device-identity.md)

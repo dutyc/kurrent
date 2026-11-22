@@ -1,6 +1,6 @@
 # 组件身份
 
-存储节点的 Agent 与 nvmet-host 使用 nodes CA 签发的证书。组件身份与设备身份、人员身份互不替代：组件证书只能调用组件端点，不能访问管理面。
+存储节点的 Agent 与 nvmet-host 使用 nodes CA 签发的证书，构成**组件身份**。组件身份与设备身份、人员身份互不替代：组件证书只能调用组件端点，不能访问管理面。
 
 ## 首次加入
 
@@ -22,8 +22,8 @@
 
 被吊销的节点恢复：签发新 bootstrap token，重跑 `kurrent join`。agent 启动自检会从公开 CRL 发现本地证书已失效，用新 token 重新 enroll。
 
-## 相关页面
+## 接下来
 
 - 返回[身份与访问](../identity.md)
 - 人员证书与三类 CA：[人员与证书](./people.md)
-- 节点加入步骤：[部署](../../guide/deployment.md)
+- 节点加入步骤：[部署](../../setup/deployment.md)

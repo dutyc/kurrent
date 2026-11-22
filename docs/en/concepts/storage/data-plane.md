@@ -38,8 +38,8 @@ A storage node creates the `4421` listener at startup and reports its capability
 | TLS handshake fails | PSK missing from the keyring; `tlshd` version or service; kernel TLS support |
 | An old key still connects after rotation | Push incomplete or not applied; check push status and Agent logs |
 
-## Related Pages
+## What's next
 
 - Back to [Storage and Data Plane](../storage.md)
 - Admission and variable projection: [Data Plane](../boot-chain/data-plane.md)
-- Host prerequisites and diagnostics: [Deployment](../../guide/deployment.md)
+- Host prerequisites and diagnostics: [Deployment](../../setup/deployment.md)

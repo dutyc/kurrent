@@ -1,6 +1,6 @@
 # Operations
 
-After deployment, routine work centers on declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For initial deployment, see [Deployment](./deployment.md); for cross-component fault isolation, see [Troubleshooting](./troubleshooting.md).
+After deployment, routine work centers on declaration changes, identity and credentials, device and node lifecycle, upgrades and rollback, backup and observability. For initial deployment, see [Deployment](../setup/deployment.md); for cross-component fault isolation, see [Troubleshooting](./troubleshooting.md).
 
 ## Changing Configuration
 
@@ -220,4 +220,4 @@ sudo kurrent host check --role all    # co-located hosts; use control / storage 
 - The control-plane container does not mount `docker.sock`.
 - CA private keys, `users.yml`, `sessions.yml`, `admin.conf` and `audit.jsonl` should be 600.
 - Docker-published ports bypass ufw; enforce inbound restrictions in the `DOCKER-USER` chain.
-- Isolate the PXE network as described in [Deployment](./deployment.md), with DHCP snooping, Dynamic ARP Inspection and port security enabled.
+- Isolate the PXE network as described in [Deployment](../setup/deployment.md), with DHCP snooping, Dynamic ARP Inspection and port security enabled.

@@ -44,7 +44,7 @@
 - **Drift** — A mismatch between the declaration and derived files or certificates; reported by `config status`.
 - **Registration quota** — The maximum number of devices admitted in one registration window.
 
-## Related pages
+## What's next
 
 - [Devices, Workers, and System Disks](../concepts/entities.md)
 - [Boot Chain](../concepts/boot-chain.md)

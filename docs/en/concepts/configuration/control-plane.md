@@ -47,7 +47,7 @@ At startup the control plane generates `<state>/control-plane/dnsmasq/dnsmasq.co
 | `registration` | Registration window TTL and admission quota; the window is never opened automatically |
 | `credentials` | DHHC-1 periodic rotation and push reconciliation period |
 
-## Related Pages
+## What's next
 
 - Back to [Declarative Configuration](../configuration.md)
 - Node-side declaration: [Node Declaration](./node.md)

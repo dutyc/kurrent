@@ -47,9 +47,9 @@ How the CLI applies a declaration is described under [Validation and Application
 
 Drift detection and overrides are described under [Drift and Overrides](./configuration/drift.md).
 
-## Related Pages
+## What's next
 
 - Full key table and defaults: [Configuration Reference](../reference/configuration.md)
 - Node identity and the three entities: [Devices, Workers and System Disks](./entities.md)
 - Server certificates and boot trust: [Boot Chain](./boot-chain.md)
-- Implementation boundaries for applying configuration: [Architecture](../architecture/index.md)
+- Implementation boundaries for applying configuration: [Architecture](../concepts/architecture/index.md)
