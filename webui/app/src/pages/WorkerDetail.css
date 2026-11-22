@@ -325,3 +325,22 @@
   margin-top: 14px;
   padding: 0 24px;
 }
+
+/* 逐盘运行时状态：位于展开体顶部，与静态台账用细分隔线区分 */
+.disks-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.disk-runtime {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+.disk-runtime-muted {
+  color: var(--gray-500);
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}

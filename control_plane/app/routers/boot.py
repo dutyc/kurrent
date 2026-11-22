@@ -516,13 +516,13 @@ def _find_worker_by_hostname(workers: dict[str, Any], hostname: str) -> tuple[st
 
 
 def _menu_default_for(record_: dict[str, Any]) -> str:
-    """默认启动项：default_disk > boot.menu_default > reboot。"""
-    if record_.get("default_disk"):
-        return "boot-os"
+    """默认启动项：boot.menu_default（显式覆盖）> default_disk > reboot。"""
     boot = record_.get("boot") or {}
     menu_default = boot.get("menu_default") or boot.get("menu-default")
     if menu_default:
         return str(menu_default).lower()
+    if record_.get("default_disk"):
+        return "boot-os"
     return "reboot"
 
 

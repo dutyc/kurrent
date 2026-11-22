@@ -8,6 +8,8 @@ import {
   batchCreateWorkers,
   batchCreateWorkerDisks,
   batchDeleteWorkers,
+  batchDeleteWorkerDisks,
+  batchSetWorkerDefaultBoot,
 } from '../api/client'
 import { useI18n } from '../i18n'
 import Button from '../components/Button'
@@ -33,6 +35,15 @@ export default function Workers() {
   // 勾选常驻：没有「模式」，选中即浮出操作条
   const [selected, setSelected] = useState([])
   const [anchor, setAnchor] = useState(null)
+
+  // 批量盘运维（删盘 / 设默认）：结果通知 + 设默认弹窗
+  const [diskOpResult, setDiskOpResult] = useState(null)
+  const [diskOpError, setDiskOpError] = useState(null)
+  const [defOpen, setDefOpen] = useState(false)
+  const [defOs, setDefOs] = useState('ubuntu')
+  const [defOsVersion, setDefOsVersion] = useState('')
+  const [defBusy, setDefBusy] = useState(false)
+  const [defError, setDefError] = useState(null)
 
   // 存储节点（磁盘角色且启用）与母盘清单：两个独立失败面，空态要能说清是哪种
   const [storageAgents, setStorageAgents] = useState([])
@@ -324,6 +335,50 @@ export default function Workers() {
     }
   }
 
+  const handleBatchDeleteDisks = async (extra = {}) => {
+    if (selected.length === 0) return
+    setDiskOpResult(null)
+    setDiskOpError(null)
+    try {
+      const res = await batchDeleteWorkerDisks({
+        workers: selected,
+        delete_file: Boolean(extra.delete_disk),
+        ignore_missing_target: Boolean(extra.ignore_missing),
+      })
+      setDiskOpResult(res)
+      setSelected([])
+      setAnchor(null)
+      await fetchWorkers()
+    } catch (e) {
+      setDiskOpError(e.message)
+    }
+  }
+
+  const handleBatchSetDefault = async (e) => {
+    e.preventDefault()
+    if (selected.length === 0) return
+    setDefBusy(true)
+    setDefError(null)
+    setDiskOpResult(null)
+    setDiskOpError(null)
+    try {
+      const res = await batchSetWorkerDefaultBoot({
+        workers: selected,
+        os: defOs,
+        os_version: defOsVersion.trim(),
+      })
+      setDiskOpResult(res)
+      setDefOpen(false)
+      setSelected([])
+      setAnchor(null)
+      await fetchWorkers()
+    } catch (err) {
+      setDefError(err.message)
+    } finally {
+      setDefBusy(false)
+    }
+  }
+
   const handleCreate = async (e) => {
     e.preventDefault()
     const count = parseInt(createForm.count, 10)
@@ -545,11 +600,50 @@ export default function Workers() {
               { name: 'ignore_missing', label: t('workerDetail.ignoreMissing') },
             ]}
           />
+          <Button variant="ghost" onClick={() => setDefOpen(true)}>
+            {t('workers.bulkDisk.setDefault')}
+          </Button>
+          <ConfirmAction
+            trigger={<Button variant="danger" disabled={deleting}>{t('workers.bulkDisk.delete')}</Button>}
+            message={t('workers.bulkDisk.deleteConfirm', { count: selected.length })}
+            onConfirm={(extra) => handleBatchDeleteDisks(extra)}
+            extraFields={[
+              { name: 'delete_disk', label: t('workerDetail.deleteDisk') },
+              { name: 'ignore_missing', label: t('workerDetail.ignoreMissing') },
+            ]}
+          />
           <span className="ab-spacer" />
           <button type="button" className="ab-clear" onClick={exitPlan}>
             {t('workers.sel.clear')}
           </button>
         </div>
+      )}
+
+      {defOpen && (
+        <Modal
+          title={t('workers.bulkDisk.setDefaultTitle')}
+          width="440px"
+          onClose={() => setDefOpen(false)}
+          footer={
+            <>
+              <Button type="submit" form="batch-default-form" disabled={defBusy}>
+                {defBusy ? t('workers.creating') : t('workers.bulkDisk.apply')}
+              </Button>
+              <Button variant="ghost" onClick={() => setDefOpen(false)} disabled={defBusy}>
+                {t('workers.bulkDisk.cancel')}
+              </Button>
+            </>
+          }
+        >
+          <form id="batch-default-form" onSubmit={handleBatchSetDefault}>
+            <p className="create-hint">{t('workers.bulkDisk.hint', { count: selected.length })}</p>
+            <Input label={t('workers.bulkDisk.os')} value={defOs}
+              onChange={(e) => setDefOs(e.target.value)} required />
+            <Input label={t('workers.bulkDisk.osVersion')} value={defOsVersion}
+              onChange={(e) => setDefOsVersion(e.target.value)} />
+            {defError && <p className="form-error">{defError}</p>}
+          </form>
+        </Modal>
       )}
 
       {planMode && (
@@ -868,6 +962,12 @@ export default function Workers() {
         )}
         {resultToast(createResult) && (
           <Toast {...resultToast(createResult)} onClose={() => setCreateResult(null)} />
+        )}
+        {resultToast(diskOpResult) && (
+          <Toast {...resultToast(diskOpResult)} onClose={() => setDiskOpResult(null)} />
+        )}
+        {diskOpError && (
+          <Toast tone="error" message={diskOpError} onClose={() => setDiskOpError(null)} />
         )}
         {diskError && (
           <Toast tone="error" message={diskError} onClose={() => setDiskError(null)} />

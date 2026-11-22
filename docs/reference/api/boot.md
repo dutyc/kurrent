@@ -29,14 +29,14 @@ title: "引导与设备准入"
 
 固件 `status` 的取值含义：
 
-- `incomplete`：固件文件存在但缺少 `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` 中的任一项——stock iPXE 同样无法完成 TPM 证明。
+- `incomplete`：固件文件存在但缺少 `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` 中的任一项；stock iPXE 同样无法完成 TPM 证明。
 - `empty`：零字节文件。
 - `missing`：文件不存在。
 - `rejected`：路径越出 tftp 根，控制面拒绝且不会读取该路径。
 
 `host_path` 是相对部署根的宿主路径（`tftp/...`），用于补文件。`menu.status=ok` 要求脚本中至少有一个 `menu` 段和一条非 `--gap` 的 `item`。
 
-`secureboot.status=ok` 要求同时满足：签名镜像存在、manifest 哈希一致、固件内嵌的引导端口与部署的 `KURRENT_BOOT_HTTPS_PORT` 一致、boot CA 证书就位，且 manifest 记录的 CA 指纹与控制面当前 boot CA 一致。任一项不一致时固件会拒绝本控制面：端口错则拨不通，锚错则握手被拒。没有 `tftp/secureboot/` 产物时 `present=false`，不影响其余检查。
+`secureboot.status=ok` 要求同时满足：签名镜像存在、manifest 哈希一致、固件内嵌的引导端口与部署的 `KURRENT_BOOT_HTTPS_PORT` 一致、boot CA 证书就位，且 manifest 记录的 CA 指纹与控制面当前 boot CA 一致。任一项不一致时固件会拒绝本控制面：端口错误导致连接失败，信任锚错误导致握手被拒。没有 `tftp/secureboot/` 产物时 `present=false`，不影响其余检查。
 
 ### curl
 
@@ -52,7 +52,7 @@ curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
 
 给 iPXE 启动脚本读取 per-worker 启动变量。该接口不鉴权，只暴露受控内网启动所需变量。NVMe-oF 凭据（`nbft_secret` / `nbft_tls_psk`）**只在 TPM 证明通过后注入**（`mac` + 一次性 `nonce` + 对该 nonce 的 PCR quote，见本节）。
 
-> **注意**：该端点**只读**（启动变量投影，无写副作用）。注册窗口期注册（新 MAC 携 TPM AK 入设备池）已收敛到 `GET /devices/report`（见[设备池](./devices.md)），由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`。
+> **说明：** 该端点**只读**（启动变量投影，无写副作用）。注册窗口期注册（新 MAC 携 TPM AK 入设备池）已收敛到 `GET /devices/report`（见[设备池](./devices.md)），由 `boot.ipxe.cfg` 在请求 `/boot-vars` 之前先 `chain`。
 
 **限速**：按来源 IP 滑窗限速（默认 240 次/分钟，`KURRENT_CP_RATE_LIMIT_BOOT_VARS` 可覆盖，`<=0` 关闭）。超限返回 `429` + `Retry-After` 并写 `boot_rate_limited` 告警。证明校验是这里最贵的操作，限速只抑制扫描，不作身份边界。
 
@@ -83,7 +83,7 @@ curl --cert client.crt --key client.key https://<host>/api/cp/boot-assets
 | `hostnqn` | 该 Worker 的发起端 Host NQN（盘 NQN 前缀 + `:host.<worker_id>`，与盘 NQN 同域、与 nvmet-host 登记的 host 条目一致）；**默认盘带 NQN 时注入**。固件侧消费：iPXE nvmetcp 默认 hostnqn 为 `nqn.2014-08.org.ipxe:<uuid>`（无 UUID 回退 `:ipxe`），与登记值不匹配时严格模式认证必败，须以本字段覆盖（固件补丁 `0005` 支持 `hostnqn` 设置） |
 | `os` | 默认启动盘（`default_disk` 对应的盘，未设时取第一块）的 os 名（盘记录权威）——菜单只保留一个通用 OS 项（`boot-os`），本变量仅用于菜单标签展示；数据面路径由 `disk_nqn` 决定。Worker 无系统盘时不返回（reboot 循环等待建盘） |
 | `os_version` | 默认启动盘的版本备注（盘记录 `os_version`，`''` = 无版本）——空值不下发，menu.ipxe 的 `os-label` 拼接自适应（有版本显示 `os version`）。Worker 无系统盘时不返回 |
-| `menu_default` | 推导链：`workers.yml` 的 `default_disk`（首块盘自动设为默认；多盘用[设置默认盘](./disks.md)指定，os_tag 引用具体盘）> `boot.menu_default`（显式配置）> `reboot`（未配置时循环重启等待）。有默认盘时固定为 `boot-os`（唯一 OS 项）；未设默认盘时使用 `boot.menu_default`（`config` / `shell` / `reboot` / `exit`）；都未配置时为 `reboot` |
+| `menu_default` | 推导链：`boot.menu_default`（显式覆盖，优先）> `workers.yml` 的 `default_disk`（首块盘自动设为默认；多盘用[设置默认盘](./disks.md)指定，os_tag 引用具体盘）> `reboot`（未配置时循环重启等待）。设了 `boot.menu_default`（`config` / `shell` / `reboot` / `exit`）即覆盖默认盘，自动选中该项；未设时回到 `default_disk` 的 `boot-os`（唯一 OS 项）；都未配置时为 `reboot` |
 | `menu_timeout` | 已配置默认启动时：`boot.menu_timeout` > `spec.boot.menuTimeoutMs`（默认 5000）；处于 `reboot` 循环时：固定用 `spec.boot.autoBootTimeoutMs`（默认 1）。单位均为毫秒 |
 
 查找 Worker 的规则（**绑定权威优先**）：
@@ -104,7 +104,7 @@ mac 未命中且 hostname 也未命中 -> dnsmasq 投影（仅存量/无台账�
 默认启动项由 `/boot-vars` 按以下顺序推导：
 
 ```text
-default_disk（首块盘自动设为默认；多盘用[设置默认盘](./disks.md)指定）-> boot.menu_default（显式配置）-> reboot（未配置）
+boot.menu_default（显式覆盖，优先）-> default_disk（首块盘自动设为默认；多盘用[设置默认盘](./disks.md)指定）-> reboot（未配置）
 ```
 
 - 只有一块系统盘时无需额外设置：建盘即写入 `default_disk`。多盘并存时调用 `PUT /workers/{worker_id}/default-disk` 指定默认启动盘（os_tag 引用具体盘）：
@@ -115,8 +115,8 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 
 - MAIN MENU 只保留一个通用 OS 项 `boot-os`，由默认盘推导；`os` / `os-version` 仅作菜单展示，启动身份由 `disk_nqn` 承载
 
-- 也可以显式清除 `default_disk`（`PUT /workers/{worker_id}/default-disk`，`{"disk": null}`），改用 `boot.menu_default` 指定 iPXE 菜单默认项（如配置界面 `config`、退出 `exit`）
-- 两者都没有时，`menu_default` 返回 `reboot`（短超时循环重启，等待管理员建盘 / 设置默认盘；`exit` 仅出现在显式设置时）
+- 也可以直接用 `boot.menu_default` 指定 iPXE 菜单默认项（如配置界面 `config`、退出 `exit`）——它会覆盖 `default_disk`；清除该覆盖（`{"menu_default": null}`）即回到默认盘
+- 两个都未配置时，`menu_default` 返回 `reboot`（短超时循环重启，等待管理员建盘 / 设置默认盘；`exit` 仅出现在显式设置时）
 
 ### 注册窗口期注册（Zero-touch Provisioning）
 
@@ -168,7 +168,7 @@ disk=<os_tag> -> menu_default=boot-os, os=<该盘 os>, os-version=<该盘 os_ver
 /boot-vars?mac=${mac}&hostname=${hostname}
 ```
 
-> **注意**：规范上 `${mac:hexraw}` 与 `${mac}` 等价（后端统一归一化），但部分真实 iPXE 固件对 `hexraw` 修饰符展开异常（可能为空）。实测必须使用带冒号的 `${mac}`。
+> **说明：** 规范上 `${mac:hexraw}` 与 `${mac}` 等价（后端统一归一化），但部分真实 iPXE 固件对 `hexraw` 修饰符展开异常（可能为空）。实测必须使用带冒号的 `${mac}`。
 
 ### iPXE 格式 curl
 
@@ -284,7 +284,7 @@ isset ${hostname} && set initiator-iqn ${base-iqn}:${hostname} || set initiator-
 
 `${quote}` / `${quote-sig}` 是固件写入的 iPXE 变量（变量名用连字符），对应请求参数 `quote` / `quote_sig`。成功后返回的 `disk-nqn` / `storager-ip` 可能覆盖静态默认值，派生变量在 `:vars-done` 重建。`base-iqn` 用于派生 `initiator-iqn`，`iscsi-sep` 的默认值当前不参与菜单拼装。
 
-`menu.ipxe` 主引导项用 NVMe-oF 拼装：`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`，已注入 `nbft-secret` 时附加 `?secret=`，再附上 `&tls_psk=…&tls_trsvcid=…`。`nbft-tls-port` / `nbft-tls-psk` 为必需项——缺失即目标端加密未就绪，该项直接 `goto failed`，不再拼明文 URI。
+`menu.ipxe` 主引导项用 NVMe-oF 拼装：`set root-path nvme://${storager-ip}:${nbft-tls-port}/${disk-nqn}`，已注入 `nbft-secret` 时附加 `?secret=`，再附上 `&tls_psk=…&tls_trsvcid=…`。`nbft-tls-port` / `nbft-tls-psk` 为必需项；缺失表示目标端加密未就绪，该项直接 `goto failed`，不再拼明文 URI。
 
 ### Agent 数据面地址
 
@@ -307,7 +307,7 @@ agents:
 
 TTL 与额度上限来自声明 `spec.registration`（`windowMaxTtlMinutes` 默认 60、`windowMaxDevices` 默认 1000；不可配置为永久），到期自动关闭（懒计算，状态以查询结果为准）。
 
-可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录）。额度只约束未知设备自动入池——AK 认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。
+可另设**放行额度**（`max_devices`，台）：窗口期内自动入池的设备数达到上限即停止放行（不主动清窗口记录）。额度只约束未知设备自动入池，AK 认领与管理员手动登记/导入不受其约束；已放行数派生自设备台账，不另存计数器。
 
 全部端点需 `Authorization: Bearer`。
 
@@ -414,7 +414,7 @@ curl -X PUT "$BASE_URL/settings/enforcement" \
 |---|---|---|
 | `mac` | 是 | MAC 地址（归一化规则同 `/boot-vars`） |
 
-**成功返回（200，`text/plain`）**：`#!ipxe` 脚本体——iPXE 用 `chain` 直接消费，执行后 `${nonce}` 即为 64 hex 字符一次性 nonce：
+**成功返回（200，`text/plain`）**：`#!ipxe` 脚本体，iPXE 用 `chain` 直接消费，执行后 `${nonce}` 即为 64 hex 字符一次性 nonce：
 
 ```ipxe
 #!ipxe
@@ -431,4 +431,4 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 2. 固件用 TPM AK 对 PCR 0/2/4/7（SHA-256）做 quote，`extraData` 原样填入 `${nonce}` 字符串的 ASCII 字节（64 个 hex 字符），不做 hex 解码或其他编码变换。输出 `quote`（TPMS_ATTEST 原始字节 hex，不含 TPM2B 长度前缀）与 `quote_sig`（AK 私钥对 quote 字节的签名 hex）。PCR 读取与 quote 在同一次 TPM 调用内完成。
 3. `GET /boot-vars?mac=&hostname=&nonce=&quote=&quote_sig=` → 校验 quote 结构（magic `0xFF544347`、type `TPM_ST_ATTEST_QUOTE`、PCR 选择固定为 0/2/4/7 且仅 SHA-256）、AK 签名、`extraData == nonce`、nonce 未被消费，最后比对 PCR 摘要与平台基线。全部通过才下发凭据（注入四条件第 4 条，见本节）；任何一步失败 → 空脚本（拒绝下发，审计 `boot_vars.credential` 与 `device.attest`，reason 见本节）。
 
-quote 校验先于 nonce 消费：格式或签名错误不会烧掉本次 nonce，设备可修正后重试；nonce 被消费后重放返回 `nonce_invalid`。
+quote 校验先于 nonce 消费：格式或签名错误不会消耗本次 nonce，设备可修正后重试；nonce 被消费后重放返回 `nonce_invalid`。

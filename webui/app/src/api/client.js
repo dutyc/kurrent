@@ -333,6 +333,22 @@ export function setWorkerDefaultBoot(workerId, data) {
   return request(`/workers/${workerId}/default-disk`, { method: 'PUT', body: data });
 }
 
+export function getWorkerDiskStatus(workerId) {
+  // 逐盘运行时状态：{ worker_id, credential:{exists,secret_hash?},
+  //   disks:[{os_tag,os,nqn,iqn,exported,hosts,controllers,size,physical_bytes,error}] }
+  return request(`/workers/${encodeURIComponent(workerId)}/disks/status`);
+}
+
+export function batchDeleteWorkerDisks(data) {
+  // { targets:[{worker_id,os_tag}] | workers:[...], delete_file, ignore_missing_target, dry_run }
+  return request('/workers/luns/disk/batch-delete', { method: 'POST', body: data });
+}
+
+export function batchSetWorkerDefaultBoot(data) {
+  // { targets:[{worker_id,os_tag}] | workers:[...], os, os_version, dry_run }
+  return request('/workers/default-disk/batch', { method: 'PUT', body: data });
+}
+
 export function updateWorkerMac(workerId, mac) {
   // 修改 MAC 绑定（hostname 不变），审计记录旧/新 MAC
   return request(`/workers/${workerId}/mac`, { method: 'PUT', body: { mac } });

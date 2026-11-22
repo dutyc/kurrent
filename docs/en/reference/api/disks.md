@@ -259,14 +259,14 @@ This section lists common errors from Worker registration (`POST /workers`) and 
 
 ### Description
 
-**What the “default boot disk” is for**: a Worker can have multiple system disks (at most one per OS+version pair, e.g., `ubuntu 22.04` + `windows`; different versions of the same OS can coexist). On every boot, the iPXE menu auto-selects one item after its timeout — the default boot disk configured here decides which item is auto-selected, and also decides which disk’s connection info `/boot-vars` projects (`disk_nqn` / `storager_ip` come from the default boot disk, see [Boot and Device Admission](./boot.md)). Without it, the menu auto-selects `reboot` with a 1 ms timeout and loops rebooting until the admin finishes configuration — never silently booting into the wrong OS.
+**What the “default boot disk” is for**: a Worker can have multiple system disks (at most one per OS+version pair, e.g., `ubuntu 22.04` + `windows`; different versions of the same OS can coexist). On every boot, the iPXE menu auto-selects one item after its timeout — by default it selects the default boot disk configured here (`boot-os`), which also decides which disk’s connection info `/boot-vars` projects (`disk_nqn` / `storager_ip` come from the default boot disk, see [Boot and Device Admission](./boot.md)). When `menu_default` is set, the menu auto-selects that item instead, while the projected connection info still comes from the default disk. Without either, the menu auto-selects `reboot` with a 1 ms timeout and loops rebooting until the admin finishes configuration — never silently booting into the wrong OS.
 
 **Note**: `disk` is the disk-level random identifier `os_tag` (generated at disk creation, 12 hex chars, the data-plane unique key), not an OS name; when multiple versions of the same OS coexist, only the os_tag can precisely locate the **specific disk** to boot by default.
 
 The `/boot-vars` `menu_default` derivation chain:
 
 ```text
-default_disk (the `disk` field of this endpoint, highest priority) -> boot.menu_default (the `menu_default` field of this endpoint) -> reboot (not configured, loop reboot waiting)
+boot.menu_default (the `menu_default` field of this endpoint, explicit override, highest priority) -> default_disk (the `disk` field of this endpoint) -> reboot (not configured, loop reboot waiting)
 ```
 
 The three request body fields can be sent individually or in combination; at least one must be provided. Sending `null` (or an empty string) clears the corresponding item. This endpoint can be called repeatedly; later calls override earlier ones — they write the same ledger fields as the `boot` passed at registration (`POST /workers`).
@@ -392,6 +392,76 @@ Returns the full Worker inventory (with `disks` no longer containing the deleted
 | `404` | Worker not found, or the Worker does not have a disk with that `os_tag` |
 
 ---
+
+## POST /workers/luns/disk/batch-delete
+
+### Description
+
+Batch-delete system disks: either `targets` naming each `{worker_id, os_tag}`, or `workers` to delete all disks of those workers — pick one. With `dry_run=true` only a plan is returned and nothing is deleted; `delete_file` / `ignore_missing_target` behave as in the single delete. Items run independently and return `succeeded` / `skipped` / `failed` summaries (missing disk or worker is reported as skipped).
+
+### Request Body Fields
+
+| Field | Required | Description |
+|---|---:|---|
+| `targets` | One of two | Per-item `{worker_id, os_tag}` |
+| `workers` | One of two | Worker list; deletes all their system disks |
+| `delete_file` | No | Also delete the disk `.img` file, default false |
+| `ignore_missing_target` | No | Tolerate missing targets on the Agent, default false |
+| `dry_run` | No | Return only the plan, default false |
+
+### curl
+
+```bash
+curl -s -X POST "$BASE_URL/workers/luns/disk/batch-delete" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"workers": ["worker-01", "worker-02"], "dry_run": true}'
+```
+
+### Example Success Response
+
+```json
+{
+  "succeeded": [{ "worker_id": "worker-01", "os_tag": "0d26b6f33a89", "os": "ubuntu" }],
+  "skipped": [{ "worker_id": "worker-02", "os_tag": null, "reason": "worker not found" }],
+  "failed": []
+}
+```
+
+With `dry_run=true` it returns `{"dry_run": true, "plan": [{worker_id, os_tag, action, reason}]}`, where `action` is `delete` / `skip` / `error`.
+
+## PUT /workers/default-disk/batch
+
+### Description
+
+Batch-set the default boot disk: either `targets` naming each `{worker_id, os_tag}`, or `workers` plus `os`[/`os_version`] matching one disk per worker — pick one. Only `default_disk` is changed; menu overrides (`menu_default` / `menu_timeout`) are out of scope for batch — a Worker with a `menu_default` override still boots that item, so clear the override first (`PUT /workers/{worker_id}/default-disk` with `{"menu_default": null}`). `dry_run=true` returns only the plan. Already-default is skipped; no match or missing disk is failed.
+
+### Request Body Fields
+
+| Field | Required | Description |
+|---|---:|---|
+| `targets` | One of two | Per-item `{worker_id, os_tag}` |
+| `workers` | One of two | Worker list; `os` is required for matching |
+| `os` | Required with workers | OS label (ledger remark) to match a worker’s disk |
+| `os_version` | No | Version; empty means any version (must be unique under that OS) |
+| `dry_run` | No | Return only the plan, default false |
+
+### curl
+
+```bash
+curl -s -X PUT "$BASE_URL/workers/default-disk/batch" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"workers": ["worker-01", "worker-02"], "os": "ubuntu", "os_version": "24.04"}'
+```
+
+### Example Success Response
+
+```json
+{
+  "succeeded": [{ "worker_id": "worker-01", "os_tag": "0d26b6f33a89" }],
+  "skipped": [{ "worker_id": "worker-02", "os_tag": "1a2b3c4d5e6f", "reason": "already default" }],
+  "failed": [{ "worker_id": "worker-03", "os_tag": null, "error": "no disk for ubuntu 26.04" }]
+}
+```
 
 ## NVMe-oF Authentication Credentials (/workers/{worker_id}/credential)
 

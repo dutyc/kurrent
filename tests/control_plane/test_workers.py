@@ -571,3 +571,104 @@ class TestWorkerDelete:
                             headers=auth_headers)
         assert res.status_code == 200
         assert client.get("/workers/worker-01", headers=auth_headers).status_code == 404
+
+
+class TestWorkerDiskOps:
+    """逐盘运行时状态 + 批量删盘 / 批量设默认。"""
+
+    def test_worker_disk_status(self, client, auth_headers, register_agent, mock_agent_client):
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        disk = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+        }, headers=auth_headers).json()["disks"][0]
+        nqn = disk["nqn"]
+        mock_agent_client.disk_status = lambda: [{
+            "nqn": nqn, "iqn": nqn, "exported": True,
+            "hosts": ["host"], "controllers": ["host"],
+            "luns": [{"lun": 1, "backing": "/x", "size": 100, "blocks": 8, "physical_bytes": 4096}],
+        }]
+        res = client.get("/workers/worker-01/disks/status", headers=auth_headers)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["credential"]["exists"] is False
+        d = body["disks"][0]
+        assert d["os_tag"] == disk["os_tag"]
+        assert d["exported"] is True
+        assert d["controllers"] == ["host"]
+        assert d["size"] == 100 and d["physical_bytes"] == 4096
+
+    def _two_disks(self, client, auth_headers):
+        client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
+        first = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "ubuntu", "size": "40G",
+        }, headers=auth_headers).json()["disks"][0]
+        second = client.post("/workers/worker-01/luns/disk", json={
+            "type": "empty", "os": "debian", "os_version": "12", "size": "40G",
+        }, headers=auth_headers).json()["disks"][1]
+        return first, second
+
+    def test_batch_delete_disks_dry_run(self, client, auth_headers, register_agent):
+        first, _ = self._two_disks(client, auth_headers)
+        res = client.post("/workers/luns/disk/batch-delete", json={
+            "workers": ["worker-01"], "dry_run": True,
+        }, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        actions = {(p["worker_id"], p["os_tag"]): p["action"] for p in res.json()["plan"]}
+        assert actions[("worker-01", first["os_tag"])] == "delete"
+        assert len(client.get("/workers/worker-01", headers=auth_headers).json()["disks"]) == 2
+
+    def test_batch_delete_disks_executes_with_promotion(self, client, auth_headers, register_agent):
+        first, second = self._two_disks(client, auth_headers)
+        res = client.post("/workers/luns/disk/batch-delete", json={
+            "targets": [{"worker_id": "worker-01", "os_tag": first["os_tag"]}],
+        }, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        assert len(res.json()["succeeded"]) == 1
+        w = client.get("/workers/worker-01", headers=auth_headers).json()
+        assert [d["os_tag"] for d in w["disks"]] == [second["os_tag"]]
+        assert w["default_disk"] == second["os_tag"]  # 只剩一块 → 提升为默认
+
+        # 回归：批量删盘与单删同等审计口径（agent.delete_disk + workers.disk.delete 逐项）
+        import json
+        from control_plane.app.config import settings
+        ops = [json.loads(l) for l in settings.operations_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        agent_deletes = [e for e in ops
+                         if e["op"] == "agent.delete_disk" and e.get("worker_id") == "worker-01"]
+        assert len(agent_deletes) == 1
+        assert agent_deletes[0]["agent"] == "a1b2c3d4e5f6"
+        assert agent_deletes[0]["iqn"] == first["iqn"]
+        ledger_writes = [e for e in ops
+                         if e["op"] == "workers.disk.delete" and e.get("worker_id") == "worker-01"]
+        assert len(ledger_writes) == 1
+        assert ledger_writes[0]["os_tag"] == first["os_tag"]
+        assert ledger_writes[0]["os"] == "ubuntu"
+
+    def test_batch_set_default_targets(self, client, auth_headers, register_agent):
+        first, second = self._two_disks(client, auth_headers)
+        client.put("/workers/worker-01/default-disk", json={"disk": second["os_tag"]},
+                   headers=auth_headers)
+        res = client.put("/workers/default-disk/batch", json={
+            "targets": [{"worker_id": "worker-01", "os_tag": first["os_tag"]}],
+        }, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        assert len(res.json()["succeeded"]) == 1
+        assert client.get("/workers/worker-01", headers=auth_headers).json()["default_disk"] == first["os_tag"]
+
+    def test_batch_set_default_workers_match(self, client, auth_headers, register_agent):
+        first, second = self._two_disks(client, auth_headers)
+        client.put("/workers/worker-01/default-disk", json={"disk": second["os_tag"]},
+                   headers=auth_headers)
+        res = client.put("/workers/default-disk/batch", json={
+            "workers": ["worker-01"], "os": "ubuntu",
+        }, headers=auth_headers)
+        body = res.json()
+        assert [s["os_tag"] for s in body["succeeded"]] == [first["os_tag"]]
+        assert client.get("/workers/worker-01", headers=auth_headers).json()["default_disk"] == first["os_tag"]
+
+    def test_batch_set_default_bad_tag_failed(self, client, auth_headers, register_agent):
+        self._two_disks(client, auth_headers)
+        res = client.put("/workers/default-disk/batch", json={
+            "targets": [{"worker_id": "worker-01", "os_tag": "deadbeef0000"}],
+        }, headers=auth_headers)
+        body = res.json()
+        assert body["failed"][0]["error"] == "no such disk"

@@ -267,7 +267,7 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 
 ### 说明
 
-**「默认启动盘」是干什么的**：一台 Worker 可以挂多块系统盘（同一系统同一版本至多一块，如 `ubuntu 22.04` + `windows`，同系统不同版本可并存）。每次开机，iPXE 菜单在超时后会自动选中某一项启动——本端点配置的默认启动盘决定自动选中哪一项，同时决定 `/boot-vars` 投影哪块盘的连接信息（`disk_nqn` / `storager_ip` 取默认启动盘，见[引导链](./boot.md)）。
+**「默认启动盘」是干什么的**：一台 Worker 可以挂多块系统盘（同一系统同一版本至多一块，如 `ubuntu 22.04` + `windows`，同系统不同版本可并存）。每次开机，iPXE 菜单在超时后会自动选中某一项启动——默认情况下选本端点的默认启动盘（`boot-os`），它同时决定 `/boot-vars` 投影哪块盘的连接信息（`disk_nqn` / `storager_ip` 取默认启动盘，见[引导链](./boot.md)）；设置了 `menu_default` 覆盖时，自动选中该项，而投影的连接信息仍取默认盘。
 
 不设置时菜单自动选 `reboot`，配合 1 毫秒超时循环重启，等待管理员完成配置，避免静默进错系统。
 
@@ -276,7 +276,7 @@ curl -s -X POST "$BASE_URL/workers/luns/disk/batch" \
 `/boot-vars` 的 `menu_default` 推导链：
 
 ```text
-default_disk（本端点 disk 字段，优先）-> boot.menu_default（本端点 menu_default 字段）-> reboot（未配置，循环重启等待）
+boot.menu_default（本端点 menu_default 字段，显式覆盖，优先）-> default_disk（本端点 disk 字段）-> reboot（未配置，循环重启等待）
 ```
 
 请求体三个字段可单独或组合传，至少传一个；传 `null`（或空字符串）表示清除对应项。
@@ -404,6 +404,76 @@ curl -s -X DELETE "$BASE_URL/workers/worker-01/luns/disk/0d26b6f33a89?delete_fil
 | `404` | Worker 不存在，或该 Worker 没有此 `os_tag` 对应的盘 |
 
 ---
+
+## POST /workers/luns/disk/batch-delete
+
+### 说明
+
+批量删除系统盘：`targets` 逐项点名 `{worker_id, os_tag}`，或 `workers` 删除这些 Worker 的全部盘，二选一。`dry_run=true` 只返回计划不删盘；`delete_file` / `ignore_missing_target` 与单删一致。逐项独立执行，返回 `succeeded` / `skipped` / `failed` 汇总（盘或 worker 已不存在按 skipped）。
+
+### 请求体字段
+
+| 字段 | 必填 | 说明 |
+|---|---:|---|
+| `targets` | 二选一 | 逐项 `{worker_id, os_tag}` |
+| `workers` | 二选一 | Worker 列表，删除其全部系统盘 |
+| `delete_file` | 否 | 同时删除盘 `.img` 文件，默认 false |
+| `ignore_missing_target` | 否 | 容忍 Agent 侧 target 已缺失，默认 false |
+| `dry_run` | 否 | 只返回计划，默认 false |
+
+### curl
+
+```bash
+curl -s -X POST "$BASE_URL/workers/luns/disk/batch-delete" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"workers": ["worker-01", "worker-02"], "dry_run": true}'
+```
+
+### 成功返回示例
+
+```json
+{
+  "succeeded": [{ "worker_id": "worker-01", "os_tag": "0d26b6f33a89", "os": "ubuntu" }],
+  "skipped": [{ "worker_id": "worker-02", "os_tag": null, "reason": "worker not found" }],
+  "failed": []
+}
+```
+
+`dry_run=true` 时返回 `{"dry_run": true, "plan": [{worker_id, os_tag, action, reason}]}`，`action` 为 `delete` / `skip` / `error`。
+
+## PUT /workers/default-disk/batch
+
+### 说明
+
+批量设默认启动盘：`targets` 逐项 `{worker_id, os_tag}`，或 `workers` + 按 `os`[/`os_version`] 匹配各自一块盘，二选一。只改 `default_disk`；菜单覆盖（`menu_default` / `menu_timeout`）不在批量范围——已有 `menu_default` 覆盖的 Worker 仍按覆盖项启动，需先清除覆盖（`PUT /workers/{worker_id}/default-disk` 传 `{"menu_default": null}`）。`dry_run=true` 只返回计划。已是默认按 skipped，匹配失败/盘不存在按 failed。
+
+### 请求体字段
+
+| 字段 | 必填 | 说明 |
+|---|---:|---|
+| `targets` | 二选一 | 逐项 `{worker_id, os_tag}` |
+| `workers` | 二选一 | Worker 列表；`os` 必填用于匹配 |
+| `os` | workers 模式必填 | 系统名（台账备注），匹配该 Worker 的盘 |
+| `os_version` | 否 | 版本；空表示不限版本（要求该 os 下唯一） |
+| `dry_run` | 否 | 只返回计划，默认 false |
+
+### curl
+
+```bash
+curl -s -X PUT "$BASE_URL/workers/default-disk/batch" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"workers": ["worker-01", "worker-02"], "os": "ubuntu", "os_version": "24.04"}'
+```
+
+### 成功返回示例
+
+```json
+{
+  "succeeded": [{ "worker_id": "worker-01", "os_tag": "0d26b6f33a89" }],
+  "skipped": [{ "worker_id": "worker-02", "os_tag": "1a2b3c4d5e6f", "reason": "already default" }],
+  "failed": [{ "worker_id": "worker-03", "os_tag": null, "error": "no disk for ubuntu 26.04" }]
+}
+```
 
 ## NVMe-oF 认证凭据（/workers/{worker_id}/credential）
 

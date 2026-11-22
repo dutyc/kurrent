@@ -363,6 +363,56 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 
 ---
 
+## GET /workers/{worker_id}/disks/status
+
+### 说明
+
+逐盘运行时状态：导出在线、凭据生效、活跃会话、盘占用（逻辑大小 + 物理分配）。盘可能分布在不同 Agent，按盘所属 Agent 分组取状态；凭据为 Worker 级关联展示。进入 WebUI 的 disks Tab 时调用。
+
+### Path 参数
+
+| 参数 | 必填 | 说明 |
+|---|---:|---|
+| `worker_id` | 是 | Worker 编号 |
+
+### curl
+
+```bash
+curl -s "$BASE_URL/workers/worker-01/disks/status" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### 成功返回示例
+
+```json
+{
+  "worker_id": "worker-01",
+  "credential": { "worker_id": "worker-01", "exists": true, "secret_hash": "d3f4a9c1b2e3d4e" },
+  "disks": [
+    {
+      "os_tag": "0d26b6f33a89",
+      "os": "ubuntu",
+      "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+      "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+      "exported": true,
+      "hosts": ["nqn.2026-07.com.kurrent:host.worker-01"],
+      "controllers": ["nqn.2026-07.com.kurrent:host.worker-01"],
+      "size": 42949672960,
+      "physical_bytes": 12884901888,
+      "error": null
+    }
+  ]
+}
+```
+
+### 字段说明
+
+- `exported`：子系统已挂到数据面端口（导出生效）。
+- `hosts`：已登记 DHHC-1 认证的 Host NQN（准入白名单）。
+- `controllers`：当前活跃的 NVMe/TCP 会话（设备正连接）。
+- `size` / `physical_bytes`：盘文件逻辑大小与物理分配（`st_blocks×512`；reflink 共享会重复计数，不代表独占空间）。
+- `error`：该盘所属 Agent 不可达时的错误；盘文件缺失时占用字段为 `null`。
+
 ## DELETE /workers/{worker_id}
 
 ### 说明

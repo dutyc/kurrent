@@ -878,6 +878,15 @@ def list_luns():
     return backend.list_targets()
 
 
+@app.get("/lun/status", dependencies=[Depends(verify_client_cert)])
+def list_lun_status():
+    """逐盘运行时状态（导出在线/凭据在位/活跃会话/盘占用），仅 nvmet 后端。"""
+    from .nvmet import NvmetBackend
+    if not isinstance(backend, NvmetBackend):
+        raise HTTPException(400, "lun status requires backend=nvmet")
+    return {"targets": backend.target_statuses()}
+
+
 @app.get("/masters", dependencies=[Depends(verify_client_cert)])
 def list_masters():
     """列出 DISK_DIR 下 *_tpl_* 母盘（后台线程周期扫描的缓存清单，供 Control Plane / WebUI 克隆选盘）。"""

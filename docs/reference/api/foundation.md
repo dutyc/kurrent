@@ -13,12 +13,12 @@ title: "基础与状态"
 控制面管理面不监听任何 TCP 端口：nginx 经共享卷中的 unix socket（`/run/kurrent/cp.sock`）
 转发，容器健康检查走同一 socket。本机调试请经 443 入口，或进入控制面容器访问该 socket。
 
-> 入口使用自签服务器证书（状态根下 `control-plane/state/certs/server.crt`，控制面启动时自动生成；
+> **说明：** 入口使用自签服务器证书（状态根下 `control-plane/state/certs/server.crt`，控制面启动时自动生成；
 > 状态根默认 `~/.local/state/kurrent`，`kurrent deployment show` 可查），curl 需加 `-k`，
 > 或用 `--cacert <state>/control-plane/state/certs/server.crt` 固定信任该证书本体。未签名调试固件以
 > TOFU 固定该证书指纹；签名固件走 4443，只信任构建时嵌入的 boot CA。
 
-如果你通过别的端口或域名暴露，请替换为实际地址。
+通过其他端口或域名暴露入口时，请替换为实际地址。
 
 ## 环境变量
 
@@ -57,7 +57,7 @@ title: "基础与状态"
 说明：
 
 - 部署记录 `~/.kurrent/deployment.yaml`（0600）固定项目名、仓库根与状态根，不在容器内；`kurrent deployment show` 只读展示；
-- `workers.yml` **不记录 MAC**——MAC 与绑定关系统一由设备台账持有，Worker 侧只是投影；
+- `workers.yml` **不记录 MAC**，MAC 与绑定关系统一由设备台账持有，Worker 侧只是投影；
 - compose 把整个 `dnsmasq/` 目录挂进控制面容器（控制面还要往该目录写 `dnsmasq.conf`）；
 - 写 `dhcp-hosts.conf` 采用**截断写**（保持 inode），不用临时文件做 atomic replace：该文件以文件级 bind mount 进 dnsmasq 容器，换掉 inode 后容器读到的仍是旧文件；
 - `dnsmasq/dhcp-hosts.conf` 一行一个绑定，格式固定为：
@@ -74,7 +74,7 @@ title: "基础与状态"
 
 ### 说明
 
-健康检查接口，不改状态，不需要鉴权。启动期派生件（`dnsmasq.conf`、服务器证书、组件 PKI）失败时返回 `503 {"status":"degraded"}`——`kurrent init` 据此回滚声明；错误详情只在已认证的 `GET /config` 返回。
+健康检查接口，不改状态，不需要鉴权。启动期派生件（`dnsmasq.conf`、服务器证书、组件 PKI）失败时返回 `503 {"status":"degraded"}`，`kurrent init` 据此回滚声明；错误详情只在已认证的 `GET /config` 返回。
 
 ### curl
 
@@ -92,7 +92,7 @@ curl -s "$BASE_URL/healthz"
 
 ## GET /config（声明配置状态）
 
-返回运行进程加载的生效声明、规范化 `configHash` 与派生件一致性（需管理面认证：`human` 或 `automation`）。用于回答「现在运行的是哪份声明、派生物是否与之一致」；不返回任何私钥/密钥。
+返回运行进程加载的生效声明、规范化 `configHash` 与派生件一致性（需管理面认证：`human` 或 `automation`）。用于回答当前运行的是哪份声明、派生物是否与之一致；不返回任何私钥/密钥。
 
 | 字段 | 说明 |
 |---|---|

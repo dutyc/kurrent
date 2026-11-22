@@ -357,6 +357,56 @@ curl -s "$BASE_URL/workers/worker-01/status" \
 
 ---
 
+## GET /workers/{worker_id}/disks/status
+
+### Description
+
+Per-disk runtime status: export online, credential in effect, active sessions, and usage (logical size + physical allocation). Disks may be spread across different Agents; status is fetched per owning Agent and the Worker-level credential is shown alongside. Called when the disk tab is opened in the Web UI.
+
+### Path Parameters
+
+| Parameter | Required | Description |
+|---|---:|---|
+| `worker_id` | Yes | Worker ID |
+
+### curl
+
+```bash
+curl -s "$BASE_URL/workers/worker-01/disks/status" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Example Success Response
+
+```json
+{
+  "worker_id": "worker-01",
+  "credential": { "worker_id": "worker-01", "exists": true, "secret_hash": "d3f4a9c1b2e3d4e" },
+  "disks": [
+    {
+      "os_tag": "0d26b6f33a89",
+      "os": "ubuntu",
+      "nqn": "nqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+      "iqn": "iqn.2026-07.com.kurrent:worker-01.ubuntu.0d26b6f33a89",
+      "exported": true,
+      "hosts": ["nqn.2026-07.com.kurrent:host.worker-01"],
+      "controllers": ["nqn.2026-07.com.kurrent:host.worker-01"],
+      "size": 42949672960,
+      "physical_bytes": 12884901888,
+      "error": null
+    }
+  ]
+}
+```
+
+### Field Notes
+
+- `exported`: the subsystem is attached to the data-plane port (export active).
+- `hosts`: Host NQNs registered with DHHC-1 authentication (admission allow-list).
+- `controllers`: currently active NVMe/TCP sessions (devices connected now).
+- `size` / `physical_bytes`: logical size and physical allocation of the disk file (`st_blocks×512`; reflink sharing is counted repeatedly and does not reflect exclusive space).
+- `error`: error when the owning Agent is unreachable; usage fields are `null` when the disk file is missing.
+
 ## DELETE /workers/{worker_id}
 
 ### Description

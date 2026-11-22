@@ -150,10 +150,42 @@ class BatchCreateWorkerDiskRequest(BaseModel):
 
 class SetWorkerDefaultBootRequest(BaseModel):
     """设置 Worker 默认启动配置。disk=默认启动盘（os_tag，须为已挂系统盘）；
-    menu_default/menu_timeout=菜单项覆盖；传 null 清除对应项。推导链：default_disk > boot.menu_default > reboot。"""
+    menu_default/menu_timeout=菜单项覆盖；传 null 清除对应项。推导链：boot.menu_default（显式覆盖，优先）> default_disk > reboot。"""
     disk: str | None = None
     menu_default: str | None = None
     menu_timeout: int | None = None
+
+
+class BatchDeleteDiskTarget(BaseModel):
+    """批量删除时单个系统盘定位（worker_id + os_tag）。"""
+    worker_id: str
+    os_tag: str
+
+
+class BatchDeleteWorkerDiskRequest(BaseModel):
+    """批量删除系统盘：targets 逐项点名 或 workers（删除这些 Worker 的全部盘）二选一。
+    dry_run=true 只返回计划不删盘；delete_file/ignore_missing_target 与单删一致。"""
+    targets: list[BatchDeleteDiskTarget] = Field(default_factory=list)
+    workers: list[str] = Field(default_factory=list)
+    delete_file: bool = False
+    ignore_missing_target: bool = False
+    dry_run: bool = False
+
+
+class BatchSetDefaultTarget(BaseModel):
+    """批量设默认盘时单个 Worker 的盘定位（worker_id + os_tag）。"""
+    worker_id: str
+    os_tag: str
+
+
+class BatchSetDefaultBootRequest(BaseModel):
+    """批量设默认盘：targets 逐项点名 或 workers + 按 os[/os_version] 匹配 二选一。
+    dry_run=true 只返回计划。"""
+    targets: list[BatchSetDefaultTarget] = Field(default_factory=list)
+    workers: list[str] = Field(default_factory=list)
+    os: str = ""
+    os_version: str = ""
+    dry_run: bool = False
 
 
 class MasterTagRequest(BaseModel):

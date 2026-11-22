@@ -6,6 +6,9 @@ import {
   crc32,
   generateDHHC1,
   getComponentCerts,
+  getWorkerDiskStatus,
+  batchDeleteWorkerDisks,
+  batchSetWorkerDefaultBoot,
   issueBootstrapToken,
   revokeComponentCert,
   revokeUserCert,
@@ -225,4 +228,24 @@ test('issueBootstrapToken：省略 agent_id 时由控制面分配，显式传入
     usage: 'bootstrap',
     agent_id: '7f3a9c2b10de',
   })
+})
+
+test('getWorkerDiskStatus：GET /workers/<id>/disks/status（id 编码）', async () => {
+  const calls = await captureRequest(() => getWorkerDiskStatus('worker 1'))
+  assert.equal(calls[0].options.method, 'GET')
+  assert.equal(calls[0].url, '/api/cp/workers/worker%201/disks/status')
+})
+
+test('batchDeleteWorkerDisks：POST /workers/luns/disk/batch-delete', async () => {
+  const calls = await captureRequest(() => batchDeleteWorkerDisks({ workers: ['w1'], delete_file: true }))
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal(calls[0].url, '/api/cp/workers/luns/disk/batch-delete')
+  assert.deepEqual(JSON.parse(calls[0].options.body), { workers: ['w1'], delete_file: true })
+})
+
+test('batchSetWorkerDefaultBoot：PUT /workers/default-disk/batch', async () => {
+  const calls = await captureRequest(() => batchSetWorkerDefaultBoot({ workers: ['w1'], os: 'ubuntu' }))
+  assert.equal(calls[0].options.method, 'PUT')
+  assert.equal(calls[0].url, '/api/cp/workers/default-disk/batch')
+  assert.deepEqual(JSON.parse(calls[0].options.body), { workers: ['w1'], os: 'ubuntu' })
 })

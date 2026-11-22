@@ -23,8 +23,10 @@ from ..placement import PlacementError, resolve as resolve_placement
 from ..models import (
     BatchCreateWorkerDiskRequest,
     BatchCreateWorkersRequest,
+    BatchDeleteWorkerDiskRequest,
     BatchDeleteWorkersRequest,
     BatchDiskTarget,
+    BatchSetDefaultBootRequest,
     CreateWorkerDiskRequest,
     CreateWorkerRequest,
     CredentialRequest,
@@ -100,6 +102,59 @@ def get_worker_status(worker_id: str):
         "worker": _enrich_worker(worker_id, record_),
         "actual": _actual_state(record_),
     }
+
+
+@router.get("/workers/{worker_id}/disks/status")
+def get_worker_disks_status(worker_id: str):
+    """逐盘运行时状态：导出在线、凭据在位、活跃会话、盘占用（逻辑大小 + 物理分配）。
+
+    盘可能分布在不同 Agent（放置策略均摊）：按盘所属 Agent 分组各取一次盘状态，
+    再按盘 NQN 对齐。凭据为 Worker 级，关联展示、不重复取数。"""
+    worker_id = canonical_id(worker_id)
+    record_ = store.load_workers()["workers"].get(worker_id)
+    if not record_:
+        raise HTTPException(404, f"worker not found: {worker_id}")
+    disks = worker_disks(record_)
+
+    status_by_nqn: dict[str, dict[str, Any]] = {}
+    agent_errors: dict[str, str] = {}
+    for agent_id in {d.get("agent") for d in disks if d.get("agent")}:
+        try:
+            agent = agents.get(agent_id)
+            targets = agents.client(agent).disk_status()
+        except KeyError:
+            agent_errors[agent_id] = f"agent not registered: {agent_id}"
+            continue
+        except AgentAPIError as exc:
+            agent_errors[agent_id] = exc.detail
+            continue
+        for t in targets:
+            key = t.get("nqn") or t.get("iqn")
+            if key:
+                status_by_nqn[key] = t
+
+    items = []
+    for d in disks:
+        st = status_by_nqn.get(d.get("nqn")) or status_by_nqn.get(d.get("iqn")) or {}
+        luns = st.get("luns") or []
+        lun = luns[0] if luns else {}
+        items.append({
+            "os_tag": d.get("os_tag"),
+            "os": d.get("os"),
+            "nqn": d.get("nqn"),
+            "iqn": d.get("iqn"),
+            "exported": st.get("exported"),
+            "hosts": st.get("hosts", []),
+            "controllers": st.get("controllers", []),
+            "size": lun.get("size"),
+            "physical_bytes": lun.get("physical_bytes"),
+            "error": agent_errors.get(d.get("agent")),
+        })
+
+    with credentials.locked():
+        entry = credentials.load()["credentials"].get(worker_id)
+    credential = _credential_meta(entry) if entry else {"worker_id": worker_id, "exists": False}
+    return {"worker_id": worker_id, "credential": credential, "disks": items}
 
 
 @router.post("/workers", status_code=201)
@@ -576,7 +631,7 @@ def delete_worker_disk(
     ignore_missing_target: bool = Query(False, description="Ignore 404 from Agent while deleting the target."),
 ):
     """删除 Worker 的单个系统盘（按盘标识 os_tag 定位）：可保留或删除 .img 文件；
-    被删盘若是默认启动，联动清除 default_disk 与同名 menu_default；若只剩一块盘，
+    被删盘若是默认启动，清除 default_disk（menu_default 是显式覆盖，保留不动）；若只剩一块盘，
     它成为默认启动盘；无盘时状态回退 registered。"""
     worker_id = canonical_id(worker_id)
     os_tag = canonical_os_tag(os_tag)
@@ -594,36 +649,12 @@ def delete_worker_disk(
         record("worker.disk.delete", "started", worker_id=worker_id, client=client_ip, os=os_name, os_tag=os_tag)
 
         try:
-            _delete_target(disk, delete_file=delete_file, ignore_missing=ignore_missing_target)
-            record("agent.delete_disk", "ok", worker_id=worker_id, agent=disk["agent"],
-                   iqn=disk["iqn"], delete_file=delete_file)
-
-            disks = record_.get("disks")
-            if disks is not None:
-                disks[:] = [d for d in disks if d is not disk]
-            else:
-                record_.pop("disk", None)  # 旧台账单盘字段
-
-            # 联动：被删盘正是默认启动盘时清除 default_disk 与同名 menu_default
-            if str(record_.get("default_disk", "")).lower() == os_tag:
-                record_.pop("default_disk", None)
-            boot = record_.get("boot") or {}
-            if os_name and str(boot.get("menu_default", "")).lower() == os_name:
-                boot.pop("menu_default", None)
-                if not boot:
-                    record_.pop("boot", None)
-
-            # 只剩一块盘时它就是默认启动盘（无需人工再设）
-            remaining = worker_disks(record_)
-            if len(remaining) == 1 and remaining[0].get("os_tag"):
-                record_["default_disk"] = str(remaining[0]["os_tag"])
-
-            # 无盘时状态回退 registered，等待重新建盘
-            if not remaining and record_.get("state") == "ready":
-                record_["state"] = "registered"
-
+            info = _delete_one_disk(data, worker_id, os_tag,
+                                    delete_file=delete_file, ignore_missing=ignore_missing_target)
+            record("agent.delete_disk", "ok", worker_id=worker_id, agent=info["agent"],
+                   iqn=info["iqn"], delete_file=delete_file)
             store.save_workers(data)
-            record("workers.disk.delete", "ok", worker_id=worker_id, os=os_name, os_tag=os_tag)
+            record("workers.disk.delete", "ok", worker_id=worker_id, os=info["os"], os_tag=os_tag)
             record("worker.disk.delete", "succeeded", worker_id=worker_id, client=client_ip)
             _push_credentials(worker_id)  # 盘已删：同步移除 Agent 侧 hosts 登记
             return _enrich_worker(worker_id, record_)
@@ -635,11 +666,86 @@ def delete_worker_disk(
             raise HTTPException(500, str(exc)) from exc
 
 
+@router.post("/workers/luns/disk/batch-delete")
+def batch_delete_worker_disks(req: BatchDeleteWorkerDiskRequest, request: Request):
+    """批量删除系统盘：targets 逐项点名 或 workers（删除这些 Worker 的全部盘）二选一。
+    dry_run=true 只返回计划不删盘；delete_file/ignore_missing_target 与单删一致。
+    逐项独立执行，返回 succeeded/skipped/failed 汇总（盘或 worker 已不存在按 skipped）。"""
+    if req.targets and req.workers:
+        raise HTTPException(400, "specify either targets or workers, not both")
+    if not req.targets and not req.workers:
+        raise HTTPException(400, "targets or workers must not be empty")
+
+    data = store.load_workers()
+    items: list[tuple[str, str]] = []
+    worker_missing: list[dict[str, Any]] = []
+    if req.targets:
+        items = [(canonical_id(t.worker_id), canonical_os_tag(t.os_tag)) for t in req.targets]
+    else:
+        for w in req.workers:
+            wid = canonical_id(w)
+            record_ = data["workers"].get(wid)
+            if not record_:
+                worker_missing.append({"worker_id": wid, "os_tag": None, "reason": "worker not found"})
+                continue
+            for d in worker_disks(record_):
+                if d.get("os_tag"):
+                    items.append((wid, str(d["os_tag"])))
+
+    if req.dry_run:
+        plan: list[dict[str, Any]] = []
+        for wid, tag in items:
+            record_ = data["workers"].get(wid)
+            if not record_:
+                action, reason = "error", "worker not found"
+            elif not find_disk_by_tag(record_, tag):
+                action, reason = "skip", "no such disk"
+            else:
+                action, reason = "delete", ""
+            plan.append({"worker_id": wid, "os_tag": tag, "action": action, "reason": reason})
+        plan += [{"worker_id": m["worker_id"], "os_tag": None,
+                  "action": "error", "reason": m["reason"]} for m in worker_missing]
+        return {"dry_run": True, "plan": plan}
+
+    client_ip = client_host(request)
+    succeeded: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = list(worker_missing)
+    failed: list[dict[str, Any]] = []
+    touched: set[str] = set()
+    with store.locked():
+        data = store.load_workers()
+        for wid, tag in items:
+            try:
+                info = _delete_one_disk(data, wid, tag, delete_file=req.delete_file,
+                                        ignore_missing=req.ignore_missing_target)
+            except HTTPException as exc:
+                skipped.append({"worker_id": wid, "os_tag": tag, "reason": str(exc.detail)})
+                continue
+            except AgentAPIError as exc:
+                failed.append({"worker_id": wid, "os_tag": tag, "error": exc.detail})
+                continue
+            except Exception as exc:
+                failed.append({"worker_id": wid, "os_tag": tag, "error": str(exc)})
+                continue
+            record("agent.delete_disk", "ok", worker_id=wid, agent=info["agent"],
+                   iqn=info["iqn"], delete_file=req.delete_file)
+            store.save_workers(data)
+            record("workers.disk.delete", "ok", worker_id=wid, os=info["os"], os_tag=tag)
+            record("worker.disk.delete", "batch", worker_id=wid, os_tag=tag, client=client_ip)
+            touched.add(wid)
+            succeeded.append({"worker_id": wid, "os_tag": tag, "os": info["os"]})
+    for wid in touched:
+        _push_credentials(wid)
+    record("workers.disk.delete.batch", "ok", succeeded=len(succeeded),
+           skipped=len(skipped), failed=len(failed), client=client_ip)
+    return {"succeeded": succeeded, "skipped": skipped, "failed": failed}
+
+
 @router.put("/workers/{worker_id}/default-disk")
 def set_worker_default_boot(worker_id: str, req: SetWorkerDefaultBootRequest, request: Request):
     """设置 Worker 默认启动配置：disk=默认启动盘（os_tag，须为已挂系统盘）；
     menu_default/menu_timeout=菜单项覆盖；传 null 清除对应项。
-    推导链：default_disk（指向具体盘）> boot.menu_default > reboot。"""
+    推导链：boot.menu_default（显式覆盖，优先）> default_disk > reboot。"""
     worker_id = canonical_id(worker_id)
     fields = req.model_fields_set
     if not (fields & {"disk", "menu_default", "menu_timeout"}):
@@ -724,6 +830,71 @@ def set_worker_default_boot(worker_id: str, req: SetWorkerDefaultBootRequest, re
             changes=",".join(changes),
         )
         return _enrich_worker(worker_id, record_)
+
+
+@router.put("/workers/default-disk/batch")
+def batch_set_default_disk(req: BatchSetDefaultBootRequest, request: Request):
+    """批量设默认启动盘：targets 逐项 (worker_id, os_tag) 或 workers + 按 os[/os_version] 匹配 二选一。
+    只改 default_disk（菜单覆盖不在批量范围）。dry_run=true 只返回计划。
+    逐项独立执行，返回 succeeded/skipped/failed 汇总（已是默认按 skipped，匹配失败/盘不存在按 failed）。"""
+    if req.targets and req.workers:
+        raise HTTPException(400, "specify either targets or workers, not both")
+    if not req.targets and not req.workers:
+        raise HTTPException(400, "targets or workers must not be empty")
+
+    os_name = canonical_os(req.os) if req.workers else ""
+    os_version = canonical_os_version(req.os_version) if req.workers else ""
+    data = store.load_workers()
+
+    items: list[dict[str, Any]] = []
+    if req.targets:
+        for t in req.targets:
+            items.append({"worker_id": canonical_id(t.worker_id),
+                          "os_tag": canonical_os_tag(t.os_tag), "error": ""})
+    else:
+        for w in req.workers:
+            wid = canonical_id(w)
+            record_ = data["workers"].get(wid)
+            if not record_:
+                items.append({"worker_id": wid, "os_tag": None, "error": "worker not found"})
+                continue
+            disk, err = _match_disk(record_, os_name, os_version)
+            items.append({"worker_id": wid,
+                          "os_tag": str(disk["os_tag"]) if disk else None, "error": err})
+
+    if req.dry_run:
+        plan = []
+        for it in items:
+            action, reason = _batch_default_decision(
+                data, it["worker_id"], it.get("os_tag"), error=it.get("error", ""))
+            plan.append({"worker_id": it["worker_id"], "os_tag": it.get("os_tag"),
+                         "action": {"set": "set", "skipped": "skip", "failed": "error"}[action],
+                         "reason": reason})
+        return {"dry_run": True, "plan": plan}
+
+    client_ip = client_host(request)
+    succeeded: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    with store.locked():
+        data = store.load_workers()
+        for it in items:
+            wid, tag = it["worker_id"], it.get("os_tag")
+            action, reason = _batch_default_decision(data, wid, tag, error=it.get("error", ""))
+            if action == "failed":
+                failed.append({"worker_id": wid, "os_tag": tag, "error": reason})
+                continue
+            if action == "skipped":
+                skipped.append({"worker_id": wid, "os_tag": tag, "reason": reason})
+                continue
+            data["workers"][wid]["default_disk"] = tag
+            store.save_workers(data)
+            record("worker.boot.set", "batch", worker_id=wid, client=client_ip,
+                   changes=f"default_disk:{tag}")
+            succeeded.append({"worker_id": wid, "os_tag": tag})
+    record("workers.default_disk.batch", "ok", succeeded=len(succeeded),
+           skipped=len(skipped), failed=len(failed), client=client_ip)
+    return {"succeeded": succeeded, "skipped": skipped, "failed": failed}
 
 
 @router.delete("/workers/{worker_id}")
@@ -873,6 +1044,77 @@ def _delete_target(target_record: dict[str, Any], *, delete_file: bool, ignore_m
         if ignore_missing and exc.status_code == 404:
             return
         raise
+
+
+def _delete_one_disk(
+    data: dict[str, Any],
+    worker_id: str,
+    os_tag: str,
+    *,
+    delete_file: bool,
+    ignore_missing: bool,
+) -> dict[str, Any]:
+    """删除一块系统盘并联动清理默认盘/菜单/状态（单删与批量共用）。
+
+    调用方持有 store 锁并负责 save_workers 与推送凭据；返回被删盘的 {os, iqn, agent} 供审计。
+    盘或 worker 不存在抛 HTTPException(404)。"""
+    record_ = data["workers"].get(worker_id)
+    if not record_:
+        raise HTTPException(404, f"worker not found: {worker_id}")
+    disk = find_disk_by_tag(record_, os_tag)
+    if not disk:
+        raise HTTPException(404, f"worker {worker_id} has no system disk with os_tag {os_tag}")
+    os_name = str(disk.get("os", ""))
+    _delete_target(disk, delete_file=delete_file, ignore_missing=ignore_missing)
+
+    disks = record_.get("disks")
+    if disks is not None:
+        disks[:] = [d for d in disks if d is not disk]
+    else:
+        record_.pop("disk", None)  # 旧台账单盘字段
+
+    # 被删盘正是默认启动盘时清除 default_disk；menu_default 是显式覆盖，删盘不动它
+    if str(record_.get("default_disk", "")).lower() == os_tag:
+        record_.pop("default_disk", None)
+
+    # 只剩一块盘时它就是默认启动盘
+    remaining = worker_disks(record_)
+    if len(remaining) == 1 and remaining[0].get("os_tag"):
+        record_["default_disk"] = str(remaining[0]["os_tag"])
+
+    # 无盘时状态回退 registered，等待重新建盘
+    if not remaining and record_.get("state") == "ready":
+        record_["state"] = "registered"
+    return {"os": os_name, "iqn": disk.get("iqn"), "agent": disk.get("agent")}
+
+
+def _match_disk(record_: dict[str, Any], os_name: str, os_version: str) -> tuple[dict[str, Any] | None, str]:
+    """按 os[/os_version] 匹配一块系统盘：os_version 空时要求该 os 下唯一。返回 (disk, error)。"""
+    candidates = [d for d in worker_disks(record_)
+                  if str(d.get("os", "")) == os_name
+                  and (not os_version or str(d.get("os_version", "")) == os_version)]
+    label = f"{os_name} {os_version}".strip()
+    if not candidates:
+        return None, f"no disk for {label}"
+    if len(candidates) > 1:
+        return None, f"ambiguous: multiple disks for {label}"
+    return candidates[0], ""
+
+
+def _batch_default_decision(
+    data: dict[str, Any], worker_id: str, os_tag: str | None, *, error: str,
+) -> tuple[str, str]:
+    """批量设默认的逐项判定：返回 (action, reason)，action ∈ {set, skipped, failed}。"""
+    if error or os_tag is None:
+        return "failed", error or "match failed"
+    record_ = data["workers"].get(worker_id)
+    if not record_:
+        return "failed", "worker not found"
+    if not find_disk_by_tag(record_, os_tag):
+        return "failed", "no such disk"
+    if str(record_.get("default_disk", "")).lower() == os_tag:
+        return "skipped", "already default"
+    return "set", ""
 
 
 def _actual_state(record_: dict[str, Any]) -> dict[str, Any]:

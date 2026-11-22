@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
   getWorker,
   getWorkerStatus,
+  getWorkerDiskStatus,
   deleteWorker,
   bootVars,
   createWorkerDisk,
@@ -87,6 +88,9 @@ export default function WorkerDetail() {
   // 系统盘 Tab：建盘弹窗开关 + 展开中的盘（os_tag 唯一键）
   const [diskModalOpen, setDiskModalOpen] = useState(false)
   const [expandedDisk, setExpandedDisk] = useState(null)
+  // 逐盘运行时状态（导出在线/凭据/活跃会话/占用）：进入 disks Tab 时懒加载
+  const [diskStatus, setDiskStatus] = useState(null)
+  const [diskStatusLoading, setDiskStatusLoading] = useState(false)
 
   // menu.ipxe 可手工选择的导航项（与后端 MENU_ITEMS 一致）：boot-os 由默认盘配置推导，
   // 不在此可选，这里仅保留非 OS 导航值
@@ -222,6 +226,29 @@ export default function WorkerDetail() {
       setStatusLoading(false)
     }
   }
+
+  const refreshDiskStatus = async () => {
+    setDiskStatusLoading(true)
+    try {
+      setDiskStatus(await getWorkerDiskStatus(id))
+    } catch {
+      setDiskStatus(null)
+    } finally {
+      setDiskStatusLoading(false)
+    }
+  }
+
+  // 进入 disks Tab 时拉一次逐盘运行时状态（列表页与其他 Tab 不拉实时状态）
+  useEffect(() => {
+    if (activeTab !== 'disks') return
+    let cancelled = false
+    setDiskStatusLoading(true)
+    getWorkerDiskStatus(id)
+      .then((s) => { if (!cancelled) setDiskStatus(s) })
+      .catch(() => { if (!cancelled) setDiskStatus(null) })
+      .finally(() => { if (!cancelled) setDiskStatusLoading(false) })
+    return () => { cancelled = true }
+  }, [activeTab, id])
 
   const handleDelete = async (extra) => {
     try {
@@ -658,9 +685,14 @@ export default function WorkerDetail() {
             <span className="disks-meta">
               {t('workerDetail.diskCount', { count: disks.length })}
             </span>
-            <Button variant="secondary" onClick={() => setDiskModalOpen(true)}>
-              {t('workerDetail.createDisk')}
-            </Button>
+            <div className="disks-toolbar-actions">
+              <Button variant="ghost" onClick={refreshDiskStatus} disabled={diskStatusLoading}>
+                {diskStatusLoading ? t('workerDetail.diskStatusLoading') : t('workerDetail.refreshStatus')}
+              </Button>
+              <Button variant="secondary" onClick={() => setDiskModalOpen(true)}>
+                {t('workerDetail.createDisk')}
+              </Button>
+            </div>
           </div>
 
           {/* 系统盘卡片：默认收起核心属性（系统/来源/大小），点击展开全部参数 */}
@@ -670,6 +702,7 @@ export default function WorkerDetail() {
                 const expanded = expandedDisk === d.os_tag
                 const masterSize =
                   d.source?.type === 'master' ? masterSizeBy[d.source.name] : null
+                const st = diskStatus?.disks?.find((x) => x.os_tag === d.os_tag) || null
                 return (
                   <div
                     key={d.iqn || `disk-${i}`}
@@ -690,6 +723,50 @@ export default function WorkerDetail() {
                     </div>
                     {expanded && (
                       <div className="disk-card-body">
+                        {(() => {
+                          if (!st) {
+                            return diskStatusLoading
+                              ? <div className="disk-runtime-muted">{t('workerDetail.diskStatusLoading')}</div>
+                              : null
+                          }
+                          if (st.error) {
+                            return <InfoRow label={t('workerDetail.diskRuntime')} value={st.error} />
+                          }
+                          const sessions = Array.isArray(st.controllers) ? st.controllers.length : 0
+                          const credActive = Boolean(diskStatus?.credential?.exists)
+                          return (
+                            <div className="disk-runtime">
+                              <div className="info-row">
+                                <span className="info-label">{t('workerDetail.diskExported')}</span>
+                                <span className="info-value">
+                                  <Badge variant={st.exported ? 'ok' : 'default'}>
+                                    {st.exported ? t('workerDetail.online') : t('workerDetail.offline')}
+                                  </Badge>
+                                </span>
+                              </div>
+                              <div className="info-row">
+                                <span className="info-label">{t('workerDetail.diskCredential')}</span>
+                                <span className="info-value">
+                                  <Badge variant={credActive ? 'ok' : 'default'}>
+                                    {credActive ? t('workerDetail.credActive') : t('workerDetail.credInactive')}
+                                  </Badge>
+                                </span>
+                              </div>
+                              <div className="info-row">
+                                <span className="info-label">{t('workerDetail.diskSessions')}</span>
+                                <span className="info-value">
+                                  {sessions > 0 ? sessions : t('workerDetail.statusNone')}
+                                </span>
+                              </div>
+                              <div className="info-row">
+                                <span className="info-label">{t('workerDetail.diskUsage')}</span>
+                                <span className="info-value">
+                                  {`${formatSize(st.size)} / ${formatSize(st.physical_bytes)}`}
+                                </span>
+                              </div>
+                            </div>
+                          )
+                        })()}
                         <InfoRow label={t('workerDetail.osTag')} value={d.os_tag} mono />
                         {d.remark && (
                           <InfoRow label={t('workerDetail.remark')} value={d.remark} />

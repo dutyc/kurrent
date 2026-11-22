@@ -274,6 +274,20 @@ def test_list_subsystems(client, configfs):
     assert set(subs) == {NQN, NQN + ".2"}
     assert subs[NQN]["namespaces"] == [{"nsid": 1, "device_path": DEVICE_PATH}]
     assert subs[NQN]["hosts"] == []
+    assert subs[NQN]["controllers"] == []
+    assert subs[NQN]["ports"] == []
+
+
+def test_list_subsystems_controllers_and_ports(client, configfs):
+    """控制器目录 = 活跃 NVMe/TCP 会话；ports symlink = 已导出挂端口。"""
+    client.post("/subsystems", json={"nqn": NQN, "backing": BACKING})
+    (configfs / "subsystems" / NQN / "controllers" / HOST_NQN).mkdir(parents=True)
+    port_subs = configfs / "ports" / "1" / "subsystems"
+    port_subs.mkdir(parents=True)
+    os.symlink(configfs / "subsystems" / NQN, port_subs / NQN)
+    subs = {s["nqn"]: s for s in client.get("/subsystems").json()["subsystems"]}
+    assert subs[NQN]["controllers"] == [HOST_NQN]
+    assert subs[NQN]["ports"] == ["1"]
 
 
 def test_set_host_auth(client, configfs, symlinks):

@@ -68,7 +68,7 @@ The response of `/boot-vars` is a projection of the inventory:
 | `hostnqn` | The Worker’s initiator Host NQN (disk NQN prefix + `:host.<worker_id>`, in the same namespace as the disk NQN and matching the host entry registered in nvmet-host); **injected when the default disk carries an NQN**. Consumed by the firmware: iPXE nvmetcp defaults hostnqn to `nqn.2014-08.org.ipxe:<uuid>` (falling back to `:ipxe` without a UUID); a mismatch against the registered value fails strict-mode authentication, so it must be overridden with this field (firmware patch `0005` supports the `hostnqn` setting) |
 | `os` | The OS name of the Worker’s default boot disk (the disk for `default_disk`; if not set, the first disk; the disk record is authoritative) — the menu keeps a single generic OS item (`boot-os`), and this variable is display-only for the menu label; the data-plane path comes from `disk_nqn`. Not returned when the Worker has no system disk (reboot loop waits for disk creation). |
 | `os_version` | Version annotation of the default boot disk (disk record `os_version`; `''` = no version) — omitted when empty; the `os-label` assembly in menu.ipxe adapts (shows `os version` when present). Not returned when the Worker has no system disk. |
-| `menu_default` | Derived chain: `workers.yml` `default_disk` (the first disk is set as default automatically; use [setting the default disk](./disks.md) for multi-disk, os_tag references a specific disk) > `boot.menu_default` (explicit configuration) > `reboot` (loop reboot waiting when not configured). With a default disk it is always `boot-os` (the only OS item); otherwise `boot.menu_default` (`config` / `shell` / `reboot` / `exit`) is used; when neither is set it is `reboot` |
+| `menu_default` | Derived chain: `boot.menu_default` (explicit override, highest priority) > `workers.yml` `default_disk` (the first disk is set as default automatically; use [setting the default disk](./disks.md) for multi-disk, os_tag references a specific disk) > `reboot` (loop reboot waiting when not configured). Setting `boot.menu_default` (`config` / `shell` / `reboot` / `exit`) overrides the default disk and selects that item; when unset it falls back to the `default_disk` `boot-os` (the only OS item); when neither is set it is `reboot` |
 | `menu_timeout` | When a default boot is configured: `boot.menu_timeout` > `spec.boot.menuTimeoutMs` (default 5000). When in `reboot` loop: always uses `spec.boot.autoBootTimeoutMs` (default 1). Units are milliseconds. |
 
 Worker lookup rules (**binding authority first**):
@@ -89,7 +89,7 @@ not identified and mac provided ->
 The default boot item is derived by `/boot-vars` in the following order:
 
 ```text
-default_disk (the first disk is set as default automatically; use [setting the default disk](./disks.md) for multi-disk) -> boot.menu_default (explicit config) -> reboot (not configured)
+boot.menu_default (explicit override, highest priority) -> default_disk (the first disk is set as default automatically; use [setting the default disk](./disks.md) for multi-disk) -> reboot (not configured)
 ```
 
 - With a single system disk no extra call is needed: disk creation writes `default_disk`. When multiple disks coexist, call `PUT /workers/{worker_id}/default-disk` to choose the default boot disk (os_tag references a specific disk):
@@ -97,7 +97,7 @@ default_disk (the first disk is set as default automatically; use [setting the d
   disk=<os_tag> -> menu_default=boot-os, os=<disk os>, os-version=<disk os_version if any>, disk_nqn=<disk nqn>
   ```
   The MAIN MENU keeps a single generic OS item `boot-os`, derived from the default disk; `os` / `os-version` are display-only and `disk_nqn` carries the boot identity consumed by the generic item.
-- Alternatively, you can explicitly clear `default_disk` (`PUT /workers/{worker_id}/default-disk`, `{"disk": null}`) and use `boot.menu_default` to specify a default item on the iPXE menu (e.g., the configuration screen `config`, or `exit`).
+- Alternatively, use `boot.menu_default` to specify a default item on the iPXE menu (e.g., the configuration screen `config`, or `exit`) — it overrides `default_disk`; clearing that override (`{"menu_default": null}`) returns to the default disk.
 - When neither is configured, `menu_default` returns `reboot` (a short-timeout reboot loop waiting for the admin to create a disk / set a default disk; `exit` is only used when explicitly configured).
 
 ### Registration-Window Enrollment (Zero-touch Provisioning)

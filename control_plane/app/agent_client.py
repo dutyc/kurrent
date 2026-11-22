@@ -115,6 +115,10 @@ class AgentClient:
     def list_luns(self) -> list[dict[str, Any]]:
         return self._request("GET", "/lun")
 
+    def disk_status(self) -> list[dict[str, Any]]:
+        """逐盘运行时状态（导出在线/凭据在位/活跃会话/盘占用）。"""
+        return (self._request("GET", "/lun/status") or {}).get("targets", [])
+
     def list_masters(self) -> dict[str, Any]:
         """列出 Agent 上可用母盘（后台扫描缓存的 *_tpl_* 文件清单）。"""
         return self._request("GET", "/masters")

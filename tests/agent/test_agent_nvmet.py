@@ -187,6 +187,47 @@ def test_backend_list_targets(backend):
                         "luns": [{"lun": 1, "backing": "/srv/x.img"}]}]
 
 
+def test_backend_target_statuses(backend):
+    """逐盘运行时状态：导出(ports)/活跃会话(controllers)/逻辑+物理占用（stat 盘文件）。"""
+    import os
+
+    b, _, _ = backend
+    with open(os.path.join(b.disk_dir, "worker-01.ubuntu.img"), "wb") as f:
+        f.write(b"x" * 4096)
+    b.host.list_subsystems = lambda: [{
+        "nqn": NQN_UBUNTU,
+        "namespaces": [{"nsid": 1, "device_path": "/srv/nvmet-disks/worker-01.ubuntu.img"}],
+        "hosts": [HOST_NQN],
+        "controllers": [HOST_NQN],
+        "ports": ["1"],
+    }]
+    statuses = b.target_statuses()
+    assert len(statuses) == 1
+    s = statuses[0]
+    assert s["nqn"] == NQN_UBUNTU and s["iqn"] == NQN_UBUNTU
+    assert s["exported"] is True
+    assert s["controllers"] == [HOST_NQN]
+    assert s["hosts"] == [HOST_NQN]
+    lun = s["luns"][0]
+    assert lun["size"] == 4096
+    assert lun["blocks"] is not None and lun["physical_bytes"] == lun["blocks"] * 512
+    assert lun["physical_bytes"] > 0
+
+
+def test_backend_target_statuses_missing_file(backend):
+    """盘已删但 subsystem 残留：stat 失败不报错，占用字段置 None、exported False。"""
+    b, _, _ = backend
+    b.host.list_subsystems = lambda: [{
+        "nqn": NQN_UBUNTU,
+        "namespaces": [{"nsid": 1, "device_path": "/srv/nvmet-disks/gone.img"}],
+        "hosts": [], "controllers": [], "ports": [],
+    }]
+    s = b.target_statuses()[0]
+    assert s["exported"] is False
+    assert s["luns"][0]["size"] is None
+    assert s["luns"][0]["physical_bytes"] is None
+
+
 def test_backend_unreachable_503(backend):
     from fastapi import HTTPException
 

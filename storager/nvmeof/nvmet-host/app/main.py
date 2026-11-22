@@ -401,7 +401,18 @@ class NvmetManager:
             allowed_base = os.path.join(sub, "allowed_hosts")
             if os.path.isdir(allowed_base):
                 hosts = sorted(os.listdir(allowed_base))
-            result.append({"nqn": nqn, "namespaces": namespaces, "hosts": hosts})
+            controllers = []
+            controllers_base = os.path.join(sub, "controllers")
+            if os.path.isdir(controllers_base):
+                controllers = sorted(os.listdir(controllers_base))
+            ports = []
+            ports_base = os.path.join(self.root, "ports")
+            if os.path.isdir(ports_base):
+                for pid in sorted(os.listdir(ports_base)):
+                    if os.path.islink(os.path.join(ports_base, pid, "subsystems", nqn)):
+                        ports.append(pid)
+            result.append({"nqn": nqn, "namespaces": namespaces, "hosts": hosts,
+                           "controllers": controllers, "ports": ports})
         return result
 
     def set_host(self, nqn: str, hostnqn: str, secret: str) -> None:

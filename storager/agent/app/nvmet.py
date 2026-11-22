@@ -430,6 +430,43 @@ class NvmetBackend:
                           for ns in s.get("namespaces", [])]}
                 for s in subs]
 
+    def target_statuses(self) -> list:
+        """逐盘运行时状态：导出在线(ports)、凭据在位(hosts)、活跃会话(controllers)、盘占用。
+
+        盘文件在 agent 的 disk_dir 下（nvmet-host 的 device_path 是宿主容器路径，两者不同）：
+        按 basename 重拼后 stat，逻辑大小 = st_size，物理分配 = st_blocks×512（reflink 共享会重复计数）。
+        stat 失败（盘已删但 subsystem 残留）时占用字段置 None，不报错。"""
+        try:
+            subs = self.host.list_subsystems()
+        except NvmetHostError as exc:
+            raise HTTPException(503, f"nvmet host error: {exc.detail}") from exc
+        result = []
+        for s in subs:
+            nqn = s["nqn"]
+            luns = []
+            for ns in s.get("namespaces", []):
+                backing = ns.get("device_path")
+                size = blocks = physical = None
+                if backing:
+                    path = os.path.join(self.disk_dir, os.path.basename(backing))
+                    try:
+                        st = os.stat(path)
+                        size = st.st_size
+                        blocks = st.st_blocks
+                        physical = st.st_blocks * 512
+                    except OSError:
+                        pass
+                luns.append({"lun": ns.get("nsid"), "backing": backing,
+                             "size": size, "blocks": blocks, "physical_bytes": physical})
+            result.append({
+                "nqn": nqn, "iqn": nqn,
+                "exported": bool(s.get("ports")),
+                "hosts": s.get("hosts", []),
+                "controllers": s.get("controllers", []),
+                "luns": luns,
+            })
+        return result
+
     def capabilities(self) -> dict:
         try:
             caps = self.host.capabilities()

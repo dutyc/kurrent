@@ -360,12 +360,14 @@ class TestBootVarsWithDisk:
         assert f"set disk-nqn {disk['nqn']}" in res.text
         assert "set os-tag" not in res.text  # NQN 已完整下发，不再暴露后缀
         assert "set os-version" not in res.text  # 无版本 → 不下发
-        # default_disk > boot.menu_default 推导链：显式 menu_default 不覆盖 default_disk
-        client.put("/workers/worker-01/default-disk", json={"menu_default": "reboot"}, headers=auth_headers)
+        # boot.menu_default > default_disk 推导链：显式 menu_default 覆盖 default_disk
+        client.put("/workers/worker-01/default-disk", json={"menu_default": "config"}, headers=auth_headers)
         nonce2 = _challenge(client)
         res = _boot_vars(client, mac=MAC_A, hostname=hostname, nonce=nonce2,
                          **_quote(tpm_identity, nonce2))
-        assert "set menu-default boot-os" in res.text
+        assert "set menu-default config" in res.text  # 覆盖生效（压过 boot-os）
+        assert f"set menu-timeout {settings.boot_menu_timeout}" in res.text  # 非 reboot → 常规超时
+        # 覆盖只改自动选中项：盘投影内容仍在（菜单里 boot-os 项可手动选）
         assert "set os ubuntu" in res.text
         assert f"set disk-nqn {disk['nqn']}" in res.text
 
@@ -464,3 +466,13 @@ class TestBaselineApproval:
         assert client.delete(f"/devices/{MAC_A}", headers=auth_headers).status_code == 200
         res = client.post(f"/devices/{MAC_A}/approve-baseline", headers=auth_headers)
         assert res.status_code == 403
+
+
+def test_menu_default_derivation_prefers_explicit_override():
+    """menu_default 推导：显式覆盖 > default_disk(boot-os) > reboot。"""
+    from control_plane.app.routers.boot import _menu_default_for
+
+    assert _menu_default_for({"boot": {"menu_default": "config"}, "default_disk": "abc"}) == "config"
+    assert _menu_default_for({"boot": {"menu-default": "exit"}, "default_disk": "abc"}) == "exit"
+    assert _menu_default_for({"default_disk": "abc"}) == "boot-os"
+    assert _menu_default_for({}) == "reboot"

@@ -170,6 +170,7 @@ def mock_agent_client(monkeypatch):
         create_cd=lambda iso, iqn: {"iqn": iqn, "backing": iso},
         delete_lun=lambda iqn, delete_file=False: {"deleted": iqn},
         list_luns=lambda: [],
+        disk_status=lambda: [],
         list_masters=lambda: {"masters": [{"name": name} for name in FAKE_MASTERS]},
         scan=lambda: {"created": [], "skipped": []},
         set_credential=fake_push_result,

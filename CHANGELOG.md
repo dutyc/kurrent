@@ -13,6 +13,21 @@
 
 ---
 
+## 2026-11-21
+
+### 新增
+
+- **系统盘逐盘运行时状态**：新增 `GET /workers/{worker_id}/disks/status`，逐盘返回导出在线（数据面端口挂载）、凭据生效、活跃 NVMe/TCP 会话与盘占用（逻辑大小 `size` 与物理分配 `physical_bytes`，后者对 reflink 共享盘重复计数）。Agent 新增 `GET /lun/status`；nvmet-host 的子系统列表补充 `controllers` 与 `ports` 两个键。WebUI Worker 详情 disks 页签在进入时加载并展示四项状态。
+- **系统盘批量运维**：新增 `POST /workers/luns/disk/batch-delete` 与 `PUT /workers/default-disk/batch`。两者均支持按 `targets`（worker + os_tag）或按 `workers`（删除全部盘；设默认时按 `os` / `os_version` 匹配）两种定位、`dry_run` 预览与逐项独立汇总。WebUI Workers 页提供批量设默认盘与批量删盘入口。
+
+### 变更
+
+- **启动菜单覆盖**：`/boot-vars` 的 `menu_default` 推导改为 `boot.menu_default`（显式覆盖，优先）> `default_disk`（`boot-os`）> `reboot`。设置 `menu_default` 即临时覆盖默认启动盘、超时后自动进入该项（`config` / `shell` / `reboot` / `exit`），清除覆盖后回落默认盘；投影的盘连接信息（`disk_nqn` / `storager_ip`）仍取默认盘。删除默认盘只清 `default_disk`，`menu_default` 覆盖保留。
+
+### 修复
+
+- **批量删盘审计口径**：`POST /workers/luns/disk/batch-delete` 的每个成功项补齐 `agent.delete_disk`（agent 动作）与 `workers.disk.delete`（台账写）审计，与单删、批量建盘对齐。
+
 ## 2026-11-17
 
 ### 变更
