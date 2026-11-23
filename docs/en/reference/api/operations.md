@@ -18,7 +18,9 @@ Reads the Control Plane operation audit log. This file is an incremental query i
 |---|---:|---|---|
 | `since` | No | `0` | Only return records with `id > since`. |
 | `limit` | No | `1000` | Maximum number of records to return. |
-| `mac` | No | — | Only return operations of this device (MAC, normalized then filtered by the `mac` field); used for viewing device binding history. |
+| `mac` | No | — | Only return operations of this device (MAC, normalized then filtered by the `mac` field before `limit` is applied); used for viewing device binding history. |
+| `op` | No | — | Only return the given operation type (e.g. `platform.enroll`, `device.bind`), filtered before `limit` is applied. |
+| `order` | No | `asc` | `asc` returns records in write order; `desc` returns only the latest page, newest first (for overview queries), with `next_cursor` set to the newest record's `id`. |
 
 ### curl
 
@@ -33,6 +35,20 @@ Incremental read:
 
 ```bash
 curl -s "$BASE_URL/operations?since=10&limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Latest page (newest first):
+
+```bash
+curl -s "$BASE_URL/operations?limit=10&order=desc" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Filter by operation type (platform enrollment records):
+
+```bash
+curl -s "$BASE_URL/operations?op=platform.enroll&order=desc" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

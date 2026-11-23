@@ -21,6 +21,7 @@
 
 ### 变更
 
+- **操作日志读取**：`GET /operations` 新增 `order` 查询参数（`desc` 只取最新一页并按新到旧返回）与 `op` 过滤（按操作类型精确匹配）；过滤均在计 `limit` 之前完成。
 - **引导链资产状态**：`GET /boot-assets` 的 `firmware[]` 改为报告所有 `dhcp-boot` 声明的首跳固件（`tag:efi64` → `snponly.efi`，`tag:full` → `ipxe.efi`），每条新增 `tag` 字段；Boot Chain 面板对多份固件取最差状态。
 
 ## 2026-11-21
