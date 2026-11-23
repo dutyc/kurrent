@@ -23,7 +23,7 @@ _DNSMASQ_BOOT_RE = re.compile(r"^dhcp-boot=tag:([A-Za-z0-9_-]+),([^,\s]+)")
 _VERSION_RE = re.compile(rb"\b\d+\.\d+\.\d+\+?(?: \(g[0-9a-f]+\))?")
 _HTTPS_TFTP_RE = re.compile(r"^https?://[^/]+/tftp/(.+)$")
 
-_FIRMWARE_TAG = "efi64"
+_FIRMWARE_TAGS = (("efi64", "UEFI"), ("full", "UEFI (all drivers)"))
 _STAGE2_TAG = "ipxe"
 _FIRMWARE_MARKERS = {
     "https": ("HTTPS 引导", b"HTTPS"),
@@ -177,10 +177,12 @@ def inventory(dnsmasq_conf: str | Path, tftp_dir: str | Path, *,
     boots = _dnsmasq_boots(conf)
 
     firmware = []
-    declared = boots.get(_FIRMWARE_TAG)
-    if declared:
+    for tag, label in _FIRMWARE_TAGS:
+        declared = boots.get(tag)
+        if not declared:
+            continue
         record = _record(tftp, declared)
-        record.update({"mode": "uefi", "label": "UEFI", "file": declared})
+        record.update({"mode": "uefi", "label": label, "file": declared, "tag": tag})
         if record["status"] == "ok":
             record.update(_firmware_meta((tftp / declared).resolve()))
             if any(not cap["present"] for cap in record["capabilities"]):

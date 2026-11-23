@@ -33,7 +33,7 @@
 - **SAN boot**：从网络存储盘直接引导，本项目中由 iPXE `sanboot` 实现。
 - **iPXE**：本项目使用的开源网络引导固件。
 - **PXE**：预启动执行环境，设备通过 DHCP + TFTP 取得首跳固件。
-- **TFTP**：首跳文件传输协议；当前只提供 `snponly.efi` 与 `boot.ipxe` 指针。
+- **TFTP**：首跳文件传输协议；只提供首跳固件（`snponly.efi` / `ipxe.efi`）与 `boot.ipxe` 指针。
 - **`snponly`**：iPXE 首跳产物，主仓库默认使用。
 - **NBFT**：NVMe Boot Firmware Table，描述网络引导目标的发现表。
 - **NBCT**：NVMe Boot Credentials Table，固件交给 initramfs 的会话凭据表。

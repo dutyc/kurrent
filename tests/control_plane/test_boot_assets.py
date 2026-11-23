@@ -76,6 +76,28 @@ def test_inventory_reports_uefi_firmware_chain_and_menu(tmp_path):
     assert data["menu"] == {"status": "ok", "items": 2}
 
 
+def test_inventory_reports_all_first_hop_firmware(tmp_path):
+    """efi64 与 full 两个 tag 都声明时，两份首跳固件都进 firmware[]，各自带 tag 与能力检查。"""
+    conf, tftp = _tree(tmp_path)
+    (tftp / "ipxe.efi").write_bytes(FIRMWARE)
+    conf.write_text(
+        "dhcp-match=set:efi64,option:client-arch,7\n"
+        "dhcp-boot=tag:efi64,snponly.efi\n"
+        "dhcp-boot=tag:full,ipxe.efi\n"
+        "dhcp-userclass=set:ipxe,iPXE\n"
+        "dhcp-boot=tag:ipxe,boot.ipxe\n",
+        encoding="utf-8",
+    )
+
+    data = boot_assets.inventory(conf, tftp)
+    by_tag = {item["tag"]: item for item in data["firmware"]}
+    assert set(by_tag) == {"efi64", "full"}
+    assert by_tag["efi64"]["file"] == "snponly.efi"
+    assert by_tag["full"]["file"] == "ipxe.efi"
+    assert by_tag["full"]["label"] == "UEFI (all drivers)"
+    assert all(item["status"] == "ok" for item in by_tag.values())
+
+
 def test_firmware_capability_gap_is_flagged(tmp_path):
     """文件存在但缺少 boot.ipxe 依赖的命令时必须标出来，不能只看文件在不在。"""
     conf, tftp = _tree(tmp_path)

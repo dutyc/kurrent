@@ -18,25 +18,28 @@
 
 ### PXE
 
-1. 取得 `dist/secureboot/snponly-sb.efi` 与 `manifest.json`。
+1. 取得 `dist/secureboot/snponly-sb.efi`、`dist/secureboot/ipxe-sb.efi`（`KURRENT_SB_TARGET=ipxe` 构建）与 `manifest.json`。
 2. 安装到主仓库 TFTP 根并重启 dnsmasq：
 
    ```bash
    sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
-     /path/to/kurrent/tftp/secureboot/
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi \
+     dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
    sudo install -m 0644 dist/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+   sudo install -m 0644 dist/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
    cd /path/to/kurrent
    eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
-   `tftp/snponly.efi` 是文件级挂载，替换后必须重启容器，否则容器仍持有旧 inode。`tftp/secureboot/` 留作 `/boot-assets` 的产物核对与导出源。
+   `tftp/snponly.efi` 与 `tftp/ipxe.efi` 都是文件级挂载，替换后必须重启容器，否则容器仍持有旧 inode；两份缺一 dnsmasq 无法启动。`tftp/secureboot/` 留作 `/boot-assets` 的产物核对与导出源。
+
+   控制面按设备 `boot_firmware` 选择首跳：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取全驱动 `ipxe.efi`；同一 PXE 网段可按设备混用。
 
 3. 在设备 UEFI 设置中启用网络栈与 Secure Boot，将网络启动置于启动顺序首位。
 4. 启动设备，确认 DHCP 分配地址、TFTP 下载首跳、首跳经 4443 完成上报与挑战。
 
-TFTP 只交付首跳 `snponly.efi`（与 `boot.ipxe` 指针）；签名首跳内嵌静态脚本、boot CA 与引导 HTTPS 端口，控制面地址默认不入镜像。后续请求走 4443 HTTPS，只信任该 boot CA。PXE 网段必须按[安全模型](../concepts/architecture/security.md)隔离。需要 `pxe-uefi/ipxe.efi` 的机器不能在同一 PXE 网段与默认首跳混用。
+TFTP 只交付首跳固件（`snponly.efi`，或按设备 `boot_firmware` 选中的全驱动 `ipxe.efi`）与 `boot.ipxe` 指针；签名首跳内嵌静态脚本、boot CA 与引导 HTTPS 端口，控制面地址默认不入镜像。后续请求走 4443 HTTPS，只信任该 boot CA。PXE 网段必须按[安全模型](../concepts/architecture/security.md)隔离。
 
 ### 本地介质
 
@@ -121,7 +124,7 @@ bash test/run-qemu-auth.sh
 ## 常见失败
 
 - **无 DHCP 应答**：设备是否在 PXE 网段；dnsmasq `interface=` 与防火墙 67/69。
-- **DHCP 后无 TFTP 下载**：TFTP 根是否只挂载了 `snponly.efi` 与 `boot.ipxe`；文件权限。
+- **DHCP 后无 TFTP 下载**：TFTP 根是否只挂载了首跳固件（`snponly.efi` / `ipxe.efi`）与 `boot.ipxe`；文件权限。
 - **卡在固件启动**：产物未签名、签名证书不在目标机 `db`，或 Secure Boot 未开启；用 `sbverify --cert` 与 `tools/secureboot/check-host.sh` 复核，并确认产物为对应架构与形态。
 - **引导 HTTPS 证书错误**：固件构建用的 `BOOT_CA_CERT` 与控制面 `state/pki/ca/boot/ca.crt` 不一致；或 4443 叶证书的 SAN 不覆盖设备访问的地址、端口与 `BOOT_HTTPS_PORT` 不一致。
 - **设备不入池**：注册窗口是否开启；上报是否携带有效 TPM AK；设备是否被吊销。

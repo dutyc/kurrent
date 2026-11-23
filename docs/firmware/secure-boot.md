@@ -33,7 +33,7 @@ BOOT_CA_CERT=/path/to/boot-ca.crt \
 ## 部署到控制面
 
 1. 把 `dist/secureboot/snponly-sb.efi` 与 `manifest.json` 放到控制面宿主的仓库 `tftp/secureboot/`。该目录是产物核对与导出源，不入库。
-2. 让 TFTP 首跳交付签名镜像：`install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`，然后 `docker compose restart kurrent-dnsmasq` 使文件级挂载指向新 inode。
+2. 让 TFTP 首跳交付签名镜像：`install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`，然后 `docker compose restart kurrent-dnsmasq` 使文件级挂载指向新 inode。全驱动首跳同理：固件仓以 `KURRENT_SB_TARGET=ipxe` 生成 `ipxe-sb.efi`，覆盖 `tftp/ipxe.efi` 后让 `boot_firmware=full` 的设备引导。
 3. 查询 `/api/cp/boot-assets`，`secureboot.status` 应为 `ok`：镜像哈希与 manifest 一致、端口与部署一致、boot CA 存在且指纹一致。WebUI「引导链」在产物存在时显示 Secure Boot 行。
 
 ## 预置目标机信任库

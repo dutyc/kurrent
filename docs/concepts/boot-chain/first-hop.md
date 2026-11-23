@@ -4,9 +4,9 @@
 
 ## 取地址与下载
 
-设备经 DHCP 取得地址与 `next-server`，再从 TFTP 下载首跳 `snponly.efi`。TFTP 根只暴露这个文件与 `boot.ipxe` 指针两份，不提供其他内容，把明文可下载的面收到最小。
+设备经 DHCP 取得地址与 `next-server`，再从 TFTP 下载首跳固件。控制面按设备的 `boot_firmware` 在 DHCP 里选中其一：`snponly.efi`（UEFI SNP，默认）或 `ipxe.efi`（全驱动，给无 UEFI SNP 的网卡）。TFTP 根只暴露这两份首跳固件与 `boot.ipxe` 指针，不提供其他内容，把明文可下载的面收到最小。
 
-替换 `snponly.efi` 后需要重启 dnsmasq 容器：容器以文件级挂载该文件，挂载固定的是原文件的 inode，直接覆盖文件内容不会反映到容器里。
+替换首跳固件后需要重启 dnsmasq 容器：容器以文件级挂载这些文件，挂载固定的是原文件的 inode，直接覆盖文件内容不会反映到容器里。
 
 ## 验签
 

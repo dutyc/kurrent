@@ -453,6 +453,14 @@ export function approveDeviceBaseline(mac) {
   return request(`/devices/${encodeURIComponent(mac)}/approve-baseline`, { method: 'POST' });
 }
 
+export function setDeviceBootFirmware(mac, bootFirmware) {
+  // 切换设备首跳固件：snponly（默认）或 full（全驱动）；已绑定时同步重投影 DHCP 标签
+  return request(`/devices/${encodeURIComponent(mac)}/boot-firmware`, {
+    method: 'PUT',
+    body: { boot_firmware: bootFirmware },
+  });
+}
+
 export function batchBindPreview(data) {
   return request('/devices/bind/batch/preview', { method: 'POST', body: data });
 }

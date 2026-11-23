@@ -6,7 +6,7 @@ name: kurrent
 services:
 
   # ── DHCP / TFTP / 引导文件服务 ──
-  # 全链路 host 网络直通：DHCP 应答；TFTP 只发 snponly.efi 与 boot.ipxe 指针
+  # 全链路 host 网络直通：DHCP 应答；TFTP 只发首跳固件（snponly.efi / ipxe.efi）与 boot.ipxe 指针
   kurrent-dnsmasq:
     build:
       context: ./dnsmasq
@@ -23,9 +23,10 @@ services:
       - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq/dhcp-hosts.conf:/etc/dnsmasq.d/dhcp-hosts.conf
       - ${KURRENT_STATE_DIR:?run kurrent init (or export KURRENT_STATE_DIR) to provide the state root}/control-plane/dnsmasq/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
       - /etc/localtime:/etc/localtime:ro
-      # TFTP 根只暴露首跳所需的两个文件；boot.ipxe.cfg / menu.ipxe 等由 nginx 经 HTTPS 提供。
-      # 文件级挂载固定 inode：更新 snponly.efi 后需重建/重启本容器。
+      # TFTP 根只暴露首跳所需的三个文件；boot.ipxe.cfg / menu.ipxe 等由 nginx 经 HTTPS 提供。
+      # 文件级挂载固定 inode：更新固件后需重建/重启本容器。
       - ./tftp/snponly.efi:/var/tftp/snponly.efi:ro
+      - ./tftp/ipxe.efi:/var/tftp/ipxe.efi:ro
       - ./tftp/boot.ipxe:/var/tftp/boot.ipxe:ro
     restart: unless-stopped
     command: ["--no-daemon", "--log-queries", "--log-dhcp"]    

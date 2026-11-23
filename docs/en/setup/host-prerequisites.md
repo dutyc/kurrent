@@ -25,7 +25,7 @@ These requirements apply to the `main` line; devices without a TPM use the `lega
 | Architecture and firmware | x86_64; UEFI boot only, with CSM/Legacy disabled | No matching artifact exists, so the boot chain cannot start |
 | TPM | TPM 2.0 (discrete TPM or Intel PTT / AMD fTPM); can create an ECC P-256 or RSA-2048 AK; SHA-256 PCR 0/2/4/7 readable | Registration is rejected (`no_tpm`); failed attestation withholds credentials |
 | Secure Boot | Can be enabled; `db` can be written with the site signing certificate; booting a distribution also needs the Microsoft UEFI CA in `db` | Registration is rejected (`sb_disabled`); an unsigned first hop never runs |
-| Network boot | UEFI IPv4 network boot (DHCP + TFTP) with a UEFI SNP stack on the NIC | The first hop cannot be downloaded; mainline ships only `snponly.efi` |
+| Network boot | UEFI IPv4 network boot (DHCP + TFTP) with a UEFI SNP stack on the NIC | The first hop cannot be downloaded; NICs without a UEFI SNP must use the all-driver first hop (`boot_firmware=full`) |
 
 - A local disk is not a prerequisite; the device holds no persistent state.
 - CPU and memory only need to meet the installed distribution's requirements.

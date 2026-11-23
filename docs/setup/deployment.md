@@ -232,21 +232,26 @@ git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
 ```
 
 ```bash
-# 固件仓：boot CA 取自控制面状态根
+# 固件仓：boot CA 取自控制面状态根；SNP 与全驱动两份首跳同源
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
-BOOT_HTTPS_PORT=4443 ./build/build-sb.sh
+BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
+
+SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
 
 # 主仓库：产物供 /boot-assets 校验，并作为 TFTP 首跳
 sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
 sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
 cd /path/to/kurrent
 eval "$(kurrent deployment show -o env)"
 docker compose restart kurrent-dnsmasq
 ```
 
-首跳固定为 `snponly.efi`，替换后必须重启 dnsmasq。镜像内嵌 boot CA 与 4443 端口，换 CA 或端口必须重签；控制面地址默认由 DHCP 提供。完整构建与预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
+首跳按设备选择：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取 `ipxe.efi`；两份都由 dnsmasq 以文件级挂载交付，替换后必须重启 dnsmasq。镜像内嵌 boot CA 与 4443 端口，换 CA 或端口两份都须重签；控制面地址默认由 DHCP 提供。完整构建与预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -335,7 +340,7 @@ DHCP → iPXE → /boot-vars → NVMe/TCP TLS 1.3 → GRUB → 内核 → initra
 
 | 检查项 | 要求 |
 | --- | --- |
-| 网络与交换 | PXE 网段独立，控制面是唯一 DHCP/TFTP 提供者；TFTP 根只挂 `snponly.efi` 与 `boot.ipxe`；交换机启用 DHCP snooping、DAI、RA guard 与端口安全 |
+| 网络与交换 | PXE 网段独立，控制面是唯一 DHCP/TFTP 提供者；TFTP 根只挂首跳固件（`snponly.efi` / `ipxe.efi`）与 `boot.ipxe`；交换机启用 DHCP snooping、DAI、RA guard 与端口安全 |
 | 对外端口 | 控制面 22、53/67/69、80/443/4443（4443 仅引导网段）；存储节点 4840/4421 |
 | 宿主基线 | `sudo kurrent host check --strict` 无 FAIL、无 SKIP；CA 私钥、`admin.conf`、凭据与审计文件为 600 |
 | 注册与证明 | 注册窗口按需开启并设额度，用后关闭；TPM 证明默认开启；无 TPM 设备不入池 |

@@ -38,8 +38,9 @@ tftp-root=/var/tftp
 dhcp-match=set:efi64,option:client-arch,7       # UEFI x64 (EFI BC)
 dhcp-match=set:efi64,option:client-arch,9       # UEFI x64 (EFI x86_64)
 
-# 引导文件分发（带标签的规则必须放在默认规则之前）
+# 引导文件分发（同一次请求可命中多条，dnsmasq 取最后一条匹配：越具体的放越后）
 dhcp-boot=tag:efi64,snponly.efi                    # UEFI → snponly.efi
+dhcp-boot=tag:full,ipxe.efi                        # 全驱动设备（dhcp-host set:full）→ ipxe.efi
 
 # 识别UEFI iPXE 二次请求，下发下一跳引导文件 boot.ipxe
 dhcp-userclass=set:ipxe,iPXE

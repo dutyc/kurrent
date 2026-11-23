@@ -225,23 +225,34 @@ class CreateCdLunRequest(BaseModel):
     iqn: str | None = None
 
 
+BootFirmware = Literal["snponly", "full"]
+
+
 class CreateDeviceRequest(BaseModel):
     """手动注册设备：MAC（+可选 SMBIOS UUID）入设备池。
-    型号/序列号等申报信息仅作台账初始值，设备上报后以申报值为准更新（申报性质，不用于认证）。"""
+    型号/序列号等申报信息仅作台账初始值，设备上报后以申报值为准更新（申报性质，不用于认证）。
+    boot_firmware 决定该设备在 DHCP 首跳拿哪份固件：snponly（默认）或 full（全驱动）。"""
     mac: str
     uuid: str | None = None
     manufacturer: str | None = None
     product: str | None = None
     serial: str | None = None
+    boot_firmware: BootFirmware = "snponly"
 
 
 class ImportDeviceEntry(BaseModel):
-    """批量导入清单单行：mac 必填；uuid/型号/序列号为可选台账信息（比对列）。"""
+    """批量导入清单单行：mac 必填；uuid/型号/序列号为可选台账信息（比对列）；boot_firmware 默认 snponly。"""
     mac: str
     uuid: str | None = None
     manufacturer: str | None = None
     product: str | None = None
     serial: str | None = None
+    boot_firmware: BootFirmware = "snponly"
+
+
+class SetDeviceBootFirmwareRequest(BaseModel):
+    """切换设备首跳固件：snponly（UEFI SNP，默认）或 full（全驱动）。"""
+    boot_firmware: BootFirmware
 
 
 class ImportDevicesRequest(BaseModel):

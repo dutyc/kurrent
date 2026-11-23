@@ -4,9 +4,9 @@ The first hop spans power-on to an executable bootloader. It determines where ev
 
 ## Address and Download
 
-The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The TFTP root exposes only this file and the `boot.ipxe` pointer.
+The device gets an address and `next-server` over DHCP, then downloads the first-stage firmware over TFTP. The control plane selects it per device through DHCP `boot_firmware`: `snponly.efi` (UEFI SNP, default) or `ipxe.efi` (all drivers, for NICs without a UEFI SNP). The TFTP root exposes only these two first-stage images and the `boot.ipxe` pointer.
 
-Restart the dnsmasq container after replacing `snponly.efi`: the file-level mount pins the inode, so a hot replacement has no effect.
+Restart the dnsmasq container after replacing a first-stage image: the file-level mounts pin the inode, so a hot replacement has no effect.
 
 ## Verification
 

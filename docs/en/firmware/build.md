@@ -60,9 +60,11 @@ Selection rules:
 | No PXE entry; USB/ESP boot required | `direct-uefi/ipxe.efi` |
 | NIC initialization fails | The matching `-debug` artifact |
 
-The main repository uses `tftp/snponly.efi` by default. Different models may need different first-stage artifacts, while the main branch serves only `snponly.efi` and does not switch per device; machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage, so unify the first-stage artifact before deployment.
+The main repository uses `tftp/snponly.efi` by default. Different models may need different first-stage artifacts: the control plane selects `snponly.efi` (default) or the all-driver `tftp/ipxe.efi` per device through DHCP `boot_firmware`, so both can coexist on one PXE segment. The all-driver first hop uses the existing `direct-uefi/ipxe.efi`: it embeds `auto.ipxe` (DHCP, then `tftp://${next-server}/boot.ipxe`), so the same script serves both as a TFTP first hop and as local-media boot.
 
-The table above describes `build.sh`; at deployment the first stage is replaced by `dist/secureboot/snponly-sb.efi` from `build-sb.sh`, with the same form as `pxe-uefi/snponly.efi`.
+`tftp/*.efi` is not committed; place the files at deployment time: `pxe-uefi/snponly.efi` → `tftp/snponly.efi`, `direct-uefi/ipxe.efi` → `tftp/ipxe.efi`. Both are in dnsmasq's file-level mounts, so neither may be missing.
+
+The table above describes `build.sh`; at deployment the first stages are replaced by `build-sb.sh` artifacts with the same form as `pxe-uefi/snponly.efi`: `dist/secureboot/snponly-sb.efi` over `tftp/snponly.efi`, and `dist/secureboot/ipxe-sb.efi` (built with `KURRENT_SB_TARGET=ipxe`) over `tftp/ipxe.efi`.
 
 ```bash
 cd dist

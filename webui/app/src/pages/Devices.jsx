@@ -13,6 +13,7 @@ import {
   getEnforcement,
   setEnforcement,
   approveDeviceBaseline,
+  setDeviceBootFirmware,
   getWorkers,
   batchCreateWorkers,
   getOperations,
@@ -111,6 +112,8 @@ export default function Devices() {
   const [enforcementBusy, setEnforcementBusy] = useState(false)
   const [mismatchOnly, setMismatchOnly] = useState(false)
   const [approveError, setApproveError] = useState(null) // { mac, message }
+  const [firmwareBusy, setFirmwareBusy] = useState(null)
+  const [firmwareError, setFirmwareError] = useState(null) // { mac, message }
   const windowLimits = regWindow?.limits || {}
   const maxDevicesUpper = windowLimits.max_devices ?? DEFAULT_MAX_DEVICES_UPPER
   const maxTtlMinutes = windowLimits.ttl_minutes_max ?? DEFAULT_MAX_TTL_MINUTES
@@ -122,7 +125,7 @@ export default function Devices() {
   const [showRegister, setShowRegister] = useState(false)
   const [registering, setRegistering] = useState(false)
   const [registerError, setRegisterError] = useState(null)
-  const [regForm, setRegForm] = useState({ mac: '', uuid: '', manufacturer: '', product: '', serial: '' })
+  const [regForm, setRegForm] = useState({ mac: '', uuid: '', manufacturer: '', product: '', serial: '', boot_firmware: 'snponly' })
   const [showImport, setShowImport] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importText, setImportText] = useState('')
@@ -304,6 +307,20 @@ export default function Devices() {
     }
   }
 
+  // 切换设备首跳固件（snponly / full）：已绑定时后端同步重投影 DHCP 标签
+  const handleSetFirmware = async (mac, bootFirmware) => {
+    setFirmwareBusy(mac)
+    setFirmwareError(null)
+    try {
+      await setDeviceBootFirmware(mac, bootFirmware)
+      await fetchDevices()
+    } catch (e) {
+      setFirmwareError({ mac, message: e.message })
+    } finally {
+      setFirmwareBusy(null)
+    }
+  }
+
   const toggleGuide = () => setGuideOpen(!guideOpen)
 
   const handleCheck = (e, d) => {
@@ -360,13 +377,13 @@ export default function Devices() {
     e.preventDefault()
     setRegistering(true)
     setRegisterError(null)
-    const body = { mac: regForm.mac.trim() }
+    const body = { mac: regForm.mac.trim(), boot_firmware: regForm.boot_firmware }
     ;['uuid', 'manufacturer', 'product', 'serial'].forEach((k) => {
       if (regForm[k].trim()) body[k] = regForm[k].trim()
     })
     try {
       await createDevice(body)
-      setRegForm({ mac: '', uuid: '', manufacturer: '', product: '', serial: '' })
+      setRegForm({ mac: '', uuid: '', manufacturer: '', product: '', serial: '', boot_firmware: 'snponly' })
       setShowRegister(false)
       await fetchDevices()
     } catch (err) {
@@ -723,6 +740,16 @@ export default function Devices() {
               name="serial"
               value={regForm.serial}
               onChange={(e) => setRegForm((p) => ({ ...p, serial: e.target.value }))}
+            />
+            <Select
+              label={t('devices.bootFirmware.label')}
+              name="boot_firmware"
+              value={regForm.boot_firmware}
+              onChange={(e) => setRegForm((p) => ({ ...p, boot_firmware: e.target.value }))}
+              options={[
+                { value: 'snponly', label: t('devices.bootFirmware.snponly') },
+                { value: 'full', label: t('devices.bootFirmware.full') },
+              ]}
             />
           </div>
           {registerError && <p className="create-error">{registerError}</p>}
@@ -1338,6 +1365,32 @@ export default function Devices() {
                     <span className="dd-label">{t('devices.lastSeen')}</span>
                     <span>{d.last_seen ? d.last_seen.replace('T', ' ').slice(0, 19) : '—'}</span>
                   </div>
+                  <div className="devices-detail-item">
+                    <span className="dd-label">{t('devices.bootFirmware.label')}</span>
+                    <span className="firmware-switch-cell">
+                      <Badge variant={d.boot_firmware === 'full' ? 'partial' : 'default'}>
+                        {d.boot_firmware === 'full'
+                          ? t('devices.bootFirmware.full')
+                          : t('devices.bootFirmware.snponly')}
+                      </Badge>
+                      {d.state !== 'revoked' && (
+                        <Button
+                          variant="ghost"
+                          disabled={firmwareBusy === d.mac}
+                          onClick={() =>
+                            handleSetFirmware(d.mac, d.boot_firmware === 'full' ? 'snponly' : 'full')
+                          }
+                        >
+                          {d.boot_firmware === 'full'
+                            ? t('devices.bootFirmware.switchToSnponly')
+                            : t('devices.bootFirmware.switchToFull')}
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                  {firmwareError?.mac === d.mac && (
+                    <span className="attest-error">{firmwareError.message}</span>
+                  )}
                   {d.identity?.ak_public ? (
                     <>
                       <div className="devices-detail-item">

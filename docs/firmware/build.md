@@ -60,9 +60,11 @@ JOBS=8 ./build/build.sh                  # 并行度
 | 主板无 PXE 入口，需 USB/ESP 引导 | `direct-uefi/ipxe.efi` |
 | 网卡初始化失败 | 对应的 `-debug` 产物 |
 
-主仓库默认使用 `tftp/snponly.efi`。不同机型可能需要不同的首跳产物，而主线当前只下发 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器无法在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物。
+主仓库默认使用 `tftp/snponly.efi`。不同机型可能需要不同的首跳产物：控制面按设备的 `boot_firmware` 在 DHCP 里选中 `snponly.efi`（默认）或全驱动 `tftp/ipxe.efi`，同一 PXE 网段可按设备混用。全驱动首跳使用现成的 `direct-uefi/ipxe.efi`：它内置 `auto.ipxe`（DHCP 后跳 `tftp://${next-server}/boot.ipxe`），作 TFTP 首跳与作本地介质引导是同一条脚本。
 
-上表是 `build.sh` 的形态；部署时首跳换成 `build-sb.sh` 的 `dist/secureboot/snponly-sb.efi`，形态与 `pxe-uefi/snponly.efi` 相同。
+`tftp/*.efi` 不入库，部署时手动放置：`pxe-uefi/snponly.efi` → `tftp/snponly.efi`，`direct-uefi/ipxe.efi` → `tftp/ipxe.efi`；两份都在 dnsmasq 的文件级挂载里，缺一不可。
+
+上表是 `build.sh` 的形态；部署时首跳换成 `build-sb.sh` 的签名产物，形态与 `pxe-uefi/snponly.efi` 相同：`dist/secureboot/snponly-sb.efi` 覆盖 `tftp/snponly.efi`，`KURRENT_SB_TARGET=ipxe` 构建的 `dist/secureboot/ipxe-sb.efi` 覆盖 `tftp/ipxe.efi`。
 
 ```bash
 cd dist

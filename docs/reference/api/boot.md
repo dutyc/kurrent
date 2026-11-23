@@ -22,7 +22,7 @@ title: "引导与设备准入"
 
 | 字段 | 说明 |
 |---|---|
-| `firmware[]` | `dhcp-boot=tag:efi64` 声明的 UEFI 固件：`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
+| `firmware[]` | `dhcp-boot` 声明的首跳 UEFI 固件（`tag:efi64` → `snponly.efi`，`tag:full` → `ipxe.efi`）：`tag`（`efi64` / `full`）、`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
 | `stage2[]` | 脚本链文件（`boot.ipxe`、`boot.ipxe.cfg`、`menu.ipxe`）：`file`、`path`、`host_path`、`status`、`size`、`mtime` |
 | `menu` | `status`（ok/unavailable）与 `items`（可选项计数，跳过 `--gap` 行） |
 | `secureboot` | 可选 Secure Boot 产物：`present`、`status`（ok/incomplete/missing）、`artifact`、`path`、`artifact_sha256`、`artifact_size`、`manifest_present`、`manifest_matches`、`signer`、`built_at`、`boot_https_port`、`port_matches`、`boot_ca_present`、`boot_ca_sha256`、`boot_ca_matches` |

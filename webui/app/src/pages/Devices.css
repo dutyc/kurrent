@@ -139,6 +139,12 @@
   white-space: nowrap;
 }
 
+.firmware-switch-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ===== TPM 证明：汇总横幅、行内告警、审批摘要 ===== */
 .devices-attest-banner {
   display: flex;

@@ -17,7 +17,7 @@ The Control Plane is a persistent HTTP service on the control-plane host, respon
 - Management identity and PKI: sessions, tokens, human/component certificates, and CRLs
 - Declaration status, dnsmasq-derived configuration, and operation auditing
 
-It does not configure storage backends directly or host boot static files: `menu.ipxe` and the boot scripts live under `tftp/` and are served by nginx over HTTPS (TFTP only provides the first-stage `snponly.efi` and the `boot.ipxe` pointer), while the menu's default item, timeout and OS label are projected through `/boot-vars`. The node Agent configures the storage backend on its host (nvmet configfs, or `tgtadm`/`targetcli` for iSCSI).
+It does not configure storage backends directly or host boot static files: `menu.ipxe` and the boot scripts live under `tftp/` and are served by nginx over HTTPS (TFTP only provides the first-stage firmware (`snponly.efi` / `ipxe.efi`) and the `boot.ipxe` pointer), while the menu's default item, timeout and OS label are projected through `/boot-vars`. The node Agent configures the storage backend on its host (nvmet configfs, or `tgtadm`/`targetcli` for iSCSI).
 
 ## Calling Conventions
 

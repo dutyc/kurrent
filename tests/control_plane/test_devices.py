@@ -1,6 +1,7 @@
 """设备池域（Bearer 鉴权）：CRUD / 导入 / 绑定 / 换绑 / 批量 / 撤销。"""
 
 import pytest
+import yaml
 
 from control_plane.app.config import settings
 
@@ -325,3 +326,103 @@ class TestDeviceRevoke:
         worker("worker-01")
         res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
         assert res.status_code in (404, 409)
+
+
+class TestDeviceBootFirmware:
+    """设备首跳固件：台账字段 + DHCP 标签投影 + 切换端点。"""
+
+    def test_create_defaults_to_snponly(self, client, auth_headers):
+        res = client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        assert res.status_code == 201
+        assert res.json()["boot_firmware"] == "snponly"
+
+    def test_create_accepts_full_and_rejects_unknown(self, client, auth_headers):
+        res = client.post("/devices", json={"mac": MAC_A, "boot_firmware": "full"}, headers=auth_headers)
+        assert res.status_code == 201
+        assert res.json()["boot_firmware"] == "full"
+        bad = client.post("/devices", json={"mac": MAC_B, "boot_firmware": "bogus"}, headers=auth_headers)
+        assert bad.status_code == 422
+
+    def test_import_carries_boot_firmware(self, client, auth_headers):
+        client.post("/devices/import", json={"entries": [
+            {"mac": MAC_A, "boot_firmware": "full"},
+            {"mac": MAC_B},
+        ]}, headers=auth_headers)
+        devs = {d["mac"]: d for d in client.get("/devices", headers=auth_headers).json()}
+        assert devs[MAC_A]["boot_firmware"] == "full"
+        assert devs[MAC_B]["boot_firmware"] == "snponly"
+
+    def test_bind_projects_full_tag(self, client, auth_headers, worker):
+        client.post("/devices", json={"mac": MAC_A, "boot_firmware": "full"}, headers=auth_headers)
+        worker("worker-01")
+        res = client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
+        assert res.status_code == 200
+        hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+        assert f"{MAC_A},set:full,worker-01" in hosts
+
+    def test_switch_repaints_projection_both_ways(self, client, auth_headers, worker):
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        worker("worker-01")
+        client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
+        assert f"{MAC_A},worker-01" in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+
+        res = client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                         headers=auth_headers)
+        assert res.status_code == 200
+        assert res.json()["boot_firmware"] == "full"
+        assert f"{MAC_A},set:full,worker-01" in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+
+        res = client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "snponly"},
+                         headers=auth_headers)
+        assert res.status_code == 200
+        assert res.json()["boot_firmware"] == "snponly"
+        hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+        assert f"{MAC_A},worker-01" in hosts
+        assert "set:full" not in hosts
+
+    def test_switch_pooled_updates_ledger_only(self, client, auth_headers):
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        res = client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                         headers=auth_headers)
+        assert res.status_code == 200
+        assert res.json()["boot_firmware"] == "full"
+        # 未绑定：不产生 DHCP 投影（文件可能尚未创建）
+        hosts_path = settings.dnsmasq_hosts_file
+        hosts = hosts_path.read_text(encoding="utf-8") if hosts_path.exists() else ""
+        assert MAC_A not in hosts
+
+    def test_switch_404_and_revoked_409(self, client, auth_headers):
+        assert client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                          headers=auth_headers).status_code == 404
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.delete(f"/devices/{MAC_A}", headers=auth_headers)
+        assert client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                          headers=auth_headers).status_code == 409
+
+    def test_legacy_record_projects_default_firmware(self, client, auth_headers):
+        """存量台账记录没有 boot_firmware 字段：列表与详情都按默认 snponly 投影。"""
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        raw = yaml.safe_load(settings.devices_file.read_text(encoding="utf-8"))
+        raw["devices"][MAC_A].pop("boot_firmware")
+        settings.devices_file.write_text(yaml.safe_dump(raw, sort_keys=True), encoding="utf-8")
+
+        listed = {d["mac"]: d for d in client.get("/devices", headers=auth_headers).json()}
+        assert listed[MAC_A]["boot_firmware"] == "snponly"
+        detail = client.get(f"/devices/{MAC_A}", headers=auth_headers).json()
+        assert detail["boot_firmware"] == "snponly"
+
+    def test_switch_bound_unknown_worker_409(self, client, auth_headers, worker):
+        """绑定指向已不存在的 Worker 时拒绝切换，台账保持原值（不返回假成功）。"""
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        worker("worker-01")
+        client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
+        raw = yaml.safe_load(settings.workers_file.read_text(encoding="utf-8"))
+        raw["workers"].pop("worker-01")
+        settings.workers_file.write_text(yaml.safe_dump(raw, sort_keys=True), encoding="utf-8")
+
+        res = client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                         headers=auth_headers)
+        assert res.status_code == 409
+        assert "unknown worker" in res.json()["detail"]
+        detail = client.get(f"/devices/{MAC_A}", headers=auth_headers).json()
+        assert detail["boot_firmware"] == "snponly"

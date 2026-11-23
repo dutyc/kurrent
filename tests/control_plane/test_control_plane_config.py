@@ -118,6 +118,11 @@ def test_render_dnsmasq_conf():
     # 固定部分（TFTP/架构识别/引导分发/hosts 台账）保留
     assert "enable-tftp" in rendered
     assert "dhcp-boot=tag:ipxe,boot.ipxe" in rendered
+    # 同一次请求可同时命中 efi64 与 full；dnsmasq 取最后一条匹配，
+    # 所以 full 必须排在 efi64 之后，iPXE 二次请求的 ipxe 规则排最后。
+    assert (rendered.index("dhcp-boot=tag:efi64")
+            < rendered.index("dhcp-boot=tag:full")
+            < rendered.index("dhcp-boot=tag:ipxe"))
     assert "dhcp-hostsfile=/etc/dnsmasq.d/dhcp-hosts.conf" in rendered
 
 

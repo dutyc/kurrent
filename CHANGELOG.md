@@ -13,6 +13,16 @@
 
 ---
 
+## 2026-11-22
+
+### 新增
+
+- **PXE 首跳固件按设备选择**：设备新增 `boot_firmware` 字段（`snponly`，UEFI SNP，默认；或 `full`，全驱动）。控制面按该字段投影 dnsmasq 静态绑定：`full` 设备写 `MAC,set:full,hostname`，dnsmasq 对同一请求取最后一条匹配的 `dhcp-boot`，full 设备下发全驱动 `ipxe.efi`，其余走 `snponly.efi`。新增 `PUT /devices/{mac}/boot-firmware` 切换（设备已绑定时同步重投影该 Worker 的静态绑定）；`POST /devices` 与 `POST /devices/import` 接受 `boot_firmware`。WebUI 设备注册表单与详情支持选择与切换。
+
+### 变更
+
+- **引导链资产状态**：`GET /boot-assets` 的 `firmware[]` 改为报告所有 `dhcp-boot` 声明的首跳固件（`tag:efi64` → `snponly.efi`，`tag:full` → `ipxe.efi`），每条新增 `tag` 字段；Boot Chain 面板对多份固件取最差状态。
+
 ## 2026-11-21
 
 ### 新增

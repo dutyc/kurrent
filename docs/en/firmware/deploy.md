@@ -18,25 +18,28 @@ A signed artifact has to enter the device's boot path — a PXE segment or local
 
 ### PXE
 
-1. Obtain `dist/secureboot/snponly-sb.efi` and `manifest.json`.
+1. Obtain `dist/secureboot/snponly-sb.efi`, `dist/secureboot/ipxe-sb.efi` (built with `KURRENT_SB_TARGET=ipxe`) and `manifest.json`.
 2. Install them into the main repository's TFTP root and restart dnsmasq:
 
    ```bash
    sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
-     /path/to/kurrent/tftp/secureboot/
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi \
+     dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
    sudo install -m 0644 dist/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+   sudo install -m 0644 dist/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
    cd /path/to/kurrent
    eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
-   `tftp/snponly.efi` is a file-level mount; restart the container after replacing it, or the container keeps the old inode. `tftp/secureboot/` serves as the artifact source for `/boot-assets` verification and export.
+   `tftp/snponly.efi` and `tftp/ipxe.efi` are both file-level mounts; restart the container after replacing them, or it keeps the old inode, and dnsmasq cannot start if either is missing. `tftp/secureboot/` serves as the artifact source for `/boot-assets` verification and export.
+
+   The control plane selects the first hop by device `boot_firmware`: default devices take `snponly.efi`, `boot_firmware=full` devices take the all-driver `ipxe.efi`; both can coexist on one PXE segment.
 
 3. In the device UEFI settings, enable the network stack and Secure Boot, and put network boot first.
 4. Boot the device and confirm DHCP assignment, the TFTP first-stage download, and the first stage's report and challenge over 4443.
 
-TFTP serves only the first stage `snponly.efi` (plus the `boot.ipxe` pointer); the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../concepts/architecture/security.md). Machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage.
+TFTP serves only the first-stage firmware (`snponly.efi`, or the all-driver `ipxe.efi` selected per device by `boot_firmware`) and the `boot.ipxe` pointer; the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../concepts/architecture/security.md).
 
 ### Local Media
 
@@ -115,7 +118,7 @@ Acceptance: the serial console shows authentication success, Property Set, I/O q
 ## Common Failures
 
 - **No DHCP response**: is the device on the PXE segment; check dnsmasq `interface=` and firewall ports 67/69.
-- **No TFTP download after DHCP**: does the TFTP root mount only `snponly.efi` and `boot.ipxe`; check file permissions.
+- **No TFTP download after DHCP**: does the TFTP root mount only the first-stage images (`snponly.efi` / `ipxe.efi`) and `boot.ipxe`; check file permissions.
 - **Stuck in firmware boot**: unsigned artifact, signing certificate absent from the target's `db`, or Secure Boot off; verify with `sbverify --cert` and `tools/secureboot/check-host.sh`, and confirm the artifact matches the architecture and form.
 - **Boot HTTPS certificate error**: the `BOOT_CA_CERT` used at build time differs from `state/pki/ca/boot/ca.crt`, or the 4443 leaf SAN does not cover the address the device uses, or the port differs from `BOOT_HTTPS_PORT`.
 - **Device not pooled**: is the registration window open; does the report carry a valid TPM AK; is the device revoked.

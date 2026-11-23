@@ -85,3 +85,23 @@ def test_set_binding_rejects_mac_bound_elsewhere(tmp_path):
     else:
         raise AssertionError("expected ValueError")
     assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01")]
+
+
+def test_add_binding_writes_and_parses_tag(tmp_path):
+    hosts = _hosts(tmp_path)
+
+    hosts.add_binding(MAC_A, "worker-01", tag="full")
+
+    assert f"{MAC_A},set:full,worker-01" in hosts.hosts_file.read_text(encoding="utf-8")
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01", tag="full")]
+
+
+def test_set_binding_writes_tag_then_clears_it(tmp_path):
+    hosts = _hosts(tmp_path)
+
+    hosts.set_binding(MAC_A, "worker-01", tag="full")
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01", tag="full")]
+
+    hosts.set_binding(MAC_A, "worker-01")
+    assert hosts.list_bindings() == [HostBinding(mac=MAC_A, hostname="worker-01")]
+    assert "set:full" not in hosts.hosts_file.read_text(encoding="utf-8")

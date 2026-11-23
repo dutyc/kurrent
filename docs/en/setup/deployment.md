@@ -222,21 +222,26 @@ git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
 ```
 
 ```bash
-# Firmware repository: the boot CA comes from the controller state root
+# Firmware repository: the boot CA comes from the controller state root; both first hops share it
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
-BOOT_HTTPS_PORT=4443 ./build/build-sb.sh
+BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
 
-# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hop
+SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
+BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
+
+# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hops
 sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
 sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
 cd /path/to/kurrent
 eval "$(kurrent deployment show -o env)"
 docker compose restart kurrent-dnsmasq
 ```
 
-The first hop is fixed to `snponly.efi`; restart dnsmasq after replacing it. The image embeds the boot CA and the 4443 port, so changing either requires a rebuild; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
+The first hop is chosen per device: default devices take `snponly.efi`, `boot_firmware=full` devices take `ipxe.efi`; dnsmasq delivers both as file-level mounts, so restart it after replacing them. The images embed the boot CA and the 4443 port, so changing either requires rebuilding both; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -321,7 +326,7 @@ For an empty menu, a data-plane connection failure, an authentication failure or
 
 | Item | Requirement |
 | --- | --- |
-| Network and switching | Dedicated PXE segment with the control plane as the only DHCP/TFTP provider; TFTP root mounts only `snponly.efi` and `boot.ipxe`; switches enable DHCP snooping, DAI, RA guard and port security |
+| Network and switching | Dedicated PXE segment with the control plane as the only DHCP/TFTP provider; TFTP root mounts only the first-stage images (`snponly.efi` / `ipxe.efi`) and `boot.ipxe`; switches enable DHCP snooping, DAI, RA guard and port security |
 | Exposed ports | Control plane 22, 53/67/69, 80/443/4443 (4443 boot segment only); storage nodes 4840/4421 |
 | Host baseline | `sudo kurrent host check --strict` with no FAIL or SKIP; CA keys, `admin.conf`, credentials and audit files at 600 |
 | Registration and attestation | Registration window opened on demand with a quota and closed afterwards; TPM attestation on by default; devices without a TPM are not admitted |

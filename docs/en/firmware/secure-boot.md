@@ -33,7 +33,7 @@ The same image can therefore be pre-provisioned across devices within one deploy
 ## Deploying to the control plane
 
 1. Place `dist/secureboot/snponly-sb.efi` and `manifest.json` in the control-plane host's repository `tftp/secureboot/`. That directory is the source for artifact verification and export, and is not committed.
-2. Have TFTP deliver the signed image as the first hop: `install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`, then `docker compose restart kurrent-dnsmasq` so the file-level mount points at the new inode.
+2. Have TFTP deliver the signed image as the first hop: `install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`, then `docker compose restart kurrent-dnsmasq` so the file-level mount points at the new inode. The all-driver first hop follows the same step: the firmware repo builds `ipxe-sb.efi` with `KURRENT_SB_TARGET=ipxe`; install it over `tftp/ipxe.efi` for devices with `boot_firmware=full`.
 3. Query `/api/cp/boot-assets`; `secureboot.status` should be `ok`: the image hash matches the manifest, the port matches the deployment, and the boot CA exists with a matching fingerprint. The WebUI boot-chain page shows the Secure Boot row whenever artifacts are present.
 
 ## Provisioning the target trust store

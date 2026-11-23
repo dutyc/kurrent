@@ -33,7 +33,7 @@
 - **SAN boot** — Booting directly from a network storage disk; implemented here with iPXE `sanboot`.
 - **iPXE** — The open-source network boot firmware used by this project.
 - **PXE** — Preboot Execution Environment; devices obtain the first-hop firmware over DHCP + TFTP.
-- **TFTP** — The first-hop file transfer protocol; currently serves only `snponly.efi` and the `boot.ipxe` pointer.
+- **TFTP** — The first-hop file transfer protocol; serves only the first-stage firmware (`snponly.efi` / `ipxe.efi`) and the `boot.ipxe` pointer.
 - **`snponly`** — The iPXE first-hop artifact used by the main repository by default.
 - **NBFT** — NVMe Boot Firmware Table, the discovery table describing network boot targets.
 - **NBCT** — NVMe Boot Credentials Table, the session credential table handed from firmware to initramfs.

@@ -25,6 +25,43 @@ function Evidence({ parts }) {
   )
 }
 
+function FirmwareCaps({ firmwares, t }) {
+  return (
+    <div className="boot-caps">
+      {firmwares.map((firmware) => (
+        <div className="boot-caps-group" key={firmware.file}>
+          <div className="boot-caps-head">
+            <code>{firmware.file}</code>
+            <span className={`boot-file-state boot-file-${firmware.fileStatus}`}>
+              {t(`assets.state.${firmware.fileStatus}`)}
+            </span>
+            {firmware.capsTotal > 0 && (
+              <span className="boot-caps-count">
+                {t('assets.evidence.firmwareCaps', {
+                  present: firmware.capsPresent,
+                  total: firmware.capsTotal,
+                })}
+              </span>
+            )}
+          </div>
+          <ul className="boot-caps-list">
+            {(firmware.capabilities || []).map((capability) => {
+              const key = `assets.capabilities.${capability.id}`
+              const translated = t(key)
+              return (
+                <li key={capability.id} className={capability.present ? 'boot-cap-ok' : 'boot-cap-missing'}>
+                  <span className="boot-cap-mark" aria-hidden="true">{capability.present ? '✓' : '×'}</span>
+                  {translated === key ? capability.label : translated}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function Detail({ check, t, locale }) {
   const detail = check.detail || {}
   const rows = []
@@ -35,26 +72,33 @@ function Detail({ check, t, locale }) {
     if (!detail.declared) {
       rows.push(t('assets.cause.firmwareUndeclared'))
       fix = 'assets.fix.firmwareFile'
-    } else if (detail.fileStatus === 'incomplete') {
-      rows.push(t('assets.cause.firmwareCaps', {
-        file: detail.file,
-        caps: (detail.missing || []).join(join),
-      }))
-      fix = 'assets.fix.firmwareCaps'
     } else {
-      const keys = {
-        missing: 'firmwareMissing',
-        empty: 'firmwareEmpty',
-        rejected: 'firmwareRejected',
+      const items = detail.firmwares?.length ? detail.firmwares : [{
+        file: detail.file,
+        fileStatus: detail.fileStatus,
+        hostPath: detail.hostPath,
+        missing: detail.missing,
+      }]
+      let fileFix = false
+      for (const it of items) {
+        if (it.fileStatus === 'incomplete') {
+          rows.push(t('assets.cause.firmwareCaps', {
+            file: it.file,
+            caps: (it.missing || []).join(join),
+          }))
+          continue
+        }
+        const key = {
+          missing: 'firmwareMissing',
+          empty: 'firmwareEmpty',
+          rejected: 'firmwareRejected',
+        }[it.fileStatus]
+        if (key) {
+          rows.push(t(`assets.cause.${key}`, { file: it.file, hostPath: it.hostPath }))
+          fileFix = true
+        }
       }
-      const key = keys[detail.fileStatus]
-      if (key) {
-        rows.push(t(`assets.cause.${key}`, {
-          file: detail.file,
-          hostPath: detail.hostPath,
-        }))
-        fix = 'assets.fix.firmwareFile'
-      }
+      if (rows.length) fix = fileFix ? 'assets.fix.firmwareFile' : 'assets.fix.firmwareCaps'
     }
   }
 
@@ -151,6 +195,7 @@ export default function BootChain() {
   const [checkedAt, setCheckedAt] = useState(null)
   const [loading, setLoading] = useState(true)
   const [nonce, setNonce] = useState(0)
+  const [expanded, setExpanded] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -252,9 +297,28 @@ export default function BootChain() {
             </span>
           </div>
           <div className="boot-board">
-            {result.checks.map((check) => (
+            {result.checks.map((check) => {
+              const expandable = check.id === 'firmware' && check.detail?.declared
+              const open = expandable && expanded === check.id
+              const toggle = () => setExpanded(open ? null : check.id)
+              return (
               <div className="boot-item" key={check.id}>
-                <div className="boot-row">
+                <div
+                  className={`boot-row${expandable ? ' boot-row-expandable' : ''}`}
+                  {...(expandable ? {
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-expanded': open,
+                    title: t('assets.expandHint'),
+                    onClick: toggle,
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        toggle()
+                      }
+                    },
+                  } : {})}
+                >
                   <span className={`boot-state boot-state-${check.status}`}>
                     {t(`assets.status.${check.status}`)}
                   </span>
@@ -264,8 +328,10 @@ export default function BootChain() {
                 {(check.status === 'blocked' || check.status === 'degraded') && (
                   <Detail check={check} t={t} locale={locale} />
                 )}
+                {open && <FirmwareCaps firmwares={check.detail.firmwares || []} t={t} />}
               </div>
-            ))}
+              )
+            })}
           </div>
           <p className="boot-foot">
             {t('assets.foot').split('/boot-vars')[0]}

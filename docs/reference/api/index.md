@@ -19,7 +19,7 @@ title: "API 参考"
 
 它不直接配置存储后端，也不托管引导静态文件：
 
-- `menu.ipxe` 与引导脚本存放在 `tftp/`，由 nginx 经 HTTPS 分发；TFTP 只提供首跳 `snponly.efi` 与 `boot.ipxe` 指针。
+- `menu.ipxe` 与引导脚本存放在 `tftp/`，由 nginx 经 HTTPS 分发；TFTP 只提供首跳固件（`snponly.efi` / `ipxe.efi`）与 `boot.ipxe` 指针。
 - 菜单的默认项、超时与系统标签由控制面经 `/boot-vars` 投影。
 - 存储后端（nvmet configfs 或 iSCSI 的 `tgtadm`/`targetcli`）由节点 Agent 在宿主上配置。
 

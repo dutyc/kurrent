@@ -16,7 +16,7 @@ Boot-chain status (requires management authentication: `human` or `automation`).
 
 | Field | Description |
 |---|---|
-| `firmware[]` | UEFI firmware declared by `dhcp-boot=tag:efi64`: `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
+| `firmware[]` | First-hop UEFI firmware declared by `dhcp-boot` (`tag:efi64` → `snponly.efi`, `tag:full` → `ipxe.efi`): `tag` (`efi64` / `full`), `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
 | `stage2[]` | Script-chain files (`boot.ipxe`, `boot.ipxe.cfg`, `menu.ipxe`): `file`, `path`, `host_path`, `status`, `size`, `mtime` |
 | `menu` | `status` (ok/unavailable) and `items` (selectable item count, skipping `--gap` lines) |
 | `secureboot` | Optional Secure Boot artifacts: `present`, `status` (ok/incomplete/missing), `artifact`, `path`, `artifact_sha256`, `artifact_size`, `manifest_present`, `manifest_matches`, `signer`, `built_at`, `boot_https_port`, `port_matches`, `boot_ca_present`, `boot_ca_sha256`, `boot_ca_matches` |
