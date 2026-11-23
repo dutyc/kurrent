@@ -1,119 +1,252 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getWorkers, getAgents, getDevices, getOperations } from '../api/client'
+import {
+  getAgents,
+  getBootAssets,
+  getDevices,
+  getOperations,
+  getRegistrationWindow,
+  getWorkers,
+} from '../api/client'
+import { buildBootChecks, probePaths } from '../api/bootStatus'
+import {
+  agentSummary,
+  attestationFailures,
+  chainSummary,
+  deviceSummary,
+  windowModel,
+  workerSummary,
+} from '../api/dashboardStatus'
 import { useI18n } from '../i18n'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import Divider from '../components/Divider'
 import './Dashboard.css'
 
-function StatCard({ label, value, sub }) {
-  return (
-    <Card className="stat-card">
-      <span className="stat-value">{value}</span>
-      <span className="stat-label">{label}</span>
-      {sub && <span className="stat-sub">{sub}</span>}
-    </Card>
-  )
+const OVERALL_VARIANT = { normal: 'ok', degraded: 'degraded', blocked: 'error', unknown: 'default' }
+const OP_VARIANT = { ok: 'ok', started: 'degraded', error: 'error', failed: 'error', rejected: 'error', denied: 'error' }
+
+function chainText(chain, t) {
+  if (!chain) return ''
+  if (chain.overall === 'unknown') return t('dashboard.chainUnknown')
+  const parts = [t('dashboard.chainChecks', { count: chain.counted })]
+  if (chain.failed > 0) parts.push(t('dashboard.chainFailed', { count: chain.failed }))
+  if (chain.firmwares.length > 0) {
+    parts.push(t('dashboard.chainFirmware', { items: chain.firmwares.join(' · ') }))
+  }
+  return parts.join(' · ')
+}
+
+function windowSub(win, t) {
+  if (!win) return null
+  const quota = win.max === null
+    ? t('dashboard.quotaUnlimited', { admitted: win.admitted })
+    : t('dashboard.quota', { admitted: win.admitted, max: win.max })
+  if (win.open) return quota
+  if (win.ttl === null) return t('dashboard.windowNever')
+  return `${t('dashboard.windowLast', { ttl: win.ttl })} · ${quota}`
+}
+
+function formatTime(ts, locale) {
+  const at = new Date(ts)
+  return Number.isNaN(at.getTime()) ? String(ts) : at.toLocaleTimeString(locale)
 }
 
 export default function Dashboard() {
-  const { t } = useI18n()
-  const [stats, setStats] = useState({ workers: 0, agents: 0, agentHealthy: 0, devices: 0, dataPlaneReady: 0, dataPlaneTotal: 0 })
-  const [recentOps, setRecentOps] = useState([])
+  const { t, locale } = useI18n()
+  const [snapshot, setSnapshot] = useState(null)
+  const [probes, setProbes] = useState(null)
+  const [errors, setErrors] = useState([])
+  const [checkedAt, setCheckedAt] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [nonce, setNonce] = useState(0)
 
   useEffect(() => {
     let cancelled = false
-    async function load() {
-      try {
-        const [workers, agents, devices, ops] = await Promise.all([
-          getWorkers().catch(() => []),
-          getAgents(true).catch(() => []),
-          getDevices().catch(() => []),
-          getOperations(0, 10).catch(() => ({ entries: [] })),
-        ])
-        if (cancelled) return
-        const agentList = Array.isArray(agents) ? agents : []
-        const agentHealthy = agentList.filter((a) => a.health === 'ok').length
-        // 节点级加密前置缺口：nvmet 节点中数据面 TLS 端口就绪数（不逐 Worker 轮询，避免 N+1）
-        const nvmetAgents = agentList.filter((a) => a.capabilities?.backend === 'nvmet')
-        const dataPlaneReady = nvmetAgents.filter((a) => a.capabilities?.port?.ready === true).length
-        setStats({
-          workers: Array.isArray(workers) ? workers.length : 0,
-          devices: Array.isArray(devices) ? devices.length : 0,
-          agents: agentList.length,
-          agentHealthy,
-          dataPlaneReady,
-          dataPlaneTotal: nvmetAgents.length,
-        })
-        setRecentOps((ops.entries || []).slice().reverse())
-      } catch (e) {
-        if (!cancelled) setError(e.message)
-      } finally {
-        if (!cancelled) setLoading(false)
+    setLoading(true)
+    setErrors([])
+    setProbes(null)
+
+    ;(async () => {
+      const [assetRes, workerRes, deviceRes, agentRes, windowRes, opsRes] = await Promise.allSettled([
+        getBootAssets(),
+        getWorkers(),
+        getDevices('all'),
+        getAgents(true),
+        getRegistrationWindow(),
+        getOperations(0, 10, null, 'desc'),
+      ])
+      if (cancelled) return
+
+      const data = {
+        assets: assetRes.status === 'fulfilled' ? assetRes.value : null,
+        workers: workerRes.status === 'fulfilled' ? workerRes.value : null,
+        devices: deviceRes.status === 'fulfilled' ? deviceRes.value : null,
+        agents: agentRes.status === 'fulfilled' ? agentRes.value : null,
+        window: windowRes.status === 'fulfilled' ? windowRes.value : null,
+        ops: opsRes.status === 'fulfilled' ? (opsRes.value.entries || null) : null,
       }
-    }
-    load()
+      setSnapshot(data)
+
+      const message = (result) => result.reason?.message || ''
+      setErrors([
+        assetRes.status === 'rejected' && { key: 'dashboard.failedAssets', message: message(assetRes) },
+        workerRes.status === 'rejected' && { key: 'dashboard.failedWorkers', message: message(workerRes) },
+        deviceRes.status === 'rejected' && { key: 'dashboard.failedDevices', message: message(deviceRes) },
+        agentRes.status === 'rejected' && { key: 'dashboard.failedAgents', message: message(agentRes) },
+        windowRes.status === 'rejected' && { key: 'dashboard.failedWindow', message: message(windowRes) },
+        opsRes.status === 'rejected' && { key: 'dashboard.failedOps', message: message(opsRes) },
+      ].filter(Boolean))
+
+      if (data.assets) {
+        const paths = (data.assets.stage2 || []).map((file) => file.path)
+        const result = await probePaths(paths)
+        if (cancelled) return
+        setProbes(result)
+      }
+      setCheckedAt(new Date())
+      setLoading(false)
+    })()
+
     return () => { cancelled = true }
-  }, [])
+  }, [nonce])
+
+  const result = useMemo(
+    () => (snapshot ? buildBootChecks({ ...snapshot, probes }) : null),
+    [snapshot, probes]
+  )
+  const chain = chainSummary(result)
+  const workers = snapshot?.workers ? workerSummary(snapshot.workers) : null
+  const devices = snapshot?.devices ? deviceSummary(snapshot.devices) : null
+  const agents = snapshot?.agents ? agentSummary(snapshot.agents) : null
+  const win = snapshot ? windowModel(snapshot.window) : null
+  const attestation = snapshot?.devices ? attestationFailures(snapshot.devices) : null
+  const portDown = agents ? agents.portDown : null
+  const winSub = windowSub(win, t)
+  const ops = snapshot?.ops ?? null
 
   return (
     <div>
-      <h2 className="page-title">{t('dashboard.title')}</h2>
-
-      {error && <p className="page-error">{error}</p>}
-
-      <div className="stat-grid">
-        <StatCard
-          label={t('dashboard.workers')}
-          value={loading ? '—' : stats.workers}
-        />
-        <StatCard
-          label={t('dashboard.devices')}
-          value={loading ? '—' : stats.devices}
-        />
-        <StatCard
-          label={t('dashboard.agents')}
-          value={loading ? '—' : `${stats.agentHealthy}/${stats.agents}`}
-          sub={t('dashboard.healthyTotal')}
-        />
-        <StatCard
-          label={t('dashboard.dataPlane')}
-          value={loading ? '—' : `${stats.dataPlaneReady}/${stats.dataPlaneTotal}`}
-          sub={t('dashboard.dataPlaneSub')}
-        />
+      <div className="dash-head">
+        <h2 className="page-title">{t('dashboard.title')}</h2>
+        <div className="dash-actions">
+          <span className="dash-checked">
+            {loading
+              ? t('dashboard.refreshing')
+              : checkedAt && t('dashboard.updatedAt', { time: checkedAt.toLocaleTimeString(locale) })}
+          </span>
+          <button className="dash-refresh" onClick={() => setNonce((n) => n + 1)} disabled={loading}>
+            {t('dashboard.refresh')}
+          </button>
+        </div>
       </div>
 
-      <Divider>{t('dashboard.recentOps')}</Divider>
+      {errors.map((error) => (
+        <p className="page-error" key={error.key}>
+          {t(error.key, { message: error.message })}
+        </p>
+      ))}
+      {loading && !result && <p className="page-loading">{t('common.loading')}</p>}
 
-      {loading ? (
-        <p className="page-loading">{t('common.loading')}</p>
-      ) : recentOps.length === 0 ? (
-        <p className="page-muted">{t('dashboard.noOps')}</p>
-      ) : (
-        <div className="ops-list">
-          {recentOps.map((op) => (
-            <div key={op.id} className="ops-row">
-              <span className="ops-id">#{op.id}</span>
-              <span className="ops-ts">{op.ts}</span>
-              <span className="ops-type">{op.op}</span>
-              <Badge>{op.status}</Badge>
-              {op.worker_id && (
-                <Link to={`/workers/${op.worker_id}`} className="ops-link">
-                  {op.worker_id}
-                </Link>
-              )}
-            </div>
-          ))}
+      {result && (
+        <div className="dash-chain">
+          <Badge variant={OVERALL_VARIANT[chain.overall]}>
+            {t(`assets.overall.${chain.overall}`)}
+          </Badge>
+          <span className="dash-chain-stage">{t('dashboard.chainStage')}</span>
+          <span className="dash-chain-text">{chainText(chain, t)}</span>
+          <Link className="dash-chain-go" to="/boot">{t('dashboard.viewChain')}</Link>
         </div>
       )}
 
-      {recentOps.length > 0 && (
-        <div className="ops-more">
-          <Link to="/operations">{t('dashboard.viewAll')}</Link>
+      <div className="stat-grid">
+        <Card className="stat-card">
+          <span className="stat-value">{workers ? `${workers.ready}/${workers.total}` : '—'}</span>
+          <span className="stat-label">{t('dashboard.workerReady')}</span>
+          {workers && (
+            <span className="stat-sub">{t('dashboard.workerNotReady', { n: workers.notReady })}</span>
+          )}
+        </Card>
+
+        <Card className="stat-card">
+          <span className="stat-value">{devices ? devices.total : '—'}</span>
+          <span className="stat-label">{t('dashboard.devicePool')}</span>
+          {devices && (
+            <span className="stat-sub">
+              {t('dashboard.deviceBreakdown', {
+                pooled: devices.pooled,
+                bound: devices.bound,
+                revoked: devices.revoked,
+              })}
+            </span>
+          )}
+        </Card>
+
+        <Card className="stat-card">
+          <span className="stat-value">
+            {win?.open ? win.minutes : '—'}
+            {win?.open && <span className="stat-unit">{t('dashboard.minutes')}</span>}
+          </span>
+          <span className="stat-label-row">
+            <span className="stat-label">{t('dashboard.registration')}</span>
+            {win && (
+              <Badge variant={win.open ? 'ok' : 'degraded'}>
+                {win.open ? t('dashboard.windowOpen') : t('dashboard.windowClosed')}
+              </Badge>
+            )}
+          </span>
+          {winSub && <span className="stat-sub">{winSub}</span>}
+        </Card>
+
+        <Card className="stat-card">
+          <span className="stat-value">{agents ? `${agents.healthy}/${agents.total}` : '—'}</span>
+          <span className="stat-label">{t('dashboard.storageNodes')}</span>
+          {agents && (
+            <span className="stat-sub">
+              {t('dashboard.tlsReady', { ready: agents.tlsReady, total: agents.tlsTotal })}
+            </span>
+          )}
+        </Card>
+      </div>
+
+      {snapshot && (
+        <div className="dash-anoms">
+          <Link to="/devices" className={attestation > 0 ? 'hot' : ''}>
+            {t('dashboard.anomAttestation', { count: attestation ?? '—' })}
+          </Link>
+          <Link to="/agents" className={portDown > 0 ? 'hot' : ''}>
+            {t('dashboard.anomPort', { count: portDown ?? '—' })}
+          </Link>
         </div>
+      )}
+
+      <Divider>{t('dashboard.recentOps')}</Divider>
+
+      {loading && !ops ? (
+        <p className="page-loading">{t('common.loading')}</p>
+      ) : ops && ops.length === 0 ? (
+        <p className="page-muted">{t('dashboard.noOps')}</p>
+      ) : ops && (
+        <>
+          <div className="ops-list">
+            {ops.map((op) => (
+              <div key={op.id} className="ops-row">
+                <span className="ops-id">#{op.id}</span>
+                <span className="ops-ts">{formatTime(op.ts, locale)}</span>
+                <span className="ops-type">{op.op}</span>
+                <Badge variant={OP_VARIANT[op.status] || 'default'}>{op.status}</Badge>
+                {op.worker_id && (
+                  <Link to={`/workers/${op.worker_id}`} className="ops-link">
+                    {op.worker_id}
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="ops-more">
+            <Link to="/operations">{t('dashboard.viewAll')}</Link>
+          </div>
+        </>
       )}
     </div>
   )

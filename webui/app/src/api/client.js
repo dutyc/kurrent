@@ -470,7 +470,7 @@ export function batchBind(data) {
 }
 
 // ===== Operations =====
-export function getOperations(since = 0, limit = 50, mac = null) {
-  const params = mac ? { since, limit, mac } : { since, limit };
-  return request('/operations', { params });
+// order='desc' 取最新一页（新到旧），仅用于概览类查询；默认按写入顺序增量读取。
+export function getOperations(since = 0, limit = 50, mac = null, order = null) {
+  return request('/operations', { params: { since, limit, mac, order } });
 }
