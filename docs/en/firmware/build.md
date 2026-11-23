@@ -21,7 +21,11 @@ BOOT_CA_CERT=<state>/control-plane/state/pki/ca/boot/ca.crt \
 
 A signed build requires a signing key, a signing certificate and the boot CA certificate. The port and controller address may be omitted: the port then defaults to `4443`, while the address comes from the DHCP `next-server`; set `CONTROLLER_IP` only when the address must be fixed inside the image.
 
-`build-sb.sh` builds on the ordinary build, embeds the static scripts, the boot CA and the boot HTTPS port, and produces a first stage signed with `sbsign`. Build inputs, the manifest and provisioning steps are in [Secure Boot Provisioning](./secure-boot.md).
+`build-sb.sh` builds on the ordinary build, embeds the static scripts, the boot CA and the boot HTTPS port, and produces a first stage signed with `sbsign`.
+
+To write the platform keys on the device's first network boot, also provide `SB_PK_KEY` / `SB_PK_CERT` / `SB_KEK_KEY` / `SB_KEK_CERT` (as a group): the script generates the signed PK / KEK / db descriptors for `sbenroll`, and db automatically includes the artifact signing certificate and `SB_MS_UEFI_CA_CERT` (default `build/certs/MicrosoftUEFI-CA-2011.pem`). Without this group the image carries no enrollment data and cannot perform platform enrollment.
+
+Build inputs, the manifest and provisioning steps are in [Secure Boot Provisioning](./secure-boot.md).
 
 The ordinary build `./build/build.sh` does not sign; its artifacts are for local debugging and research only, and Secure Boot targets refuse to load them.
 

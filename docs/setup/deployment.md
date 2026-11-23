@@ -221,7 +221,7 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ## 第 3 步：固件与设备入池
 
-这一步之前先完成 Secure Boot 预置：按 [Secure Boot 预置](../firmware/secure-boot.md#预置目标机信任库)生成离线签名密钥，把站点签名证书与 Microsoft UEFI CA 导入目标机 `db`，并用 `tools/secureboot/check-host.sh` 复核。boot CA 由 `kurrent init` 生成（`<状态根>/control-plane/state/pki/ca/boot/ca.crt`）。
+这一步之前先完成 Secure Boot 准备：boot CA 由 `kurrent init` 生成（`<状态根>/control-plane/state/pki/ca/boot/ca.crt`）；签名镜像在构建时内嵌平台密钥（PK / KEK）与产物签名证书，目标机 `db` 在首次网络启动时由平台注册窗口写入，不需要逐机导入。机制见 [Secure Boot 预置](../firmware/secure-boot.md#预置目标机信任库)。
 
 ### 3.1 固件
 
@@ -235,10 +235,14 @@ git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
 # 固件仓：boot CA 取自控制面状态根；SNP 与全驱动两份首跳同源
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
+SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
+SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
 BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
 
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
+SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
+SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
 BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
 
 # 主仓库：产物供 /boot-assets 校验，并作为 TFTP 首跳
@@ -251,7 +255,7 @@ eval "$(kurrent deployment show -o env)"
 docker compose restart kurrent-dnsmasq
 ```
 
-首跳按设备选择：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取 `ipxe.efi`；两份都由 dnsmasq 以文件级挂载交付，替换后必须重启 dnsmasq。镜像内嵌 boot CA 与 4443 端口，换 CA 或端口两份都须重签；控制面地址默认由 DHCP 提供。完整构建与预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
+首跳按设备选择：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取 `ipxe.efi`；两份都由 dnsmasq 以文件级挂载交付，替换后必须重启 dnsmasq。镜像内嵌 boot CA、4443 端口与平台密钥描述符（`SB_PK_*` / `SB_KEK_*`），换 CA、端口或平台密钥两份都须重签；控制面地址默认由 DHCP 提供。完整构建与预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -259,20 +263,22 @@ api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
 
 ### 3.2 入池
 
-在 WebUI 的 **Devices** 页开启注册窗口，然后让设备接入 PXE 网段、以 UEFI 网络启动并开启 Secure Boot；也可以用 API：
+先在 WebUI 的 **Devices** 页开启平台注册窗口，让目标机网络启动完成平台密钥写入并自动重启；随后开启注册窗口入池。也可以用 API：
 
 ```bash
+api /settings/platform-enrollment -X POST        # 开启平台注册窗口
 api /settings/registration-window -X POST -H 'Content-Type: application/json' \
   -d '{"ttl_minutes": 30, "max_devices": 20}'
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-设备走过的链路是：DHCP → TFTP 首跳 → 4443 上报并取 nonce → TPM 创建 AK → `/devices/report` 入池并认领 AK；此后每次引导都需通过 PCR quote。
+设备走过的链路是：DHCP → TFTP 首跳 → 平台注册窗口内 `/boot/phase` 执行 `sbenroll` 写入 PK / KEK / db → 自动重启 → 验签引导 → 4443 上报并取 nonce → TPM 创建 AK → `/devices/report` 入池并认领 AK；此后每次引导都需通过 PCR quote。首次网络启动仅执行平台密钥写入与重启；入池发生在重启之后。
 
-入池完成后关闭注册窗口：
+入池完成后关闭注册窗口与平台注册窗口：
 
 ```bash
 api /settings/registration-window -X DELETE
+api /settings/platform-enrollment -X DELETE
 ```
 
 仅在过渡或排障时临时关闭证明：`api /settings/enforcement -X PUT -H 'Content-Type: application/json' -d '{"enabled": false}'`，完成后恢复。

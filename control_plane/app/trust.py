@@ -166,6 +166,29 @@ def window_status() -> dict[str, Any]:
     }
 
 
+PLATFORM_ENROLLMENT_KEY = "platform_enrollment"
+PLATFORM_ENROLLED_KEY = "platform_enrolled"
+
+
+def platform_window() -> dict[str, Any] | None:
+    """平台注册窗口记录（settings.json platform_enrollment）：无/非法 → None。"""
+    rec = runtime_settings.get(PLATFORM_ENROLLMENT_KEY)
+    if not isinstance(rec, dict) or not rec.get("opened_at"):
+        return None
+    return rec
+
+
+def platform_window_open() -> bool:
+    """窗口开启判定：部署期显式开关，不随时间自动关闭。"""
+    return platform_window() is not None
+
+
+def platform_enrolled() -> dict[str, Any]:
+    """已完成平台密钥注册的设备（mac → {at}）：由注册上报端点写入，关闭窗口后保留。"""
+    data = runtime_settings.get(PLATFORM_ENROLLED_KEY)
+    return data if isinstance(data, dict) else {}
+
+
 def enforcement_enabled() -> bool:
     """设备身份验签强制开关（2026-08-21 裁定）：默认开启，无密钥设备拒绝引导。
 

@@ -21,7 +21,11 @@ BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
 
 签名构建必须提供签名密钥、签名证书与 boot CA 证书。端口和控制面地址可以省略：端口省略时为 `4443`，地址省略时由设备从 DHCP `next-server` 取得。只有要把控制面地址固定进镜像时，才设置 `CONTROLLER_IP`。
 
-`build-sb.sh` 在普通构建之上嵌入静态脚本、boot CA 与引导 HTTPS 端口，产出经 `sbsign` 签名的首跳。构建输入、manifest 与预置步骤见 [Secure Boot 预置](./secure-boot.md)。
+`build-sb.sh` 在普通构建之上嵌入静态脚本、boot CA 与引导 HTTPS 端口，产出经 `sbsign` 签名的首跳。
+
+需要设备首次网络启动时写入平台密钥，还要同时提供 `SB_PK_KEY` / `SB_PK_CERT` / `SB_KEK_KEY` / `SB_KEK_CERT`（四者成组）：构建脚本据此生成 `sbenroll` 的 PK / KEK / db 签名描述符，db 自动包含产物签名证书与 `SB_MS_UEFI_CA_CERT`（默认 `build/certs/MicrosoftUEFI-CA-2011.pem`）。缺少这组输入时镜像不含注册数据，不能执行平台注册。
+
+构建输入、manifest 与预置步骤见 [Secure Boot 预置](./secure-boot.md)。
 
 普通构建 `./build/build.sh` 不签名，产物只用于本地调试与研究；开启 Secure Boot 的目标机会拒绝加载。
 

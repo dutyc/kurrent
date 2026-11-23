@@ -14,6 +14,7 @@
 - **Cold migration（冷迁移）**：关闭设备 A，把设备绑定切换到 B，由 B 启动同一 Worker 的系统盘。
 - **Drain（排空）**：将节点 `enabled` 置为否：不再接受新建盘，已有盘继续服务。
 - **Registration window（注册窗口）**：允许未知设备登记入池的时间窗口，受 TTL 与设备额度约束。
+- **Platform enrollment（平台注册）**：首次网络启动时把平台密钥（PK / KEK / db）写入固件的过程；只在平台注册窗口开启时执行，写入后自动重启进入验签引导。
 - **Enrollment（注册/加入）**：组件使用 bootstrap token 换取客户端证书并登记到控制面的过程。
 - **Bootstrap token**：绑定节点身份的一次性引导凭据，用于节点 enroll。
 - **Management token**：供脚本与 WebUI 登录的管理面 Bearer token，只存摘要。

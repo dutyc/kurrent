@@ -221,6 +221,17 @@ const zh = {
       enforceAck: '确认仅在过渡或排障期间关闭，完成后恢复',
       enforceHint: '默认开启：/boot-vars 只向通过 TPM 证明的已绑定设备下发启动参数；仅在过渡或排障时临时关闭，完成后恢复',
     },
+    platformEnroll: {
+      title: '平台注册',
+      open: '开启',
+      closed: '关闭',
+      openBtn: '开启窗口',
+      closeBtn: '关闭窗口',
+      count: '已注册 {n} 台',
+      countHint: '已完成 Secure Boot 密钥注册的设备；由设备注册时自行上报',
+      hint: '开启后，未注册的机器下次引导会写入平台密钥并重启；已注册设备重复执行不会改动变量。已锁厂商密钥的机型无法经此流程注册。',
+      openHint: '窗口开启中：未注册的机器引导时写入平台密钥，完成后自行重启进入验签引导。',
+    },
     attest: {
       column: '证明',
       proven: '通过',
@@ -830,6 +841,7 @@ const zh = {
       akgen: 'TPM AK 创建',
       akpub: 'AK 公钥导出',
       quote: 'PCR quote',
+      sbenroll: '密钥注册',
       tofu: 'TOFU 锚定',
     },
     evidence: {

@@ -10,6 +10,9 @@ import {
   getRegistrationWindow,
   openRegistrationWindow,
   closeRegistrationWindow,
+  getPlatformEnrollment,
+  openPlatformEnrollment,
+  closePlatformEnrollment,
   getEnforcement,
   setEnforcement,
   approveDeviceBaseline,
@@ -105,6 +108,11 @@ export default function Devices() {
   const [regWindow, setRegWindow] = useState(null) // null = 未加载；{ open, opened_at, ttl_minutes, closes_at, remaining_seconds, max_devices, admitted, remaining_devices, quota_exhausted }
   const [windowBusy, setWindowBusy] = useState(false)
   const [windowError, setWindowError] = useState(null)
+
+  // ===== 平台注册（Secure Boot 密钥网络注册）：窗口开关 + 已注册设备清单 =====
+  const [enrollWindow, setEnrollWindow] = useState(null) // null = 未加载；{ open, opened_at, enrolled: [{ mac, at }] }
+  const [enrollBusy, setEnrollBusy] = useState(false)
+  const [enrollError, setEnrollError] = useState(null)
   const [ttlChoice, setTtlChoice] = useState('30')
   const [maxChoice, setMaxChoice] = useState('') // 放行额度（台），'' = 不限
   const [countdown, setCountdown] = useState(0) // 本地逐秒递减的剩余秒数（以服务端 remaining_seconds 为基准）
@@ -192,6 +200,15 @@ export default function Devices() {
     }
   }, [])
 
+  const fetchPlatformEnrollment = useCallback(async () => {
+    try {
+      const res = await getPlatformEnrollment()
+      setEnrollWindow(res)
+    } catch (e) {
+      setEnrollError(e.message)
+    }
+  }, [])
+
   // 复制 MAC 到剪贴板（1.5s 内显示 ✓ 反馈；剪贴板不可用时静默忽略）
   const copyMac = async (e, mac) => {
     e.stopPropagation()
@@ -222,7 +239,8 @@ export default function Devices() {
   useEffect(() => {
     fetchRegistrationWindow()
     fetchEnforcement()
-  }, [fetchRegistrationWindow, fetchEnforcement])
+    fetchPlatformEnrollment()
+  }, [fetchRegistrationWindow, fetchEnforcement, fetchPlatformEnrollment])
 
   // 窗口开启期间每秒递减倒计时；归零后重新拉取（后端 TTL 到期懒计算关闭）
   useEffect(() => {
@@ -245,6 +263,13 @@ export default function Devices() {
     }, 10000)
     return () => clearInterval(iv)
   }, [regWindow?.open, fetchRegistrationWindow, fetchDevices, unbindMode, wizardOpen])
+
+  // 平台注册窗口开启期间每 10s 重拉：设备完成注册后自行上报，清单随之增长
+  useEffect(() => {
+    if (!enrollWindow?.open) return undefined
+    const iv = setInterval(fetchPlatformEnrollment, 10000)
+    return () => clearInterval(iv)
+  }, [enrollWindow?.open, fetchPlatformEnrollment])
 
   // 开启注册窗口：窗口开启期间新设备上报可携 TPM AK 自动注册入池（TTL 到期自动关闭；额度用尽即停）
   const handleOpenWindow = async () => {
@@ -282,9 +307,34 @@ export default function Devices() {
     }
   }
 
+  // 开启平台注册窗口：未注册机器下次引导写入 Secure Boot 密钥并重启
+  const handleOpenEnroll = async () => {
+    setEnrollBusy(true)
+    setEnrollError(null)
+    try {
+      setEnrollWindow(await openPlatformEnrollment())
+    } catch (e) {
+      setEnrollError(e.message)
+    } finally {
+      setEnrollBusy(false)
+    }
+  }
+
+  // 关闭平台注册窗口：引导脚本不再下发注册流程，已注册设备与清单保留
+  const handleCloseEnroll = async () => {
+    setEnrollBusy(true)
+    setEnrollError(null)
+    try {
+      setEnrollWindow(await closePlatformEnrollment())
+    } catch (e) {
+      setEnrollError(e.message)
+    } finally {
+      setEnrollBusy(false)
+    }
+  }
+
   // 切换 TPM 证明强制开关：开启后 /boot-vars 只向通过证明的已绑定设备下发
-  const handleToggleEnforcement = async () => {
-    setEnforcementBusy(true)
+  const handleToggleEnforcement = async () => {    setEnforcementBusy(true)
     setWindowError(null)
     try {
       const res = await setEnforcement(!enforcement)
@@ -1203,6 +1253,48 @@ export default function Devices() {
           />
         </div>
         {windowError && <span className="workers-toolbar-error">{windowError}</span>}
+      </div>
+
+      {/* 平台注册面板：窗口开启期间未注册机器经网络写入 Secure Boot 密钥；清单由设备自行上报 */}
+      <div className="enroll-panel">
+        <div className="enroll-head">
+          <span className="reg-window-title">{t('devices.platformEnroll.title')}</span>
+          <Badge variant={enrollWindow?.open ? 'ok' : 'default'}>
+            {enrollWindow?.open
+              ? t('devices.platformEnroll.open')
+              : t('devices.platformEnroll.closed')}
+          </Badge>
+          <span className="enroll-count" title={t('devices.platformEnroll.countHint')}>
+            {t('devices.platformEnroll.count', { n: enrollWindow?.enrolled?.length ?? 0 })}
+          </span>
+          <div className="enroll-actions">
+            {enrollWindow?.open ? (
+              <Button variant="danger" onClick={handleCloseEnroll} disabled={enrollBusy}>
+                {t('devices.platformEnroll.closeBtn')}
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={handleOpenEnroll} disabled={enrollBusy}>
+                {t('devices.platformEnroll.openBtn')}
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="enroll-hint">
+          {enrollWindow?.open
+            ? t('devices.platformEnroll.openHint')
+            : t('devices.platformEnroll.hint')}
+        </p>
+        {enrollError && <span className="workers-toolbar-error">{enrollError}</span>}
+        {enrollWindow?.enrolled?.length > 0 && (
+          <div className="enroll-list">
+            {enrollWindow.enrolled.map((item) => (
+              <div className="enroll-row" key={item.mac}>
+                <code>{item.mac}</code>
+                <span>{fmtTime(item.at)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="workers-toolbar">

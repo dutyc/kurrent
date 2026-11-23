@@ -85,11 +85,11 @@ Admission at boot rests on three trust objects that cannot substitute for each o
 
 | Object | Anchor | Verified when | On failure |
 | --- | --- | --- | --- |
-| First-hop code | Site signing certificate in the UEFI `db` | Firmware loads the TFTP first hop | An unsigned or tampered image never runs |
+| First-hop code | Site signing certificate in the UEFI `db` (written by the platform enrollment window) | Firmware loads the TFTP first hop | An unsigned or tampered image never runs |
 | Boot server | Boot CA embedded in the signed firmware | Boot HTTPS handshake on 4443 | Boot variables are refused, with no fallback to first-contact trust |
 | Device identity | TPM AK, private key not exportable | Every boot: nonce + PCR 0/2/4/7 quote | Boot credentials are withheld |
 
-The first hop signs the static scripts, boot CA and boot HTTPS port into one binary and leaves the controller address out by default, and TFTP delivers only that binary, so its contents cannot be replaced separately. The boot CA only issues the 4443 leaf; rotating it equals re-signing the firmware and re-enrolling `db` on every target. Admission requires Secure Boot enabled, so a deployment cannot bypass first-hop protection by disabling it.
+The first hop signs the static scripts, boot CA and boot HTTPS port into one binary and leaves the controller address out by default, and TFTP delivers only that binary, so its contents cannot be replaced separately. The boot CA only issues the 4443 leaf; rotating it requires re-signing the firmware, and the platform keys do not change with it. Platform keys (PK / KEK / db) are written on the first network boot by the platform enrollment window; once the window closes the PK is fixed and later changes need the offline keys. Admission requires Secure Boot enabled, so a deployment cannot bypass first-hop protection by disabling it.
 
 With all three anchors in place, an attacker on the same Layer 2 is limited to denial of service: forged DHCP/ARP or a link disruption can stall a device or make it retry, but cannot replace the first hop, swap scripts or impersonate the boot server.
 

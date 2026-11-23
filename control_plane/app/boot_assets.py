@@ -31,6 +31,7 @@ _FIRMWARE_MARKERS = {
     "akgen": ("TPM AK 创建", b"Usage: akgen"),
     "akpub": ("AK 公钥导出", b"Usage: akpub"),
     "quote": ("PCR quote", b"Usage: quote"),
+    "sbenroll": ("Secure Boot 密钥注册", b"Usage: sbenroll"),
     "tofu": ("TOFU 锚定", b"Trusted server certificate fingerprint (TOFU)"),
 }
 _HOST_ROOT = "tftp"

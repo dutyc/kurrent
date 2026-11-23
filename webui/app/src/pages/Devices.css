@@ -702,3 +702,62 @@
   font-size: 12px;
   font-weight: 600;
 }
+
+/* ===== 平台注册（Secure Boot 密钥网络注册） ===== */
+.enroll-panel {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  background: var(--white);
+}
+
+.enroll-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.enroll-count {
+  font-size: 12px;
+  color: var(--gray-600);
+  cursor: help;
+}
+
+.enroll-actions {
+  margin-left: auto;
+}
+
+.enroll-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--gray-500);
+}
+
+.enroll-list {
+  margin-top: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-light);
+}
+
+.enroll-row {
+  display: flex;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+  color: var(--gray-600);
+}
+
+.enroll-row:last-child {
+  border-bottom: none;
+}
+
+.enroll-row code {
+  font-family: var(--font-mono);
+  color: var(--gray-900);
+}
+
+.enroll-row span {
+  color: var(--gray-400);
+}

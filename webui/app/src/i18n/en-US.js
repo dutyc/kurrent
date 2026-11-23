@@ -221,6 +221,17 @@ const en = {
       enforceAck: 'I confirm this is disabled only during migration or troubleshooting and will be restored afterwards',
       enforceHint: 'On by default: /boot-vars is served only to bound devices that pass TPM attestation. Disable it only temporarily for migration or troubleshooting, then restore it.',
     },
+    platformEnroll: {
+      title: 'Platform enrollment',
+      open: 'Open',
+      closed: 'Closed',
+      openBtn: 'Open window',
+      closeBtn: 'Close window',
+      count: '{n} enrolled',
+      countHint: 'Devices that completed Secure Boot key enrollment; reported by the devices themselves',
+      hint: 'While open, unenrolled machines write the platform keys on their next boot and reboot; running it again on an enrolled machine changes nothing. Machines locked to vendor keys cannot use this flow.',
+      openHint: 'Window open: unenrolled machines write the platform keys on boot, then reboot into verified boot.',
+    },
     attest: {
       column: 'Attestation',
       proven: 'Proven',
@@ -830,6 +841,7 @@ const en = {
       akgen: 'TPM AK creation',
       akpub: 'AK public key export',
       quote: 'PCR quote',
+      sbenroll: 'Key enrollment',
       tofu: 'TOFU pinning',
     },
     evidence: {

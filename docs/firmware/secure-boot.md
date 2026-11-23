@@ -38,12 +38,15 @@ BOOT_CA_CERT=/path/to/boot-ca.crt \
 
 ## 预置目标机信任库
 
-签名证书必须先进入目标机 `db`，否则固件会拒绝执行（一次性预置，不是每次启动的依赖）：
+签名证书必须先进入目标机 `db`，否则固件拒绝执行。批量机队的默认路径是网络注册：机器处于 Setup Mode（或 Secure Boot 关闭）时网络启动同一份签名镜像，镜像内嵌的 `sbenroll` 命令写入平台密钥（PK / KEK / db）并重启，重启后固件验签进入生产引导。
 
-- 生成离线签名密钥：`tools/secureboot/keygen-offline.sh ~/offline/kurrent-sb`。私钥保持离线，脚本拒绝写入仓库或容器。
-- **USB/BIOS（受支持路径，无需 BMC）**：`tools/secureboot/export-usb.sh <usb> <artifact-signing.crt> <snponly-sb.efi> <boot-ca.crt>` 生成导入包（只含公开证书），在目标机 Key Management 中导入 `db-cert.cer`。
-- **Redfish（可选，需 BMC 与厂商支持）**：`KURRENT_BMC_USER=... KURRENT_BMC_PASSWORD=... tools/secureboot/enroll-redfish.sh --bmc <bmc> --cert <artifact-signing.crt> --enable-secureboot`。脚本先读 Secure Boot 与 `db` 状态、确认已有 Microsoft UEFI CA，再幂等导入证书并读回指纹；`--dry-run` 只读。该工具仅完成协议级验证（模拟 BMC），厂商实现须逐型号确认。
-- 目标机：关闭 CSM、开启 Secure Boot，用 `tools/secureboot/check-host.sh <artifact-signing.crt>` 复核状态与 `db`。
+1. 控制面开启平台注册窗口（`POST /settings/platform-enrollment`，WebUI 设备页同入口）。
+2. 目标机网络启动签名镜像：写入密钥后自动重启，设备页「平台注册」清单出现该 MAC。
+3. 注册完成后关闭窗口：新机器不再执行注册流程，已注册设备与清单保留。
+
+平台密钥与签名描述符在构建签名镜像时提供（固件仓 `build-sb.sh` 的 `SB_PK_*` / `SB_KEK_*` / `SB_MS_UEFI_CA_CERT`），私钥离线保管，镜像内只嵌公开证书与签名描述符。写入顺序为 PK → KEK → db，db 含产物签名证书与 Microsoft UEFI CA 2011。注册须在受控网段执行：Setup Mode 下同网段任意主机都能写入密钥；窗口关闭后 PK 固定，后续修改须用离线私钥签名。
+
+出厂已锁厂商密钥并开启 Secure Boot 的机型无法经网络注册，须经其厂商的管理流程处理。目标机状态可用 `tools/secureboot/check-host.sh` 复核。
 
 `sanboot` 之后的加载器由发行版签名链决定：母盘 ESP 的 shim/GRUB/内核必须是发行版签名版本（Ubuntu 26.04 母盘为 Microsoft UEFI CA 2011 签名的 shim → Canonical 签名的 GRUB 与内核），目标机 `db` 需包含对应的 Microsoft CA。未签名的 GRUB 会在 `sanboot` 之后被拒绝。
 

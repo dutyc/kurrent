@@ -29,7 +29,7 @@ set menu-url ${https-url}tftp/menu.ipxe
 
 FIRMWARE = (
     b"iPXE 2.0.0+ (ge6e51)\x00HTTPS\x00efi_nvs\x00"
-    b"Usage: akgen\x00Usage: akpub\x00Usage: quote\x00"
+    b"Usage: akgen\x00Usage: akpub\x00Usage: quote\x00Usage: sbenroll\x00"
     b"Trusted server certificate fingerprint (TOFU)\x00"
 )
 
@@ -106,6 +106,18 @@ def test_firmware_capability_gap_is_flagged(tmp_path):
     uefi = boot_assets.inventory(conf, tftp)["firmware"][0]
     assert uefi["status"] == "incomplete"
     assert [cap["id"] for cap in uefi["capabilities"] if not cap["present"]] == ["quote"]
+
+
+def test_sbenroll_capability_is_reported(tmp_path):
+    """镜像需带 sbenroll：没有该命令就无法经网络写 Secure Boot 密钥。"""
+    conf, tftp = _tree(tmp_path)
+    caps = {cap["id"]: cap["present"] for cap in boot_assets.inventory(conf, tftp)["firmware"][0]["capabilities"]}
+    assert caps["sbenroll"] is True
+
+    (tftp / "snponly.efi").write_bytes(FIRMWARE.replace(b"Usage: sbenroll\x00", b""))
+    uefi = boot_assets.inventory(conf, tftp)["firmware"][0]
+    assert uefi["status"] == "incomplete"
+    assert [cap["id"] for cap in uefi["capabilities"] if not cap["present"]] == ["sbenroll"]
 
 
 def test_missing_firmware_and_empty_script_are_reported(tmp_path):

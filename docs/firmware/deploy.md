@@ -1,20 +1,20 @@
 # 部署与预置
 
-构建好的签名产物要进入设备的启动路径：PXE 网段或本地介质，并在目标机 `db` 中预置站点证书。部署完成后，设备首次启动应在注册窗口内入池。
+构建好的签名产物经 PXE 网段（或本地 ESP）下发。目标机处于 Setup Mode（或关闭 Secure Boot）时首次网络启动，平台注册窗口将 PK / KEK / db 写入固件并自动重启；重启后固件验签执行同一份镜像。部署完成后，设备应在注册窗口内入池。
 
 ## 目标与前提
 
-- 目标设备满足[裸机设备要求](../setup/host-prerequisites.md#裸机设备要求)：x86_64 UEFI、TPM 2.0、开启 Secure Boot 且 `db` 已导入站点签名证书；传统 BIOS（Legacy/CSM）引导不再支持；
+- 目标设备满足[裸机设备要求](../setup/host-prerequisites.md#裸机设备要求)：x86_64 UEFI、TPM 2.0，且未锁厂商密钥（Setup Mode 或 Secure Boot 关闭）；传统 BIOS（Legacy/CSM）引导不再支持；出厂已锁厂商密钥的机型须经其厂商的管理流程处理；
 - 已按[部署](../setup/deployment.md)完成控制面、dnsmasq 与 PXE 网段；
-- 已按[构建](./build.md)取得签名产物与 `manifest.json`。
+- 已按[构建](./build.md)取得签名产物与 `manifest.json`（镜像内嵌平台密钥描述符与产物签名证书）。
 
 ## 部署路径
 
 | 条件 | 路径 |
 | --- | --- |
-| 主板有 UEFI Network Boot / PXE 入口 | PXE，使用平台 TFTP 提供的 `snponly.efi` |
-| 主板无 PXE 入口，或 PXE 设置不可用 | 本地介质（USB / ESP / 本地磁盘 / GRUB 链加载） |
-| 需要批量预置且 BMC 支持虚拟介质 | BMC / Redfish 挂载介质，可选 |
+| 主板有 UEFI Network Boot / PXE 入口 | PXE：平台 TFTP 下发签名镜像，平台注册窗口完成密钥写入（默认路径） |
+| 主板无 PXE 入口 | 用 `direct-uefi` 签名产物放到本地 ESP；密钥同样经平台注册窗口写入 |
+| 出厂已锁厂商密钥 | 经其厂商的管理流程处理 |
 
 ### PXE
 
@@ -36,20 +36,20 @@
 
    控制面按设备 `boot_firmware` 选择首跳：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取全驱动 `ipxe.efi`；同一 PXE 网段可按设备混用。
 
-3. 在设备 UEFI 设置中启用网络栈与 Secure Boot，将网络启动置于启动顺序首位。
-4. 启动设备，确认 DHCP 分配地址、TFTP 下载首跳、首跳经 4443 完成上报与挑战。
+3. 在控制面开启平台注册窗口（`POST /settings/platform-enrollment`，WebUI 设备页同入口）。
+4. 目标机网络启动：镜像先请求 `/boot/phase` 执行 `sbenroll` 写入平台密钥，上报结果后自动重启；重启后 Secure Boot 生效，固件验签执行同一镜像，经 4443 完成上报与挑战。注册完成后关闭窗口。
 
 TFTP 只交付首跳固件（`snponly.efi`，或按设备 `boot_firmware` 选中的全驱动 `ipxe.efi`）与 `boot.ipxe` 指针；签名首跳内嵌静态脚本、boot CA 与引导 HTTPS 端口，控制面地址默认不入镜像。后续请求走 4443 HTTPS，只信任该 boot CA。PXE 网段必须按[安全模型](../concepts/architecture/security.md)隔离。
 
 ### 本地介质
 
-使用 `direct-uefi` 产物：它内置 `auto.ipxe`，启动后执行 DHCP 并跳转到控制面的 TFTP 引导链。
+使用 `direct-uefi` 签名产物（如 `snponly-sb.efi`）：它内嵌与 PXE 相同的静态脚本，平台注册窗口开启时同样执行密钥写入。
 
 USB / ESP：
 
 1. 准备 FAT32 分区（U 盘或本地 ESP）；
 2. 创建目录 `EFI/BOOT/`；
-3. 将 `dist/direct-uefi/ipxe.efi` 复制为 `EFI/BOOT/BOOTX64.EFI`；
+3. 将 `dist/direct-uefi/snponly-sb.efi`（或 `ipxe-sb.efi`）复制为 `EFI/BOOT/BOOTX64.EFI`；
 4. 在设备启动菜单中选择该 USB/ESP。
 
 若主板仅识别固定 ESP，将文件放入内置磁盘的同一路径，并在启动项中选择它。
@@ -58,15 +58,13 @@ GRUB 链加载：
 
 ```text
 menuentry "Kurrent firmware" {
-    chainloader /boot/efi/EFI/kurrent/ipxe.efi
+    chainloader /boot/efi/EFI/kurrent/snponly-sb.efi
 }
 ```
 
-BMC / Redfish 虚拟介质只做过协议级验证，具体型号能力不同；它不是 Kurrent 的部署依赖，也不替代 PXE 网段的隔离要求。
-
 ## 首次启动与身份
 
-首次启动时固件会：
+首次网络启动时固件先完成平台密钥写入（`sbenroll`，窗口开启才执行），随后：
 
 1. 执行 `akgen`，在 TPM 内创建 AK（私钥不可导出）；
 2. 通过 `akpub` 导出 AK 公钥、名称与算法；
@@ -80,7 +78,8 @@ BMC / Redfish 虚拟介质只做过协议级验证，具体型号能力不同；
 
 - 设备身份由 TPM 内的 AK 承载；引导 HTTPS 的信任锚是内嵌在签名固件中的 boot CA；更新固件或替换 TFTP 文件不会清除 TPM 中的 AK。
 - 清除 TPM 或更换主板会失去原 AK，等同于更换设备身份，需要删除登记并在注册窗口内重新入池。
-- boot CA 轮换等于重刷固件：需要重新构建签名产物，并在目标机重新预置 `db` 证书。
+- 平台密钥（PK / KEK / db）由平台注册窗口在首次网络启动时写入，窗口关闭后 PK 固定；重装或更换固件后重新经该窗口完成写入，无需逐机导入证书。
+- boot CA 只签发 4443 叶证书：轮换需重新构建签名产物，平台密钥不随 boot CA 变化。
 - 更换硬件或整机替换即形成一台新设备；系统盘与 Worker 身份仍保留在控制面，通过换绑完成迁移。
 
 NVRAM 清理应通过固件可交互环境或受控预置流程完成。AK 生命周期、quote 格式与信任边界见[固件契约](../reference/firmware-contract.md)。
@@ -90,6 +89,7 @@ NVRAM 清理应通过固件可交互环境或受控预置流程完成。AK 生�
 | 检查 | 预期 |
 | --- | --- |
 | 设备启动 | 进入 iPXE 菜单，能看到该 Worker 的系统盘 |
+| WebUI → Devices 平台注册 | 列出已完成密钥写入的 MAC |
 | WebUI → Devices | 设备在注册窗口内入池 |
 | WebUI → 引导链 / `/boot-assets` | 固件 `status=ok`，能力齐全；`secureboot.status=ok` |
 | 控制面日志 / 审计 | `/devices/report`、`/devices/challenge`、`/boot-vars` 有对应记录 |

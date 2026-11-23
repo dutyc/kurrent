@@ -152,6 +152,19 @@ export function closeRegistrationWindow() {
   return request('/settings/registration-window', { method: 'DELETE' });
 }
 
+export function getPlatformEnrollment() {
+  // 平台注册窗口: { open, opened_at, enrolled: [{mac, at}] }（enrolled 由设备注册时自报）
+  return request('/settings/platform-enrollment');
+}
+
+export function openPlatformEnrollment() {
+  return request('/settings/platform-enrollment', { method: 'POST' });
+}
+
+export function closePlatformEnrollment() {
+  return request('/settings/platform-enrollment', { method: 'DELETE' });
+}
+
 export function getEnforcement() {
   // TPM 证明强制开关（默认开启；关闭仅用于过渡/排障）
   return request('/settings/enforcement');

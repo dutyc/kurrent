@@ -24,14 +24,14 @@ These requirements apply to the `main` line; devices without a TPM use the `lega
 | --- | --- | --- |
 | Architecture and firmware | x86_64; UEFI boot only, with CSM/Legacy disabled | No matching artifact exists, so the boot chain cannot start |
 | TPM | TPM 2.0 (discrete TPM or Intel PTT / AMD fTPM); can create an ECC P-256 or RSA-2048 AK; SHA-256 PCR 0/2/4/7 readable | Registration is rejected (`no_tpm`); failed attestation withholds credentials |
-| Secure Boot | Can be enabled; `db` can be written with the site signing certificate; booting a distribution also needs the Microsoft UEFI CA in `db` | Registration is rejected (`sb_disabled`); an unsigned first hop never runs |
+| Secure Boot | Not locked to vendor keys (Setup Mode or can be disabled); the first network boot writes PK / KEK / db through the platform enrollment window, and db includes the site certificate and the Microsoft UEFI CA | Registration is rejected (`sb_disabled`); an unsigned first hop never runs |
 | Network boot | UEFI IPv4 network boot (DHCP + TFTP) with a UEFI SNP stack on the NIC | The first hop cannot be downloaded; NICs without a UEFI SNP must use the all-driver first hop (`boot_firmware=full`) |
 
 - A local disk is not a prerequisite; the device holds no persistent state.
 - CPU and memory only need to meet the installed distribution's requirements.
 - Device identity (AK) is bound to the mainboard and TPM: clearing the TPM or replacing the mainboard is equivalent to replacing the device and requires re-admission.
 - USB and wireless NICs are not used for boot; NIC compatibility is in [Firmware Platform Reference](../reference/firmware-platform.md).
-- `db` enrollment is covered in [Secure Boot](../firmware/secure-boot.md).
+- Platform key enrollment is covered in [Secure Boot](../firmware/secure-boot.md); machines locked to vendor keys use the vendor flow.
 
 Verify on the target:
 

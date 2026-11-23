@@ -1,10 +1,11 @@
-"""匿名引导端点限速（/devices/report 与 /devices/challenge）。
+"""匿名引导端点限速（/boot/phase、/devices/report、/devices/challenge、/devices/enroll-report）。
 
 滑动窗口 + 进程内计数：控制面是单实例，重启即清空。用途是抑制扫描、放大与无意义
-的无效 AK/quote 喷洒（两个端点都不鉴权），不作为身份或安全边界。计数按来源 IP（nginx 对这两
+的无效 AK/quote 喷洒（这些端点都不鉴权），不作为身份或安全边界。计数按来源 IP（nginx 对这几
 个 location 覆盖写入 X-Real-IP，因此不能被客户端伪造）。
 
-阈值可用 KURRENT_CP_RATE_LIMIT_REPORT / _CHALLENGE 覆盖（每分钟次数，<=0 关闭）。
+阈值可用 KURRENT_CP_RATE_LIMIT_REPORT / _CHALLENGE / _BOOT_PHASE / _ENROLL_REPORT
+覆盖（每分钟次数，<=0 关闭）。
 """
 
 import os
@@ -13,7 +14,8 @@ import time
 from collections import deque
 
 WINDOW_SECONDS = 60.0
-DEFAULT_LIMITS = {"report": 120, "challenge": 120, "rotate": 10, "boot_vars": 240}
+DEFAULT_LIMITS = {"report": 120, "challenge": 120, "rotate": 10, "boot_vars": 240,
+                  "boot_phase": 240, "enroll_report": 60}
 # 上限防护：来源 IP 很多时清掉窗口内已无请求的桶（正常规模远低于此）
 _MAX_BUCKETS = 4096
 
