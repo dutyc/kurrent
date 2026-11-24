@@ -8,7 +8,7 @@ Storage nodes host master images and system disks and export block devices to de
 | nvmet-host | Shared-volume UDS (mTLS) | Kernel configfs operations: subsystem / namespace / port / allowed_hosts / DHHC-1; injects TLS PSKs |
 | Host kernel nvmet | Storage-node host | NVMe/TCP target on data-plane port `4421` |
 
-![Storage path: cloning a system disk from a master and exporting it to the device data plane](/diagrams/storage-data-plane.svg)
+![Storage path: cloning a system disk from a master and exporting it to the device data plane](/diagrams/en/storage-data-plane.svg)
 
 nvmet is the primary backend. iSCSI (stgt / lio) is retained as a compatibility backend, but the main branch has no live boot path; the historical implementation lives in `iscsi-classic`. Backend differences are encapsulated in the Agent — the control plane only speaks HTTP.
 

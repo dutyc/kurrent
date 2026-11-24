@@ -4,7 +4,7 @@ Firmware is the layer that runs before the operating system. It extends UEFI's n
 
 Firmware is built from the separate [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) repository, and its artifacts are the first link in the main repository's boot chain. It is built from a pinned upstream iPXE baseline plus this project's patch set and embedded content, so protocol capabilities and the control plane can be released on their own schedules.
 
-![Firmware pipeline: from the upstream iPXE baseline to device network boot](/diagrams/firmware-pipeline.svg)
+![Firmware pipeline: from the upstream iPXE baseline to device network boot](/diagrams/en/firmware-pipeline.svg)
 
 ## Firmware During Boot
 

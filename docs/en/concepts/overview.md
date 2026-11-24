@@ -39,7 +39,7 @@ The device lifecycle is `pooled → bound → revoked`. A Worker's `readiness` i
 | Storage node | Hosts master images and system disks, exports block devices | Agent, nvmet-host, host kernel nvmet |
 | Device | Stateless compute; becomes a Worker's booting node after network boot | Device firmware (iPXE), operating system inside the system disk |
 
-![Deployment topology: the management and data planes between control plane, storage nodes and devices](/diagrams/topology.svg)
+![Deployment topology: the management and data planes between control plane, storage nodes and devices](/diagrams/en/topology.svg)
 
 The control plane handles provisioning, identity and configuration and is not on the data path between devices and storage nodes; the control plane and storage nodes may be separate or co-located, but the roles stay separate. Components, ports and failure domains are covered in the [Architecture](../concepts/architecture/index.md).
 
@@ -55,7 +55,7 @@ The control plane handles provisioning, identity and configuration and is not on
 
 Any credential step that fails refuses the boot instead of falling back to plaintext. Step-by-step mechanics and failure paths are in the [Boot Chain](../concepts/boot-chain.md).
 
-![Key steps of one boot: DHCP, attestation, variable projection and the NVMe/TCP connection](/diagrams/boot-chain.svg)
+![Key steps of one boot: DHCP, attestation, variable projection and the NVMe/TCP connection](/diagrams/en/boot-chain.svg)
 
 ## Capability map
 

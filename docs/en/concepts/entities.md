@@ -8,7 +8,7 @@ Kurrent splits the compute side into three independent entities: devices, Worker
 | Worker | `worker_id` (hostname) | Worker ledger `state/workers.yml` | Under which identity to run |
 | System Disk | NQN | Disk file on the storage node + Worker ledger | Which system to boot |
 
-![Entity model: identifiers, authority and binding for devices, Workers and system disks](/diagrams/entities.svg)
+![Entity model: identifiers, authority and binding for devices, Workers and system disks](/diagrams/en/entities.svg)
 
 ## Device
 

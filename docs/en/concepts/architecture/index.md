@@ -4,7 +4,7 @@ Kurrent organizes physical devices, storage nodes and a control plane into a boo
 
 The system has three roles.
 
-![Architecture](/architecture.svg)
+![Architecture: management, boot and data planes between the control node, storage nodes and devices](/diagrams/en/architecture.svg)
 
 ## Control Plane and Data Plane
 

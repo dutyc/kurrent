@@ -28,12 +28,12 @@
 
     <rect x="216" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
     <text x="230" y="214" font-size="12" font-weight="600" fill="#151412">patches</text>
-    <text x="230" y="232" font-size="10" fill="#6f6a61">0001–0010</text>
+    <text x="230" y="232" font-size="10" fill="#6f6a61">0001–0012</text>
     <text x="230" y="248" font-size="10" fill="#8d867b">file order</text>
 
     <rect x="360" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
     <text x="374" y="214" font-size="12" font-weight="600" fill="#151412">build</text>
-    <text x="374" y="232" font-size="10" fill="#6f6a61">build.sh</text>
+    <text x="374" y="232" font-size="10" fill="#6f6a61">build.sh · build-sb.sh</text>
     <text x="374" y="248" font-size="10" fill="#8d867b">UEFI targets</text>
 
     <rect x="504" y="190" width="120" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
@@ -45,7 +45,7 @@
     <line x1="336" y1="225" x2="360" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
     <line x1="480" y1="225" x2="504" y2="225" stroke="#6f6a61" stroke-width="1.4" marker-end="url(#arrow)"/>
 
-    <text x="72" y="292" font-size="10" fill="#6f6a61">Produces snponly.efi and the direct-uefi artifacts.</text>
+    <text x="72" y="292" font-size="10" fill="#6f6a61">Signed builds produce snponly-sb.efi, ipxe-sb.efi and manifest.json.</text>
     <text x="72" y="374" font-size="10" fill="#8d867b">The repository does not carry upstream source; every build starts from the pinned baseline.</text>
 
     <rect x="688" y="110" width="464" height="300" rx="10" fill="#f4f1ea" stroke="#a8a197" stroke-dasharray="4 4"/>
@@ -54,7 +54,7 @@
 
     <rect x="712" y="190" width="180" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>
     <text x="726" y="214" font-size="11" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" fill="#151412">tftp/</text>
-    <text x="726" y="232" font-size="10" fill="#6f6a61">snponly.efi · boot.ipxe</text>
+    <text x="726" y="232" font-size="10" fill="#6f6a61">signed first hops · boot.ipxe</text>
     <text x="726" y="248" font-size="10" fill="#8d867b">read-only TFTP root</text>
 
     <rect x="944" y="190" width="184" height="70" rx="7" fill="#faf9f6" stroke="#c9c2b6"/>

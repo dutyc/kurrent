@@ -8,7 +8,7 @@
 | Worker | `worker_id`（主机名） | Worker 台账 `state/workers.yml` | 运行身份 |
 | 系统盘（System Disk） | NQN | 存储节点上的盘文件 + Worker 台账 | 要启动的系统 |
 
-![三实体模型：设备、Worker 与系统盘的标识、权威与绑定关系](/diagrams/entities.svg)
+![三实体模型：设备、Worker 与系统盘的标识、权威与绑定关系](/diagrams/zh/entities.svg)
 
 ## 一个例子
 

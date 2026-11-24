@@ -20,7 +20,7 @@
 
     <rect x="660" y="88" width="360" height="60" rx="9" fill="#ffffff" stroke="#5b87b5"/>
     <text x="680" y="112" font-size="14" font-weight="600" fill="#2f4f70">nginx · :443</text>
-    <text x="680" y="132" font-size="12" fill="#6b7c8f">唯一外部入口 · mTLS / token / session</text>
+    <text x="680" y="132" font-size="12" fill="#6b7c8f">sole external entry · mTLS / token / session</text>
 
     <rect x="660" y="168" width="360" height="70" rx="9" fill="#ffffff" stroke="#5b87b5"/>
     <text x="680" y="192" font-size="14" font-weight="600" fill="#2f4f70">Control Plane</text>

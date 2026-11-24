@@ -4,7 +4,7 @@
 
 固件由独立仓库 [kurrent-firmware](https://github.com/dutyc/kurrent-firmware) 构建，产物是主仓库引导链的第一环。它基于固定的上游 iPXE 基线，加上本项目的补丁集与嵌入内容构建而成，协议能力与控制面因此可以按各自的节奏发布。
 
-![固件流水线：从上游 iPXE 基线到设备网络引导](/diagrams/firmware-pipeline.svg)
+![固件流水线：从上游 iPXE 基线到设备网络引导](/diagrams/zh/firmware-pipeline.svg)
 
 ## 启动过程中的固件
 

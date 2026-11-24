@@ -12,7 +12,7 @@
 
 mTLS 即双向 TLS：通信双方都出示证书，互相验证。UDS 是 unix domain socket，只在本机进程间通信，不经过网络。configfs 是内核提供的配置接口，nvmet-host 通过它告诉内核要导出哪块盘、允许谁来连。
 
-![存储路径：从母盘克隆系统盘，经 nvmet-host 导出到设备数据面](/diagrams/storage-data-plane.svg)
+![存储路径：从母盘克隆系统盘，经 nvmet-host 导出到设备数据面](/diagrams/zh/storage-data-plane.svg)
 
 Agent 与 nvmet-host 分开：两者权限需求不同，Agent 管理盘文件，nvmet-host 操作内核导出配置。后端以 nvmet 为主。iSCSI（stgt / lio）代码保留为兼容后端，但主分支没有存活的引导路径，历史实现见 `iscsi-classic` 分支。后端差异封装在 Agent 内部，控制面只发 HTTP。
 

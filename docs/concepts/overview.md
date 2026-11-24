@@ -43,7 +43,7 @@ NQN（NVMe Qualified Name）是 NVMe 协议里标识一个存储目标的全局�
 | 存储节点 | 承载母盘与系统盘，导出块设备 | Agent、nvmet-host、宿主内核 nvmet |
 | 设备 | 无状态算力，网络启动后成为某个 Worker 的引导节点 | 设备固件（iPXE）、系统盘内的操作系统 |
 
-![部署拓扑：控制面、存储节点与设备之间的管理面与数据面](/diagrams/topology.svg)
+![部署拓扑：控制面、存储节点与设备之间的管理面与数据面](/diagrams/zh/topology.svg)
 
 控制面负责开通、身份与配置，不在设备与存储节点的数据路径上。系统启动之后，块读写直接发生在设备与存储节点之间；控制面宕机只影响新的开通与引导，不中断正在运行的系统。控制面与存储节点可以分离部署，也可以同机部署，但角色不合并。组件、端口与故障域的细节见[架构总览](../concepts/architecture/index.md)。
 
@@ -59,7 +59,7 @@ NQN（NVMe Qualified Name）是 NVMe 协议里标识一个存储目标的全局�
 
 任一凭据环节失败即拒绝引导，不回落明文。逐步机制与失败路径见[引导链](../concepts/boot-chain.md)。
 
-![一次引导的关键步骤：DHCP、证明、变量投影与 NVMe/TCP 连接](/diagrams/boot-chain.svg)
+![一次引导的关键步骤：DHCP、证明、变量投影与 NVMe/TCP 连接](/diagrams/zh/boot-chain.svg)
 
 ## 能力地图
 

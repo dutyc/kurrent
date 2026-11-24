@@ -12,7 +12,7 @@ The boot chain obtains the connection information for the Worker's system disk u
 | Identity | Is it that device? | TPM AK + PCR baseline | Not admitted, no credentials |
 | Data plane | Which target? | DHHC-1 + TLS 1.3 | Connection refused |
 
-![Boot chain: first hop, device identity and data plane](/diagrams/boot-chain.svg)
+![Boot chain: first hop, device identity and data plane](/diagrams/en/boot-chain.svg)
 
 The three stages run in order; if any stage fails, boot stops instead of switching to another path.
 
