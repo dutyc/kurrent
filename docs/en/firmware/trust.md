@@ -12,7 +12,7 @@ Firmware establishes trust along three independent paths: the first-stage binary
 
 ## First-Stage Verification
 
-UEFI verifies the signature of the first stage against `db` before executing it. The signing certificate is a one-time provisioning item: once written to the target's `db`, it takes no part in each boot and needs no reachable trust service. Unsigned artifacts are refused outright on this path; there is no branch that continues after a failed verification.
+UEFI verifies the signature of the first stage against `db` before executing it. The signing certificate is a one-time provisioning item: the platform enrollment window writes it into the target's `db` on the first network boot (machines locked to vendor keys use the vendor flow), after which it takes no part in each boot and needs no reachable trust service. Unsigned artifacts are refused outright on this path; there is no branch that continues after a failed verification.
 
 Provisioning steps and check commands are in [Secure Boot Provisioning](./secure-boot.md#provisioning-the-target-trust-store).
 

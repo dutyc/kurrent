@@ -18,7 +18,7 @@ The three stages run in order; if any stage fails, boot stops instead of switchi
 
 ## First Hop
 
-The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The image must be signed with the site certificate in the target's `db`, otherwise firmware refuses to run it; the signed image embeds the static scripts, the boot CA and the boot HTTPS port, and leaves the controller address out of the image by default, so later content is fetched only over 4443 HTTPS anchored by that CA.
+The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The image must be signed with the site certificate in the target's `db` (written on the first network boot by the platform enrollment window; machines locked to vendor keys use the vendor flow), otherwise firmware refuses to run it; the signed image embeds the static scripts, the boot CA and the boot HTTPS port, and leaves the controller address out of the image by default, so later content is fetched only over 4443 HTTPS anchored by that CA.
 
 Signature verification and embedded content are covered in [First Hop](./boot-chain/first-hop.md).
 
@@ -46,7 +46,7 @@ No stage falls back to another path: when first-hop verification fails, firmware
 
 ## Trust Boundary
 
-The first hop (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: the target's `db` trusts only the site signing certificate, so an unsigned or tampered first stage never runs and the embedded static scripts cannot be replaced either. The 4443 HTTPS that follows is anchored by the embedded boot CA, and device identity is protected by the TPM AK and PCR baseline.
+The first hop (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: the target's `db` trusts only the site signing certificate (installed by the platform enrollment window), so an unsigned or tampered first stage never runs and the embedded static scripts cannot be replaced either. The 4443 HTTPS that follows is anchored by the embedded boot CA, and device identity is protected by the TPM AK and PCR baseline.
 
 Attackers on the same Layer 2 are therefore limited to denial of service (forged DHCP/ARP, link disruption) and cannot replace the first stage, swap scripts or impersonate the boot server. A compromised host, a compromised running device or physical access is outside this boundary. See the [Security Model](../concepts/architecture/security.md) for the full threat model.
 

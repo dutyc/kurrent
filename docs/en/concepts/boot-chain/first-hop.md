@@ -4,15 +4,15 @@ The first hop spans power-on to an executable bootloader. It determines where ev
 
 ## Address and Download
 
-The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The TFTP root exposes only this file and the `boot.ipxe` pointer.
+The device gets an address and `next-server` over DHCP, then downloads the first-stage firmware over TFTP. The control plane selects it per device through DHCP `boot_firmware`: `snponly.efi` (UEFI SNP, default) or `ipxe.efi` (all drivers, for NICs without a UEFI SNP). The TFTP root exposes only these two first-stage images and the `boot.ipxe` pointer.
 
-Restart the dnsmasq container after replacing `snponly.efi`: the file-level mount pins the inode, so a hot replacement has no effect.
+Restart the dnsmasq container after replacing a first-stage image: the file-level mounts pin the inode, so a hot replacement has no effect.
 
 ## Verification
 
 UEFI verifies `snponly.efi` against the site certificate in the target's `db`. If the image is unsigned, the signature does not match, or the image is tampered with, firmware refuses to run it and network boot never begins.
 
-The site certificate is provisioned once: writing it into the target's `db` is a deployment step, not something repeated per boot, and it does not depend on the control plane being online. See [Secure Boot Provisioning](../../firmware/secure-boot.md) for the provisioning flow.
+The site certificate is provisioned once: on the first network boot the platform enrollment window writes PK / KEK / db into firmware, and this is not repeated per boot or dependent on the control plane being online. See [Secure Boot Provisioning](../../firmware/secure-boot.md) for the flow.
 
 ## Embedded Scripts and boot CA
 

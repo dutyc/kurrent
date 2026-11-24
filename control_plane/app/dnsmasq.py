@@ -11,6 +11,7 @@ IGNORE = "ignore"
 class HostBinding:
     mac: str
     hostname: str
+    tag: str | None = None
 
 
 class DnsmasqHosts:
@@ -37,13 +38,13 @@ class DnsmasqHosts:
             if binding.hostname == hostname:
                 raise ValueError(f"hostname already bound in dnsmasq: {hostname}")
 
-    def add_binding(self, mac: str, hostname: str) -> None:
+    def add_binding(self, mac: str, hostname: str, tag: str | None = None) -> None:
         mac = normalize_mac(mac)
         self.ensure_free(mac, hostname)
         lines = _drop_mac(self._read_lines(), mac)
         if lines and lines[-1].strip():
             lines.append("")
-        lines.append(f"{mac},{hostname}")
+        lines.append(_format_binding(mac, hostname, tag))
         self._write_lines(lines)
 
     def block(self, mac: str) -> None:
@@ -79,10 +80,11 @@ class DnsmasqHosts:
             self._write_lines(kept)
         return removed
 
-    def set_binding(self, mac: str, hostname: str) -> str | None:
+    def set_binding(self, mac: str, hostname: str, tag: str | None = None) -> str | None:
         """设置 hostname → mac 绑定（单次写入的幂等 upsert）：已有该 hostname 绑定则替换，
         缺失则新增；同时清除该 mac 的历史 ignore 行。mac 已被其他 hostname 占用时抛
-        ValueError（不写入）。返回被替换的旧 mac（此前无绑定返回 None）。"""
+        ValueError（不写入）。返回被替换的旧 mac（此前无绑定返回 None）。tag 非空时写入
+        `MAC,set:<tag>,hostname`，对应 dnsmasq 的 dhcp-host 标签匹配（按设备选择首跳固件）。"""
         mac = normalize_mac(mac)
         lines = self._read_lines()
         old_mac: str | None = None
@@ -99,7 +101,7 @@ class DnsmasqHosts:
             new_lines.append(line)
         if new_lines and new_lines[-1].strip():
             new_lines.append("")
-        new_lines.append(f"{mac},{hostname}")
+        new_lines.append(_format_binding(mac, hostname, tag))
         self._write_lines(new_lines)
         return old_mac
 
@@ -136,10 +138,25 @@ def _parse_binding(line: str) -> HostBinding | None:
     if len(parts) < 2:
         return None
     mac = parts[0].lower()
-    hostname = parts[1]
-    if not MAC_RE.match(mac) or not hostname or hostname.lower() == IGNORE:
+    if not MAC_RE.match(mac):
         return None
-    return HostBinding(mac=mac, hostname=hostname)
+    tag: str | None = None
+    hostname: str | None = None
+    for part in parts[1:]:
+        if part.lower().startswith("set:"):
+            tag = part[4:]
+            continue
+        if part and hostname is None:
+            hostname = part
+    if not hostname or hostname.lower() == IGNORE:
+        return None
+    return HostBinding(mac=mac, hostname=hostname, tag=tag)
+
+
+def _format_binding(mac: str, hostname: str, tag: str | None = None) -> str:
+    if tag:
+        return f"{mac},set:{tag},{hostname}"
+    return f"{mac},{hostname}"
 
 
 def _is_ignore_line(line: str, mac: str) -> bool:

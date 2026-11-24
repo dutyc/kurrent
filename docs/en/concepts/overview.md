@@ -74,7 +74,7 @@ Entry points are the WebUI, the CLI and the REST API; commands and endpoints are
 - The control plane is single-node with file state; high availability is not provided, and its failure affects new provisioning and boots.
 - Post-boot application orchestration is out of scope and can be provided by an upper layer.
 - Cold migration requires a manual fence; live migration is not supported.
-- The Secure Boot first hop requires a per-model trust store, and per-model validation on real hardware is not complete.
+- Platform keys for the Secure Boot first hop (PK / KEK / db) are written on the first network boot through the platform enrollment window; machines locked to vendor keys need the vendor flow; per-model validation on real hardware is not complete.
 - The PXE segment must be an independent trust boundary, with the control plane as its only DHCP, TFTP and boot HTTPS provider.
 
 See the [Roadmap](../about/roadmap.md) for complete boundaries and the [Security Model](../concepts/architecture/security.md) for trust assumptions.

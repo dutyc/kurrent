@@ -48,7 +48,7 @@ The node identity lives in `<state>/storager/state/agent.id`; component certific
 2. The control plane reissues the 443 management certificate and the 4443 boot leaf under the existing CA. Devices trust only the boot CA embedded at build time, so a leaf change does not affect admission and requires no NVRAM change.
 3. Set the flag back to `false` when done.
 
-Rotating the boot CA itself is a different operation: rebuild the signed firmware and re-enroll the site signing certificate in each target's `db`.
+Rotating the boot CA itself is a different operation: rebuild the signed firmware; the platform keys (PK / KEK / db) do not change with it, so no re-enrollment is needed.
 
 ## Identity and Credentials
 

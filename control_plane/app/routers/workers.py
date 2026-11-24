@@ -57,7 +57,8 @@ from ..utils import (
     validate_disk,
     worker_disks,
 )
-from .devices import _bind_device, _ensure_device_poolable, _rollback_devices_binding, _unbind_worker_devices
+from .devices import (_bind_device, _boot_tag, _ensure_device_poolable,
+                      _rollback_devices_binding, _unbind_worker_devices)
 
 log = logging.getLogger("control-plane")
 
@@ -338,7 +339,7 @@ def update_worker_mac(worker_id: str, req: UpdateWorkerMacRequest, request: Requ
 
         # dnsmasq 是设备台账的派生投影：缺失补写、已有替换（hostname 不变，仅换 MAC）
         try:
-            dnsmasq.set_binding(new_mac, hostname)
+            dnsmasq.set_binding(new_mac, hostname, _boot_tag(new_dev.get("boot_firmware")))
         except ValueError as exc:
             if changed:
                 _rollback_devices_binding(new_mac, old_released, worker_id)

@@ -1,52 +1,55 @@
 # Deployment and Provisioning
 
-A signed artifact has to enter the device's boot path — a PXE segment or local media — and the site certificate must be provisioned into the target's `db`. After deployment, the first boot should pool the device within the registration window.
+A signed artifact enters the boot path over a PXE segment (or a local ESP). A target in Setup Mode (or with Secure Boot off) boots it over the network, the platform enrollment window writes PK / KEK / db into firmware and reboots, and the same image then runs under signature verification. After deployment, the device should be pooled within the registration window.
 
 ## Goals and Prerequisites
 
-- the target satisfies the [bare-metal requirements](../setup/host-prerequisites.md#bare-metal-requirements): x86_64 UEFI, TPM 2.0, Secure Boot enabled and the site signing certificate imported into `db`; legacy BIOS (Legacy/CSM) boot is no longer supported;
+- the target satisfies the [bare-metal requirements](../setup/host-prerequisites.md#bare-metal-requirements): x86_64 UEFI, TPM 2.0, and no vendor keys locked in (Setup Mode or Secure Boot off); legacy BIOS (Legacy/CSM) boot is no longer supported; machines locked to vendor keys must use the vendor flow and are outside this procedure;
 - the control plane, dnsmasq and the PXE segment are set up as described in [Deployment](../setup/deployment.md);
-- signed artifacts and `manifest.json` were produced as described in [Build](./build.md).
+- signed artifacts and `manifest.json` were produced as described in [Build](./build.md) (the image embeds the platform key descriptors and the artifact signing certificate).
 
 ## Deployment Paths
 
 | Condition | Path |
 | --- | --- |
-| Mainboard has UEFI Network Boot / PXE | PXE, using `snponly.efi` served by the platform TFTP |
-| No PXE entry, or PXE settings unusable | Local media (USB / ESP / local disk / GRUB chainload) |
-| Batch provisioning with BMC virtual media | BMC / Redfish media mount, optional |
+| Mainboard has UEFI Network Boot / PXE | PXE: the platform TFTP serves the signed image and the platform enrollment window writes the keys (default) |
+| No PXE entry | Boot the `direct-uefi` signed artifact from a local ESP; keys are still written through the platform enrollment window |
+| Vendor keys already locked | Use the vendor management flow; outside this procedure |
 
 ### PXE
 
-1. Obtain `dist/secureboot/snponly-sb.efi` and `manifest.json`.
+1. Obtain `dist/secureboot/snponly-sb.efi`, `dist/secureboot/ipxe-sb.efi` (built with `KURRENT_SB_TARGET=ipxe`) and `manifest.json`.
 2. Install them into the main repository's TFTP root and restart dnsmasq:
 
    ```bash
    sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json \
-     /path/to/kurrent/tftp/secureboot/
+   sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi \
+     dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
    sudo install -m 0644 dist/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+   sudo install -m 0644 dist/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
    cd /path/to/kurrent
    eval "$(kurrent deployment show -o env)"
    docker compose restart kurrent-dnsmasq
    ```
 
-   `tftp/snponly.efi` is a file-level mount; restart the container after replacing it, or the container keeps the old inode. `tftp/secureboot/` serves as the artifact source for `/boot-assets` verification and export.
+   `tftp/snponly.efi` and `tftp/ipxe.efi` are both file-level mounts; restart the container after replacing them, or it keeps the old inode, and dnsmasq cannot start if either is missing. `tftp/secureboot/` serves as the artifact source for `/boot-assets` verification and export.
 
-3. In the device UEFI settings, enable the network stack and Secure Boot, and put network boot first.
-4. Boot the device and confirm DHCP assignment, the TFTP first-stage download, and the first stage's report and challenge over 4443.
+   The control plane selects the first hop by device `boot_firmware`: default devices take `snponly.efi`, `boot_firmware=full` devices take the all-driver `ipxe.efi`; both can coexist on one PXE segment.
 
-TFTP serves only the first stage `snponly.efi` (plus the `boot.ipxe` pointer); the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../concepts/architecture/security.md). Machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage.
+3. Open the platform enrollment window on the control plane (`POST /settings/platform-enrollment`; the WebUI devices page exposes the same switch).
+4. Boot the device over the network: the image fetches `/boot/phase`, runs `sbenroll` to write the platform keys, reports the result and reboots; after reboot Secure Boot is enforced, the same image runs under signature verification, and report and challenge complete over 4443. Close the window afterwards.
+
+TFTP serves only the first-stage firmware (`snponly.efi`, or the all-driver `ipxe.efi` selected per device by `boot_firmware`) and the `boot.ipxe` pointer; the signed first stage embeds the static scripts, boot CA and boot HTTPS port, and leaves the controller address out of the image by default, so later requests go over 4443 HTTPS trusting only that boot CA. The PXE segment must be isolated as described in the [Security Model](../concepts/architecture/security.md).
 
 ### Local Media
 
-Use a `direct-uefi` artifact: it embeds `auto.ipxe`, performs DHCP at startup and jumps to the control plane's TFTP boot chain.
+Use the `direct-uefi` signed artifact (e.g. `snponly-sb.efi`): it embeds the same static scripts as the PXE path and writes the keys through the platform enrollment window.
 
 USB / ESP:
 
 1. prepare a FAT32 partition (a USB stick or the local ESP);
 2. create `EFI/BOOT/`;
-3. copy `dist/direct-uefi/ipxe.efi` to `EFI/BOOT/BOOTX64.EFI`;
+3. copy `dist/direct-uefi/snponly-sb.efi` (or `ipxe-sb.efi`) to `EFI/BOOT/BOOTX64.EFI`;
 4. select the USB/ESP in the device boot menu.
 
 If the mainboard only recognizes the fixed ESP, place the file at the same path on the internal disk and select it in the boot entries.
@@ -55,15 +58,13 @@ GRUB chainload:
 
 ```text
 menuentry "Kurrent firmware" {
-    chainloader /boot/efi/EFI/kurrent/ipxe.efi
+    chainloader /boot/efi/EFI/kurrent/snponly-sb.efi
 }
 ```
 
-BMC / Redfish virtual media has been verified at the protocol level only, and capabilities differ by model; it is not a Kurrent deployment dependency and does not replace the PXE segment isolation requirement.
-
 ## First Boot and Identity
 
-On first boot, firmware:
+The first network boot writes the platform keys first (`sbenroll`, only while the window is open), then firmware:
 
 1. runs `akgen` to create the AK inside the TPM (non-exportable private key);
 2. exports the AK public key, name and algorithm with `akpub`;
@@ -77,7 +78,8 @@ Identity semantics:
 
 - device identity is carried by the AK inside the TPM; the boot HTTPS trust anchor is the boot CA embedded in the signed firmware; updating firmware or replacing TFTP files does not clear the AK;
 - clearing the TPM or replacing the mainboard loses the AK, equivalent to a new device identity: delete the entry and re-pool during a registration window;
-- rotating the boot CA equals reflashing firmware: rebuild the signed artifacts and re-provision the `db` certificate on the target;
+- the platform keys (PK / KEK / db) are written by the platform enrollment window on the first network boot, and the PK is fixed once the window closes; after a reinstall or firmware replacement the window is run again, with no per-machine certificate import;
+- the boot CA only issues the 4443 leaf: rotating it requires rebuilding the signed artifacts, and the platform keys are unaffected;
 - new hardware or a whole-machine replacement forms a new device; system disks and the Worker identity stay in the control plane and move by rebinding.
 
 NVRAM cleanup should go through a firmware interactive environment or a controlled provisioning flow. AK lifecycle, quote format and trust boundaries are in the [Firmware Contract](../reference/firmware-contract.md).
@@ -115,8 +117,8 @@ Acceptance: the serial console shows authentication success, Property Set, I/O q
 ## Common Failures
 
 - **No DHCP response**: is the device on the PXE segment; check dnsmasq `interface=` and firewall ports 67/69.
-- **No TFTP download after DHCP**: does the TFTP root mount only `snponly.efi` and `boot.ipxe`; check file permissions.
-- **Stuck in firmware boot**: unsigned artifact, signing certificate absent from the target's `db`, or Secure Boot off; verify with `sbverify --cert` and `tools/secureboot/check-host.sh`, and confirm the artifact matches the architecture and form.
+- **No TFTP download after DHCP**: does the TFTP root mount only the first-stage images (`snponly.efi` / `ipxe.efi`) and `boot.ipxe`; check file permissions.
+- **Stuck in firmware boot**: platform enrollment not completed (no PK / KEK / db), unsigned artifact, or the image signed by a certificate other than the one enrolled; verify the platform enrollment ledger, `sbverify --cert` and `tools/secureboot/check-host.sh`, and confirm the artifact matches the architecture and form.
 - **Boot HTTPS certificate error**: the `BOOT_CA_CERT` used at build time differs from `state/pki/ca/boot/ca.crt`, or the 4443 leaf SAN does not cover the address the device uses, or the port differs from `BOOT_HTTPS_PORT`.
 - **Device not pooled**: is the registration window open; does the report carry a valid TPM AK; is the device revoked.
 - **Empty menu or boot loop**: is the device bound to a Worker; does the Worker have a system disk and default disk.

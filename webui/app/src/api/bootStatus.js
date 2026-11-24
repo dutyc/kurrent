@@ -58,20 +58,22 @@ export function evidenceParts(check, t, locale) {
   }
 
   switch (check.id) {
-    case 'firmware':
+    case 'firmware': {
       if (!detail.declared) {
         push(t('assets.evidence.firmwareUndeclared'))
         break
       }
-      push(detail.file, true)
+      const items = detail.firmwares?.length
+        ? detail.firmwares
+        : [{ file: detail.file, capsPresent: detail.capsPresent, capsTotal: detail.capsTotal }]
+      const summary = items
+        .filter((it) => it.file)
+        .map((it) => (it.capsTotal ? `${it.file} (${it.capsPresent}/${it.capsTotal})` : it.file))
+        .join(' · ')
+      push(summary, true)
       if (detail.version) push(`iPXE ${detail.version}`)
-      if (detail.capsTotal) {
-        push(t('assets.evidence.firmwareCaps', {
-          present: detail.capsPresent,
-          total: detail.capsTotal,
-        }))
-      }
       break
+    }
     case 'service':
       if (detail.total) {
         push(
@@ -129,20 +131,43 @@ function firmwareCheck(assets) {
   if (firmware.length === 0) {
     return { status: 'blocked', detail: { declared: false } }
   }
-  const item = firmware[0]
-  const caps = item.capabilities || []
+  const firmwares = firmware.map((item) => {
+    const caps = item.capabilities || []
+    return {
+      file: item.file,
+      tag: item.tag || null,
+      label: item.label || null,
+      fileStatus: item.status,
+      version: item.version || null,
+      hostPath: item.host_path || null,
+      capsPresent: caps.filter((cap) => cap.present).length,
+      capsTotal: caps.length,
+      capabilities: caps.map((cap) => ({
+        id: cap.id,
+        label: cap.label || cap.id,
+        present: !!cap.present,
+      })),
+      missing: caps.filter((cap) => !cap.present).map((cap) => cap.label || cap.id),
+    }
+  })
+  const first = firmwares[0]
   const detail = {
     declared: true,
-    file: item.file,
-    fileStatus: item.status,
-    version: item.version || null,
-    hostPath: item.host_path || null,
-    capsPresent: caps.filter((cap) => cap.present).length,
-    capsTotal: caps.length,
-    missing: caps.filter((cap) => !cap.present).map((cap) => cap.label || cap.id),
+    firmwares,
+    file: first.file,
+    fileStatus: first.fileStatus,
+    version: first.version,
+    hostPath: first.hostPath,
+    capsPresent: first.capsPresent,
+    capsTotal: first.capsTotal,
+    missing: first.missing,
   }
-  if (item.status === 'incomplete') return { status: 'degraded', detail }
-  if (item.status !== 'ok') return { status: 'blocked', detail }
+  if (firmwares.some((it) => it.fileStatus !== 'ok' && it.fileStatus !== 'incomplete')) {
+    return { status: 'blocked', detail }
+  }
+  if (firmwares.some((it) => it.fileStatus === 'incomplete')) {
+    return { status: 'degraded', detail }
+  }
   return { status: 'normal', detail }
 }
 

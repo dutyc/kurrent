@@ -211,7 +211,7 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ## Step 3: Firmware and Device Admission
 
-Before starting, generate the offline signing key and import the site signing certificate plus the Microsoft UEFI CA into the target's `db` as described in [Secure Boot](../firmware/secure-boot.md#provisioning-the-target-trust-store), then verify with `tools/secureboot/check-host.sh`. The boot CA is created by `kurrent init` (`<state-root>/control-plane/state/pki/ca/boot/ca.crt`).
+Before starting, prepare Secure Boot: the boot CA is created by `kurrent init` (`<state-root>/control-plane/state/pki/ca/boot/ca.crt`); the signed image embeds the platform keys (PK / KEK) and the artifact signing certificate, and the target's `db` is written by the platform enrollment window on the first network boot, with no per-machine import. See [Secure Boot](../firmware/secure-boot.md#provisioning-the-target-trust-store) for the mechanics.
 
 ### 3.1 Firmware
 
@@ -222,21 +222,30 @@ git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
 ```
 
 ```bash
-# Firmware repository: the boot CA comes from the controller state root
+# Firmware repository: the boot CA comes from the controller state root; both first hops share it
 SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
 BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
-BOOT_HTTPS_PORT=4443 ./build/build-sb.sh
+SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
+SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
+BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
 
-# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hop
+SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
+BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
+SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
+SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
+BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
+
+# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hops
 sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
+sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
 sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
+sudo install -m 0644 /path/to/kurrent/tftp/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
 cd /path/to/kurrent
 eval "$(kurrent deployment show -o env)"
 docker compose restart kurrent-dnsmasq
 ```
 
-The first hop is fixed to `snponly.efi`; restart dnsmasq after replacing it. The image embeds the boot CA and the 4443 port, so changing either requires a rebuild; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
+The first hop is chosen per device: default devices take `snponly.efi`, `boot_firmware=full` devices take `ipxe.efi`; dnsmasq delivers both as file-level mounts, so restart it after replacing them. The images embed the boot CA, the 4443 port and the platform key descriptors (`SB_PK_*` / `SB_KEK_*`), so changing any of them requires rebuilding both; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -244,18 +253,20 @@ api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
 
 ### 3.2 Admit
 
-WebUI → **Devices** → open the registration window, then connect the device to the PXE segment, enable UEFI network boot and Secure Boot; or:
+First open the platform enrollment window in WebUI → **Devices**, let the target network-boot so the platform keys are written and it reboots, then open the registration window for admission. Or:
 
 ```bash
+api /settings/platform-enrollment -X POST        # open the platform enrollment window
 api /settings/registration-window -X POST -H 'Content-Type: application/json' \
   -d '{"ttl_minutes": 30, "max_devices": 20}'
 docker logs -f kurrent-dnsmasq 2>&1 | grep -E "DHCPACK|pxe|ipxe"
 ```
 
-Chain: DHCP → TFTP first hop → report and nonce over 4443 → TPM creates the AK → `/devices/report` admits the device and claims the AK; later boots require a PCR quote.
+Chain: DHCP → TFTP first hop → `/boot/phase` runs `sbenroll` while the platform enrollment window is open and writes PK / KEK / db → automatic reboot → verified boot → report and nonce over 4443 → TPM creates the AK → `/devices/report` admits the device and claims the AK; later boots require a PCR quote. The first network boot only writes keys and reboots; admission happens after the reboot.
 
 ```bash
 api /settings/registration-window -X DELETE
+api /settings/platform-enrollment -X DELETE
 ```
 
 Disable enforcement only for migration or troubleshooting: `api /settings/enforcement -X PUT -H 'Content-Type: application/json' -d '{"enabled": false}'`, then restore it.
@@ -321,7 +332,7 @@ For an empty menu, a data-plane connection failure, an authentication failure or
 
 | Item | Requirement |
 | --- | --- |
-| Network and switching | Dedicated PXE segment with the control plane as the only DHCP/TFTP provider; TFTP root mounts only `snponly.efi` and `boot.ipxe`; switches enable DHCP snooping, DAI, RA guard and port security |
+| Network and switching | Dedicated PXE segment with the control plane as the only DHCP/TFTP provider; TFTP root mounts only the first-stage images (`snponly.efi` / `ipxe.efi`) and `boot.ipxe`; switches enable DHCP snooping, DAI, RA guard and port security |
 | Exposed ports | Control plane 22, 53/67/69, 80/443/4443 (4443 boot segment only); storage nodes 4840/4421 |
 | Host baseline | `sudo kurrent host check --strict` with no FAIL or SKIP; CA keys, `admin.conf`, credentials and audit files at 600 |
 | Registration and attestation | Registration window opened on demand with a quota and closed afterwards; TPM attestation on by default; devices without a TPM are not admitted |

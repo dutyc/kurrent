@@ -18,7 +18,9 @@ title: "运维与验证"
 |---|---:|---|---|
 | `since` | 否 | `0` | 只返回 `id > since` 的记录 |
 | `limit` | 否 | `1000` | 最多返回多少条 |
-| `mac` | 否 | — | 仅返回该设备（MAC）的操作（规范化后按 `mac` 字段过滤），用于设备绑定记录查看 |
+| `mac` | 否 | — | 仅返回该设备（MAC）的操作（规范化后按 `mac` 字段过滤，先过滤再计 `limit`），用于设备绑定记录查看 |
+| `op` | 否 | — | 仅返回该操作类型（如 `platform.enroll`、`device.bind`），先过滤再计 `limit` |
+| `order` | 否 | `asc` | `asc` 按写入顺序返回；`desc` 只取最新一页并按新到旧返回（概览类查询用），`next_cursor` 为该页最新条目的 `id` |
 
 ### curl
 
@@ -33,6 +35,20 @@ curl -s "$BASE_URL/operations" \
 
 ```bash
 curl -s "$BASE_URL/operations?since=10&limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+读取最新一页（新到旧）：
+
+```bash
+curl -s "$BASE_URL/operations?limit=10&order=desc" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+按操作类型过滤（平台注册记录）：
+
+```bash
+curl -s "$BASE_URL/operations?op=platform.enroll&order=desc" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

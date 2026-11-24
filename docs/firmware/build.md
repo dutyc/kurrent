@@ -21,7 +21,11 @@ BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
 
 签名构建必须提供签名密钥、签名证书与 boot CA 证书。端口和控制面地址可以省略：端口省略时为 `4443`，地址省略时由设备从 DHCP `next-server` 取得。只有要把控制面地址固定进镜像时，才设置 `CONTROLLER_IP`。
 
-`build-sb.sh` 在普通构建之上嵌入静态脚本、boot CA 与引导 HTTPS 端口，产出经 `sbsign` 签名的首跳。构建输入、manifest 与预置步骤见 [Secure Boot 预置](./secure-boot.md)。
+`build-sb.sh` 在普通构建之上嵌入静态脚本、boot CA 与引导 HTTPS 端口，产出经 `sbsign` 签名的首跳。
+
+需要设备首次网络启动时写入平台密钥，还要同时提供 `SB_PK_KEY` / `SB_PK_CERT` / `SB_KEK_KEY` / `SB_KEK_CERT`（四者成组）：构建脚本据此生成 `sbenroll` 的 PK / KEK / db 签名描述符，db 自动包含产物签名证书与 `SB_MS_UEFI_CA_CERT`（默认 `build/certs/MicrosoftUEFI-CA-2011.pem`）。缺少这组输入时镜像不含注册数据，不能执行平台注册。
+
+构建输入、manifest 与预置步骤见 [Secure Boot 预置](./secure-boot.md)。
 
 普通构建 `./build/build.sh` 不签名，产物只用于本地调试与研究；开启 Secure Boot 的目标机会拒绝加载。
 
@@ -60,9 +64,11 @@ JOBS=8 ./build/build.sh                  # 并行度
 | 主板无 PXE 入口，需 USB/ESP 引导 | `direct-uefi/ipxe.efi` |
 | 网卡初始化失败 | 对应的 `-debug` 产物 |
 
-主仓库默认使用 `tftp/snponly.efi`。不同机型可能需要不同的首跳产物，而主线当前只下发 `snponly.efi`，不支持按设备切换。需要 `pxe-uefi/ipxe.efi` 的机器无法在同一 PXE 网段与默认首跳混用，部署前需统一首跳产物。
+主仓库默认使用 `tftp/snponly.efi`。不同机型可能需要不同的首跳产物：控制面按设备的 `boot_firmware` 在 DHCP 里选中 `snponly.efi`（默认）或全驱动 `tftp/ipxe.efi`，同一 PXE 网段可按设备混用。全驱动首跳使用现成的 `direct-uefi/ipxe.efi`：它内置 `auto.ipxe`（DHCP 后跳 `tftp://${next-server}/boot.ipxe`），作 TFTP 首跳与作本地介质引导是同一条脚本。
 
-上表是 `build.sh` 的形态；部署时首跳换成 `build-sb.sh` 的 `dist/secureboot/snponly-sb.efi`，形态与 `pxe-uefi/snponly.efi` 相同。
+`tftp/*.efi` 不入库，部署时手动放置：`pxe-uefi/snponly.efi` → `tftp/snponly.efi`，`direct-uefi/ipxe.efi` → `tftp/ipxe.efi`；两份都在 dnsmasq 的文件级挂载里，缺一不可。
+
+上表是 `build.sh` 的形态；部署时首跳换成 `build-sb.sh` 的签名产物，形态与 `pxe-uefi/snponly.efi` 相同：`dist/secureboot/snponly-sb.efi` 覆盖 `tftp/snponly.efi`，`KURRENT_SB_TARGET=ipxe` 构建的 `dist/secureboot/ipxe-sb.efi` 覆盖 `tftp/ipxe.efi`。
 
 ```bash
 cd dist

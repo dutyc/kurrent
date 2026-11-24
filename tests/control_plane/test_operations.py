@@ -49,6 +49,28 @@ class TestOperations:
         assert len(page2["entries"]) == 1
         assert page2["next_cursor"] == page2["entries"][-1]["id"]
 
+    def test_latest_page_desc(self, client, auth_headers):
+        """order=desc 取最新 limit 条并按新到旧返回（概览页用）。"""
+        for mac in (MAC_A, MAC_B, "00:11:22:33:44:99"):
+            client.post("/devices", json={"mac": mac}, headers=auth_headers)
+        body = client.get(
+            "/operations", params={"limit": 2, "order": "desc"}, headers=auth_headers
+        ).json()
+        assert [e["mac"] for e in body["entries"]] == ["00:11:22:33:44:99", MAC_B]
+        assert body["entries"][0]["id"] > body["entries"][1]["id"]
+        assert body["next_cursor"] == body["entries"][0]["id"]
+
+    def test_latest_page_desc_with_mac_filter(self, client, auth_headers):
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
+        body = client.get(
+            "/operations",
+            params={"mac": MAC_A, "limit": 1, "order": "desc"},
+            headers=auth_headers,
+        ).json()
+        assert [e["mac"] for e in body["entries"]] == [MAC_A]
+        assert body["next_cursor"] == body["entries"][0]["id"]
+
     def test_filter_by_mac(self, client, auth_headers):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
@@ -58,6 +80,23 @@ class TestOperations:
         assert len(body["entries"]) == 1
         assert body["entries"][0]["mac"] == MAC_A
         assert body["next_cursor"] == body["entries"][-1]["id"]
+
+    def test_filter_by_op_before_limit(self, client, auth_headers):
+        """op 过滤同样先过滤再计 limit：limit=1 仍能取到唯一匹配项。"""
+        for mac in (MAC_A, MAC_B, "00:11:22:33:44:99"):
+            client.post("/devices", json={"mac": mac}, headers=auth_headers)
+        client.put(f"/devices/{MAC_A}/boot-firmware", json={"boot_firmware": "full"},
+                   headers=auth_headers)
+
+        body = client.get("/operations", params={"op": "device.boot_firmware", "limit": 1},
+                          headers=auth_headers).json()
+        assert [entry["op"] for entry in body["entries"]] == ["device.boot_firmware"]
+        assert body["next_cursor"] == body["entries"][0]["id"]
+
+        register = client.get("/operations", params={"op": "device.register", "limit": 2},
+                              headers=auth_headers).json()
+        assert len(register["entries"]) == 2
+        assert all(entry["op"] == "device.register" for entry in register["entries"])
 
     def test_filter_by_mac_empty(self, client, auth_headers):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)

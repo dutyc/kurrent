@@ -33,17 +33,20 @@ The same image can therefore be pre-provisioned across devices within one deploy
 ## Deploying to the control plane
 
 1. Place `dist/secureboot/snponly-sb.efi` and `manifest.json` in the control-plane host's repository `tftp/secureboot/`. That directory is the source for artifact verification and export, and is not committed.
-2. Have TFTP deliver the signed image as the first hop: `install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`, then `docker compose restart kurrent-dnsmasq` so the file-level mount points at the new inode.
+2. Have TFTP deliver the signed image as the first hop: `install -m 0644 tftp/secureboot/snponly-sb.efi tftp/snponly.efi`, then `docker compose restart kurrent-dnsmasq` so the file-level mount points at the new inode. The all-driver first hop follows the same step: the firmware repo builds `ipxe-sb.efi` with `KURRENT_SB_TARGET=ipxe`; install it over `tftp/ipxe.efi` for devices with `boot_firmware=full`.
 3. Query `/api/cp/boot-assets`; `secureboot.status` should be `ok`: the image hash matches the manifest, the port matches the deployment, and the boot CA exists with a matching fingerprint. The WebUI boot-chain page shows the Secure Boot row whenever artifacts are present.
 
 ## Provisioning the target trust store
 
-The signing certificate must be in the target's `db` first, otherwise the firmware refuses to run (a one-time provisioning step, not a per-boot dependency):
+The signing certificate must be in the target's `db` first, otherwise the firmware refuses to run. For a fleet, the default path is network enrollment: a machine in Setup Mode (or with Secure Boot disabled) network-boots the same signed image; the embedded `sbenroll` command writes the platform keys (PK / KEK / db) and reboots, after which the firmware verifies the signature and production boot continues.
 
-- Generate the offline signing key: `tools/secureboot/keygen-offline.sh ~/offline/kurrent-sb`. Keep the private key offline; the script refuses to write it into the repository or a container.
-- **USB/BIOS (supported path, no BMC required)**: `tools/secureboot/export-usb.sh <usb> <artifact-signing.crt> <snponly-sb.efi> <boot-ca.crt>` produces an import package containing only public certificates; import `db-cert.cer` in the target's Key Management.
-- **Redfish (optional, requires BMC and vendor support)**: `KURRENT_BMC_USER=... KURRENT_BMC_PASSWORD=... tools/secureboot/enroll-redfish.sh --bmc <bmc> --cert <artifact-signing.crt> --enable-secureboot`. The script reads the Secure Boot and `db` state, confirms the Microsoft UEFI CA is present, then imports the certificate idempotently and reads the fingerprint back; `--dry-run` only reads. The tool has only been validated at protocol level (simulated BMC); confirm vendor behavior per model.
-- Target: disable CSM, enable Secure Boot, and verify the state and `db` with `tools/secureboot/check-host.sh <artifact-signing.crt>`.
+1. Open the platform enrollment window on the control plane (`POST /settings/platform-enrollment`; the WebUI devices page exposes the same switch).
+2. Network-boot the signed image on each machine: after writing the keys it reboots and the MAC appears in the devices page "Platform enrollment" list.
+3. Close the window when done: new machines stop enrolling, and enrolled devices and the list are kept.
+
+The platform keys and signed descriptors are supplied at image build time (firmware repo `build-sb.sh` inputs `SB_PK_*` / `SB_KEK_*` / `SB_MS_UEFI_CA_CERT`). Keep the private keys offline; the image embeds only public certificates and signature descriptors. Writes go PK → KEK → db, with db containing the artifact signing certificate and the Microsoft UEFI CA 2011. Run enrollment on a controlled segment: in Setup Mode any host on the same segment could write keys; once the window is closed the PK is fixed and later changes require the offline keys.
+
+Machines that ship locked to vendor keys with Secure Boot enabled cannot enroll this way and must use the vendor's own management flow, which is outside this procedure. Verify target state with `tools/secureboot/check-host.sh`.
 
 The loader after `sanboot` is decided by the distribution signing chain: the master disk's ESP shim/GRUB/kernel must be vendor-signed (the Ubuntu 26.04 master disk uses a Microsoft UEFI CA 2011 signed shim → Canonical-signed GRUB and kernel), and the target `db` must contain that Microsoft CA. An unsigned GRUB is rejected after `sanboot`.
 

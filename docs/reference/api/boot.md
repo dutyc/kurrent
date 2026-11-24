@@ -22,14 +22,14 @@ title: "引导与设备准入"
 
 | 字段 | 说明 |
 |---|---|
-| `firmware[]` | `dhcp-boot=tag:efi64` 声明的 UEFI 固件：`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
+| `firmware[]` | `dhcp-boot` 声明的首跳 UEFI 固件（`tag:efi64` → `snponly.efi`，`tag:full` → `ipxe.efi`）：`tag`（`efi64` / `full`）、`mode`（固定 `uefi`）、`label`、`file`、`path`、`host_path`、`status`（ok/incomplete/missing/empty/rejected）、`size`、`mtime`；文件可读时附 `version` 与 `capabilities[]`（`id`/`label`/`present`） |
 | `stage2[]` | 脚本链文件（`boot.ipxe`、`boot.ipxe.cfg`、`menu.ipxe`）：`file`、`path`、`host_path`、`status`、`size`、`mtime` |
 | `menu` | `status`（ok/unavailable）与 `items`（可选项计数，跳过 `--gap` 行） |
 | `secureboot` | 可选 Secure Boot 产物：`present`、`status`（ok/incomplete/missing）、`artifact`、`path`、`artifact_sha256`、`artifact_size`、`manifest_present`、`manifest_matches`、`signer`、`built_at`、`boot_https_port`、`port_matches`、`boot_ca_present`、`boot_ca_sha256`、`boot_ca_matches` |
 
 固件 `status` 的取值含义：
 
-- `incomplete`：固件文件存在但缺少 `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` 中的任一项；stock iPXE 同样无法完成 TPM 证明。
+- `incomplete`：固件文件存在但缺少 `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `sbenroll` / `TOFU` 中的任一项；stock iPXE 同样无法完成 TPM 证明与平台注册。
 - `empty`：零字节文件。
 - `missing`：文件不存在。
 - `rejected`：路径越出 tftp 根，控制面拒绝且不会读取该路径。
@@ -432,3 +432,46 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 3. `GET /boot-vars?mac=&hostname=&nonce=&quote=&quote_sig=` → 校验 quote 结构（magic `0xFF544347`、type `TPM_ST_ATTEST_QUOTE`、PCR 选择固定为 0/2/4/7 且仅 SHA-256）、AK 签名、`extraData == nonce`、nonce 未被消费，最后比对 PCR 摘要与平台基线。全部通过才下发凭据（注入四条件第 4 条，见本节）；任何一步失败 → 空脚本（拒绝下发，审计 `boot_vars.credential` 与 `device.attest`，reason 见本节）。
 
 quote 校验先于 nonce 消费：格式或签名错误不会消耗本次 nonce，设备可修正后重试；nonce 被消费后重放返回 `nonce_invalid`。
+
+### 平台密钥注册（/boot/phase、/devices/enroll-report、/settings/platform-enrollment）
+
+签名镜像的内嵌脚本在启动时先请求 `/boot/phase`。平台注册窗口开启期间，控制面返回一段注册脚本：执行固件命令 `sbenroll` 写入 Secure Boot 密钥（PK / KEK / db，镜像构建时内嵌），随后向 `/devices/enroll-report` 上报结果。首次注册成功才重启（重启后固件验签进入生产引导）；已注册设备重复执行不会改动变量，继续引导。窗口关闭时 `/boot/phase` 返回空脚本（`#!ipxe`），引导直接继续。
+
+条件：目标机必须处于 Setup Mode 或 Secure Boot 关闭状态。出厂已锁厂商密钥的机型无法写入，须按其厂商管理流程处理。注册窗口期间 Setup Mode 机器可被同网段攻击者抢先写入密钥，注册须在受控网段执行。
+
+#### GET /boot/phase
+
+**不鉴权**，按来源 IP 限速（默认 240 次/分钟，`KURRENT_CP_RATE_LIMIT_BOOT_PHASE` 可覆盖）。
+
+| 窗口状态 | 返回（`text/plain`） |
+|---|---|
+| 关闭 | `#!ipxe`（空脚本，引导继续） |
+| 开启 | `sbenroll` 与上报指令组成的 iPXE 脚本（不含重启；重启由上报结果决定） |
+
+#### GET /devices/enroll-report
+
+**不鉴权**，按来源 IP 限速（默认 60 次/分钟，`KURRENT_CP_RATE_LIMIT_ENROLL_REPORT` 可覆盖）。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `mac` | 是 | MAC 地址（归一化规则同 `/boot-vars`） |
+| `result` | 是 | `sbenroll` 的结果：`ok` / `foreign`（已有其他 PK）/ `failed` |
+
+- 每次上报写审计 `platform.enroll`（`ok` 记 `ok`，其余记 `failed`，`result` 字段保留原因）。
+- `ok` 首次上报：登记该 MAC 为已完成平台注册（`state/settings.json`），返回 `#!ipxe` + `reboot`。
+- 重复 `ok` 或非 `ok`：返回空脚本，继续引导（已锁厂商密钥的设备不会形成重启循环）。
+- 登记不代表授权：入池仍由 TPM AK、`sb=1` 与注册窗口决定。
+
+#### GET/POST/DELETE /settings/platform-enrollment
+
+平台注册窗口开关与已注册清单（管理端点，需 `Authorization: Bearer`）。
+
+- `GET`：`{"open": bool, "opened_at": str|null, "enrolled": [{"mac": str, "at": str}]}`；`enrolled` 按注册时间新到旧，关闭窗口后保留。
+- `POST`：开启窗口（201）；已开启 → 409。
+- `DELETE`：关闭窗口；未开启 → 409。
+- 开启/关闭写操作日志 `settings.platform_enrollment`。
+
+```bash
+curl -X POST "$BASE_URL/settings/platform-enrollment" \
+  -H "Authorization: Bearer $TOKEN"
+```

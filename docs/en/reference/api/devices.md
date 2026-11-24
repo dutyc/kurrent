@@ -48,6 +48,7 @@ devices:
       last_at: 2026-08-15T12:00:00+08:00
       last_reason: null           # ak_unregistered | quote_invalid | nonce_invalid | pcr_mismatch | baseline_approved
     source: ipxe                  # ipxe (auto) | manual (manual entry/import)
+    boot_firmware: snponly        # first-hop firmware: snponly (default, UEFI SNP) | full (all drivers)
     fingerprint:                  # reported values; updated by device reports
       manufacturer: ASUSTeK COMPUTER INC.
       product: ROG Zephyrus G15
@@ -92,6 +93,7 @@ Manually register a device: MAC (+ optional UUID / manufacturer / product / seri
 | `mac` | Yes | str | MAC address |
 | `uuid` | No | str | SMBIOS UUID (dual factor, optional) |
 | `manufacturer` / `product` / `serial` | No | str | Reported info; initial inventory values only, superseded by device reports |
+| `boot_firmware` | No | str | First-hop firmware: `snponly` (default, UEFI SNP) or `full` (all drivers); selects which firmware the device fetches on the DHCP first hop |
 
 **Successful response (201)**: device record (`state=pooled`, `source=manual`).
 
@@ -191,6 +193,8 @@ Rebind scenarios with `force=true`:
 
 The audit trail records `device.bind` with `old_worker_id` / `old_device_mac` (rebind history).
 
+On success the control plane writes a dnsmasq static binding per the device's `boot_firmware`: `snponly` writes `MAC,hostname` (served `snponly.efi`), `full` writes `MAC,set:full,hostname` (served the all-driver `ipxe.efi`). Rebinding to another device rewrites the projection per the new device's `boot_firmware`.
+
 **curl**:
 
 ```bash
@@ -254,6 +258,28 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"mode":"manifest","pairs":[{"mac":"00:0c:29:b9:8b:2d","worker_id":"worker-01"}]}'
 ```
+
+## PUT /devices/{mac}/boot-firmware
+
+Switch a device's first-hop firmware (`snponly` / `full`). Requires `Authorization: Bearer`. Updates the device ledger; when the device is bound, the Worker's dnsmasq static binding is re-projected (`full` → `MAC,set:full,hostname`), so the next DHCP first hop serves the new firmware.
+
+**Request body**:
+
+| Field | Required | Type | Description |
+|---|---|---|---|
+| `boot_firmware` | Yes | str | `snponly` (default, UEFI SNP) or `full` (all drivers) |
+
+```bash
+curl -s -X PUT "$BASE_URL/devices/00:0c:29:b9:8b:2d/boot-firmware" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"boot_firmware": "full"}'
+```
+
+**Success (200)**: the updated device record. Writes operation log `device.boot_firmware` (old/new values and client address).
+
+**Errors**: invalid MAC `400`; invalid request body `422`; unknown device `404`; revoked device or missing bound Worker record `409`; dnsmasq re-projection failed `500` (ledger rolled back to the previous value).
+
+---
 
 ## POST /devices/{mac}/approve-baseline
 

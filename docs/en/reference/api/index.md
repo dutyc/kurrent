@@ -17,7 +17,7 @@ The Control Plane is a persistent HTTP service on the control-plane host, respon
 - Management identity and PKI: sessions, tokens, human/component certificates, and CRLs
 - Declaration status, dnsmasq-derived configuration, and operation auditing
 
-It does not configure storage backends directly or host boot static files: `menu.ipxe` and the boot scripts live under `tftp/` and are served by nginx over HTTPS (TFTP only provides the first-stage `snponly.efi` and the `boot.ipxe` pointer), while the menu's default item, timeout and OS label are projected through `/boot-vars`. The node Agent configures the storage backend on its host (nvmet configfs, or `tgtadm`/`targetcli` for iSCSI).
+It does not configure storage backends directly or host boot static files: `menu.ipxe` and the boot scripts live under `tftp/` and are served by nginx over HTTPS (TFTP only provides the first-stage firmware (`snponly.efi` / `ipxe.efi`) and the `boot.ipxe` pointer), while the menu's default item, timeout and OS label are projected through `/boot-vars`. The node Agent configures the storage backend on its host (nvmet configfs, or `tgtadm`/`targetcli` for iSCSI).
 
 ## Calling Conventions
 
@@ -55,8 +55,10 @@ It does not configure storage backends directly or host boot static files: `menu
 | `GET` | `/sessions` | List active sessions (admin, see [Identity and PKI](./identity.md)) |
 | `DELETE` | `/sessions/{session_id}` | Revoke one session (admin, see [Identity and PKI](./identity.md)) |
 | `DELETE` | `/sessions` | Sign out all: clear the registry and bump epoch (admin, see [Identity and PKI](./identity.md)) |
+| `GET` | `/boot/phase` | Platform enrollment phase script: serves the key enrollment flow while the window is open, no auth (see [Boot chain](./boot.md)) |
 | `GET` | `/boot-vars` | Dynamic iPXE boot variable injection, no auth required (see [Boot and Device Admission](./boot.md)) |
 | `GET` | `/devices/report` | iPXE device info reporting (no auth, 11 fingerprint fields + TPM AK, see [Devices](./devices.md)) |
+| `GET` | `/devices/enroll-report` | Platform key enrollment result report (no auth, rate-limited, see [Boot chain](./boot.md)) |
 | `GET` | `/devices/challenge` | One-time nonce issuance (no auth, challenge-response, see [Boot chain](./boot.md)) |
 | `POST` | `/devices/{mac}/approve-baseline` | Approve the device's most recently reported PCR baseline (admin, see [Devices](./devices.md)) |
 | `GET` | `/devices` | Device pool list (state filter, see [Devices](./devices.md)) |
@@ -74,6 +76,9 @@ It does not configure storage backends directly or host boot static files: `menu
 | `DELETE` | `/settings/registration-window` | Close the registration window early (see [Boot chain](./boot.md)) |
 | `GET` | `/settings/enforcement` | Get the TPM attestation enforcement switch (see [Boot chain](./boot.md)) |
 | `PUT` | `/settings/enforcement` | Toggle the TPM attestation enforcement switch (see [Boot chain](./boot.md)) |
+| `GET` | `/settings/platform-enrollment` | Get the platform enrollment window and enrolled devices (see [Boot chain](./boot.md)) |
+| `POST` | `/settings/platform-enrollment` | Open the platform enrollment window (see [Boot chain](./boot.md)) |
+| `DELETE` | `/settings/platform-enrollment` | Close the platform enrollment window (see [Boot chain](./boot.md)) |
 | `GET` | `/config` | Runtime declaration configuration and derived-artifact consistency (see [Basics](./foundation.md)) |
 | `GET` | `/agents` | List Agents and their capabilities (see [Agents and Storage](./agents.md)) |
 | `POST` | `/agents` | Register a new Agent (writes agents.yml; 409 if id exists, see [Agents and Storage](./agents.md)) |

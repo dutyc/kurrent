@@ -9,7 +9,9 @@ from ..auth import authenticate, authorize_request
 from ..config import REGISTRATION_WINDOW_TTL_MIN_MINUTES, settings
 from ..models import OpenRegistrationWindowRequest, SetEnforcementRequest
 from ..stores import record, runtime_settings
-from ..trust import enforcement_enabled, window_open, window_record, window_status
+from ..trust import (PLATFORM_ENROLLMENT_KEY, enforcement_enabled, platform_enrolled,
+                     platform_window, platform_window_open, window_open, window_record,
+                     window_status)
 from ..utils import client_host, now_iso
 
 from ..principal import PrincipalRouter
@@ -75,6 +77,55 @@ def close_registration_window(request: Request):
         runtime_settings.set("registration_window", None)
     record("settings.registration_window", "close", client=client_host(request))
     return {"open": False}
+
+
+def _platform_payload() -> dict:
+    """平台注册窗口 + 已完成密钥注册的 MAC 清单（按注册时间新到旧）。"""
+    window = platform_window()
+    enrolled = [
+        {"mac": mac, "at": entry.get("at")}
+        for mac, entry in sorted(
+            platform_enrolled().items(),
+            key=lambda item: str((item[1] or {}).get("at") or ""),
+            reverse=True,
+        )
+        if isinstance(entry, dict)
+    ]
+    return {
+        "open": window is not None,
+        "opened_at": window.get("opened_at") if window else None,
+        "enrolled": enrolled,
+    }
+
+
+@router.get("/settings/platform-enrollment")
+def get_platform_enrollment():
+    """查询平台注册窗口：开启期间签名固件会执行 sbenroll 写入 Secure Boot 密钥
+    （PK/KEK/db）。enrolled 为已完成注册的设备清单，关闭窗口后保留。"""
+    return _platform_payload()
+
+
+@router.post("/settings/platform-enrollment", status_code=201)
+def open_platform_enrollment(request: Request):
+    """开启平台注册窗口：未注册的机器下次引导会写入平台密钥并重启；
+    已注册的机器重复执行不会改动变量。已开启 → 409（先关闭再开）。"""
+    with runtime_settings.locked():
+        if platform_window_open():
+            raise HTTPException(409, "platform enrollment window already open")
+        runtime_settings.set(PLATFORM_ENROLLMENT_KEY, {"opened_at": now_iso()})
+    record("settings.platform_enrollment", "open", client=client_host(request))
+    return _platform_payload()
+
+
+@router.delete("/settings/platform-enrollment")
+def close_platform_enrollment(request: Request):
+    """关闭平台注册窗口：引导脚本不再下发密钥注册流程；已注册设备不受影响。"""
+    with runtime_settings.locked():
+        if not platform_window_open():
+            raise HTTPException(409, "platform enrollment window is not open")
+        runtime_settings.set(PLATFORM_ENROLLMENT_KEY, None)
+    record("settings.platform_enrollment", "close", client=client_host(request))
+    return _platform_payload()
 
 
 @router.get("/settings/enforcement")

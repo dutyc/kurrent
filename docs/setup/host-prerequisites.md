@@ -24,14 +24,14 @@
 | --- | --- | --- |
 | 架构与固件 | x86_64；仅 UEFI 引导，需在固件设置中关闭 CSM/Legacy | 没有对应产物，无法进入引导链 |
 | TPM | TPM 2.0（独立 TPM 或 Intel PTT / AMD fTPM）；可创建 ECC P-256 或 RSA-2048 的 AK；SHA-256 PCR 0/2/4/7 可读 | 注册期拒绝入池（`no_tpm`）；证明失败不下发凭据 |
-| Secure Boot | 可开启；`db` 可写入站点签名证书；启动发行版时 `db` 还需包含 Microsoft UEFI CA | 注册期拒绝入池（`sb_disabled`）；未签名首跳不执行 |
-| 网络引导 | 支持 UEFI IPv4 网络启动（DHCP + TFTP），网卡提供 UEFI SNP 栈 | 无法下载首跳；主线只交付 `snponly.efi` |
+| Secure Boot | 未锁厂商密钥（Setup Mode 或可关闭）；首次网络启动经平台注册窗口写入 PK / KEK / db，db 含站点签名证书与 Microsoft UEFI CA | 注册期拒绝入池（`sb_disabled`）；未签名首跳不执行 |
+| 网络引导 | 支持 UEFI IPv4 网络启动（DHCP + TFTP），网卡提供 UEFI SNP 栈 | 无法下载首跳；网卡无 UEFI SNP 时改用全驱动首跳（设备 `boot_firmware=full`） |
 
 - 本地磁盘不是前提；设备不持有持久状态。
 - CPU 与内存只需满足所装发行版要求。
 - AK 绑定主板与 TPM：清 TPM 或换主板等同换设备，需删登记后重新入池。
 - 不用 USB 或无线网卡引导；网卡兼容性见[固件平台参考](../reference/firmware-platform.md)。
-- `db` 预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
+- 平台密钥写入见 [Secure Boot 预置](../firmware/secure-boot.md)；出厂已锁厂商密钥的机型经其厂商的管理流程处理。
 
 在目标机核对：
 

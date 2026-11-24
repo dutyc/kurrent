@@ -152,6 +152,19 @@ export function closeRegistrationWindow() {
   return request('/settings/registration-window', { method: 'DELETE' });
 }
 
+export function getPlatformEnrollment() {
+  // 平台注册窗口: { open, opened_at, enrolled: [{mac, at}] }（enrolled 由设备注册时自报）
+  return request('/settings/platform-enrollment');
+}
+
+export function openPlatformEnrollment() {
+  return request('/settings/platform-enrollment', { method: 'POST' });
+}
+
+export function closePlatformEnrollment() {
+  return request('/settings/platform-enrollment', { method: 'DELETE' });
+}
+
 export function getEnforcement() {
   // TPM 证明强制开关（默认开启；关闭仅用于过渡/排障）
   return request('/settings/enforcement');
@@ -453,6 +466,14 @@ export function approveDeviceBaseline(mac) {
   return request(`/devices/${encodeURIComponent(mac)}/approve-baseline`, { method: 'POST' });
 }
 
+export function setDeviceBootFirmware(mac, bootFirmware) {
+  // 切换设备首跳固件：snponly（默认）或 full（全驱动）；已绑定时同步重投影 DHCP 标签
+  return request(`/devices/${encodeURIComponent(mac)}/boot-firmware`, {
+    method: 'PUT',
+    body: { boot_firmware: bootFirmware },
+  });
+}
+
 export function batchBindPreview(data) {
   return request('/devices/bind/batch/preview', { method: 'POST', body: data });
 }
@@ -462,7 +483,7 @@ export function batchBind(data) {
 }
 
 // ===== Operations =====
-export function getOperations(since = 0, limit = 50, mac = null) {
-  const params = mac ? { since, limit, mac } : { since, limit };
-  return request('/operations', { params });
+// order='desc' 取最新一页（新到旧），仅用于概览类查询；默认按写入顺序增量读取。
+export function getOperations(since = 0, limit = 50, mac = null, order = null) {
+  return request('/operations', { params: { since, limit, mac, order } });
 }

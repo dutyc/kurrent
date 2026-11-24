@@ -52,6 +52,7 @@ devices:
       last_at: 2026-08-15T12:00:00+08:00
       last_reason: null           # ak_unregistered | quote_invalid | nonce_invalid | pcr_mismatch | baseline_approved
     source: ipxe                  # ipxe（自动入池）| manual（手动录入/导入）
+    boot_firmware: snponly        # 首跳固件：snponly（默认，UEFI SNP）| full（全驱动）
     fingerprint:                  # 申报性质，设备上报更新
       manufacturer: ASUSTeK COMPUTER INC.
       product: ROG Zephyrus G15
@@ -96,6 +97,7 @@ curl "$BASE_URL/devices?state=pooled" \
 | `mac` | 是 | str | MAC 地址 |
 | `uuid` | 否 | str | SMBIOS UUID（双因子，可选） |
 | `manufacturer` / `product` / `serial` | 否 | str | 申报信息，仅作台账初始值，设备上报后以申报值为准更新 |
+| `boot_firmware` | 否 | str | 首跳固件：`snponly`（默认，UEFI SNP）或 `full`（全驱动）；决定该设备 DHCP 首跳拿哪份固件 |
 
 **成功返回（201）**：设备记录（`state=pooled`，`source=manual`）。
 
@@ -203,6 +205,8 @@ curl "https://<host>/devices/report?mac=000c29b98b2d&uuid=4c4c4544-...&manufactu
 
 审计记录 `device.bind`（含 `old_worker_id` / `old_device_mac`，即换绑历史）。
 
+绑定成功后控制面按设备的 `boot_firmware` 写 dnsmasq 静态绑定：`snponly` 写 `MAC,hostname`（走 `snponly.efi`），`full` 写 `MAC,set:full,hostname`（走 `ipxe.efi` 全驱动）。换绑到另一台设备时投影随新设备的 `boot_firmware` 重写。
+
 **curl**：
 
 ```bash
@@ -266,6 +270,28 @@ curl -X POST "$BASE_URL/devices/bind/batch" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"mode":"manifest","pairs":[{"mac":"00:0c:29:b9:8b:2d","worker_id":"worker-01"}]}'
 ```
+
+## PUT /devices/{mac}/boot-firmware
+
+切换设备首跳固件（`snponly` / `full`），需 `Authorization: Bearer`。写入设备台账；设备已绑定时同步重投影该 Worker 的 dnsmasq 静态绑定（`full` → `MAC,set:full,hostname`），下次 DHCP 首跳即按新固件下发。
+
+**请求体**：
+
+| 字段 | 必填 | 类型 | 说明 |
+|---|---|---|---|
+| `boot_firmware` | 是 | str | `snponly`（默认，UEFI SNP）或 `full`（全驱动） |
+
+```bash
+curl -s -X PUT "$BASE_URL/devices/00:0c:29:b9:8b:2d/boot-firmware" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"boot_firmware": "full"}'
+```
+
+**成功返回（200）**：更新后的设备记录。写入操作日志 `device.boot_firmware`（含新旧值与来源地址）。
+
+**错误**：MAC 非法 `400`；请求体非法 `422`；未知设备 `404`；设备已吊销或绑定的 Worker 记录缺失 `409`；dnsmasq 重投影失败 `500`（台账已回滚为原值）。
+
+---
 
 ## POST /devices/{mac}/approve-baseline
 

@@ -13,6 +13,19 @@
 
 ---
 
+## 2026-11-22
+
+### 新增
+
+- **Secure Boot 网络密钥注册（平台注册）**：签名镜像内嵌 `sbenroll` 命令，平台注册窗口开启时经 `GET /boot/phase` 下发注册流程，写入 PK/KEK/db 后向 `GET /devices/enroll-report` 上报并重启；新增 `GET/POST/DELETE /settings/platform-enrollment`（窗口开关与已完成注册的 MAC 清单）。WebUI 设备页提供窗口开关与注册清单；`GET /boot-assets` 的固件能力新增 `sbenroll` 检查项。
+- **WebUI 概览页**：顶部引导链状态条（总体结论、检查数与首跳固件能力，入口进入引导链页），四张统计卡（Worker 就绪、设备池按入池/已绑定/已吊销分类、注册窗口剩余时间与额度、存储节点健康与 nvmet TLS 端口就绪），证明异常与端口未就绪计数（可跳转设备 / Agent 页），最近 10 条操作与刷新按钮；单份台账加载失败时显示对应错误，不再静默按 0 统计。
+- **PXE 首跳固件按设备选择**：设备新增 `boot_firmware` 字段（`snponly`，UEFI SNP，默认；或 `full`，全驱动）。控制面按该字段投影 dnsmasq 静态绑定：`full` 设备写 `MAC,set:full,hostname`，dnsmasq 对同一请求取最后一条匹配的 `dhcp-boot`，full 设备下发全驱动 `ipxe.efi`，其余走 `snponly.efi`。新增 `PUT /devices/{mac}/boot-firmware` 切换（设备已绑定时同步重投影该 Worker 的静态绑定）；`POST /devices` 与 `POST /devices/import` 接受 `boot_firmware`。WebUI 设备注册表单与详情支持选择与切换。
+
+### 变更
+
+- **操作日志读取**：`GET /operations` 新增 `order` 查询参数（`desc` 只取最新一页并按新到旧返回）与 `op` 过滤（按操作类型精确匹配）；过滤均在计 `limit` 之前完成。
+- **引导链资产状态**：`GET /boot-assets` 的 `firmware[]` 改为报告所有 `dhcp-boot` 声明的首跳固件（`tag:efi64` → `snponly.efi`，`tag:full` → `ipxe.efi`），每条新增 `tag` 字段；Boot Chain 面板对多份固件取最差状态。
+
 ## 2026-11-21
 
 ### 新增

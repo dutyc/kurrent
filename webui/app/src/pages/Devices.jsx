@@ -10,9 +10,13 @@ import {
   getRegistrationWindow,
   openRegistrationWindow,
   closeRegistrationWindow,
+  getPlatformEnrollment,
+  openPlatformEnrollment,
+  closePlatformEnrollment,
   getEnforcement,
   setEnforcement,
   approveDeviceBaseline,
+  setDeviceBootFirmware,
   getWorkers,
   batchCreateWorkers,
   getOperations,
@@ -104,6 +108,11 @@ export default function Devices() {
   const [regWindow, setRegWindow] = useState(null) // null = 未加载；{ open, opened_at, ttl_minutes, closes_at, remaining_seconds, max_devices, admitted, remaining_devices, quota_exhausted }
   const [windowBusy, setWindowBusy] = useState(false)
   const [windowError, setWindowError] = useState(null)
+
+  // ===== 平台注册（Secure Boot 密钥网络注册）：窗口开关 + 已注册设备清单 =====
+  const [enrollWindow, setEnrollWindow] = useState(null) // null = 未加载；{ open, opened_at, enrolled: [{ mac, at }] }
+  const [enrollBusy, setEnrollBusy] = useState(false)
+  const [enrollError, setEnrollError] = useState(null)
   const [ttlChoice, setTtlChoice] = useState('30')
   const [maxChoice, setMaxChoice] = useState('') // 放行额度（台），'' = 不限
   const [countdown, setCountdown] = useState(0) // 本地逐秒递减的剩余秒数（以服务端 remaining_seconds 为基准）
@@ -111,6 +120,8 @@ export default function Devices() {
   const [enforcementBusy, setEnforcementBusy] = useState(false)
   const [mismatchOnly, setMismatchOnly] = useState(false)
   const [approveError, setApproveError] = useState(null) // { mac, message }
+  const [firmwareBusy, setFirmwareBusy] = useState(null)
+  const [firmwareError, setFirmwareError] = useState(null) // { mac, message }
   const windowLimits = regWindow?.limits || {}
   const maxDevicesUpper = windowLimits.max_devices ?? DEFAULT_MAX_DEVICES_UPPER
   const maxTtlMinutes = windowLimits.ttl_minutes_max ?? DEFAULT_MAX_TTL_MINUTES
@@ -122,7 +133,7 @@ export default function Devices() {
   const [showRegister, setShowRegister] = useState(false)
   const [registering, setRegistering] = useState(false)
   const [registerError, setRegisterError] = useState(null)
-  const [regForm, setRegForm] = useState({ mac: '', uuid: '', manufacturer: '', product: '', serial: '' })
+  const [regForm, setRegForm] = useState({ mac: '', uuid: '', manufacturer: '', product: '', serial: '', boot_firmware: 'snponly' })
   const [showImport, setShowImport] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importText, setImportText] = useState('')
@@ -189,6 +200,15 @@ export default function Devices() {
     }
   }, [])
 
+  const fetchPlatformEnrollment = useCallback(async () => {
+    try {
+      const res = await getPlatformEnrollment()
+      setEnrollWindow(res)
+    } catch (e) {
+      setEnrollError(e.message)
+    }
+  }, [])
+
   // 复制 MAC 到剪贴板（1.5s 内显示 ✓ 反馈；剪贴板不可用时静默忽略）
   const copyMac = async (e, mac) => {
     e.stopPropagation()
@@ -219,7 +239,8 @@ export default function Devices() {
   useEffect(() => {
     fetchRegistrationWindow()
     fetchEnforcement()
-  }, [fetchRegistrationWindow, fetchEnforcement])
+    fetchPlatformEnrollment()
+  }, [fetchRegistrationWindow, fetchEnforcement, fetchPlatformEnrollment])
 
   // 窗口开启期间每秒递减倒计时；归零后重新拉取（后端 TTL 到期懒计算关闭）
   useEffect(() => {
@@ -242,6 +263,13 @@ export default function Devices() {
     }, 10000)
     return () => clearInterval(iv)
   }, [regWindow?.open, fetchRegistrationWindow, fetchDevices, unbindMode, wizardOpen])
+
+  // 平台注册窗口开启期间每 10s 重拉：设备完成注册后自行上报，清单随之增长
+  useEffect(() => {
+    if (!enrollWindow?.open) return undefined
+    const iv = setInterval(fetchPlatformEnrollment, 10000)
+    return () => clearInterval(iv)
+  }, [enrollWindow?.open, fetchPlatformEnrollment])
 
   // 开启注册窗口：窗口开启期间新设备上报可携 TPM AK 自动注册入池（TTL 到期自动关闭；额度用尽即停）
   const handleOpenWindow = async () => {
@@ -279,9 +307,34 @@ export default function Devices() {
     }
   }
 
+  // 开启平台注册窗口：未注册机器下次引导写入 Secure Boot 密钥并重启
+  const handleOpenEnroll = async () => {
+    setEnrollBusy(true)
+    setEnrollError(null)
+    try {
+      setEnrollWindow(await openPlatformEnrollment())
+    } catch (e) {
+      setEnrollError(e.message)
+    } finally {
+      setEnrollBusy(false)
+    }
+  }
+
+  // 关闭平台注册窗口：引导脚本不再下发注册流程，已注册设备与清单保留
+  const handleCloseEnroll = async () => {
+    setEnrollBusy(true)
+    setEnrollError(null)
+    try {
+      setEnrollWindow(await closePlatformEnrollment())
+    } catch (e) {
+      setEnrollError(e.message)
+    } finally {
+      setEnrollBusy(false)
+    }
+  }
+
   // 切换 TPM 证明强制开关：开启后 /boot-vars 只向通过证明的已绑定设备下发
-  const handleToggleEnforcement = async () => {
-    setEnforcementBusy(true)
+  const handleToggleEnforcement = async () => {    setEnforcementBusy(true)
     setWindowError(null)
     try {
       const res = await setEnforcement(!enforcement)
@@ -301,6 +354,20 @@ export default function Devices() {
       await fetchDevices()
     } catch (e) {
       setApproveError({ mac, message: e.message })
+    }
+  }
+
+  // 切换设备首跳固件（snponly / full）：已绑定时后端同步重投影 DHCP 标签
+  const handleSetFirmware = async (mac, bootFirmware) => {
+    setFirmwareBusy(mac)
+    setFirmwareError(null)
+    try {
+      await setDeviceBootFirmware(mac, bootFirmware)
+      await fetchDevices()
+    } catch (e) {
+      setFirmwareError({ mac, message: e.message })
+    } finally {
+      setFirmwareBusy(null)
     }
   }
 
@@ -360,13 +427,13 @@ export default function Devices() {
     e.preventDefault()
     setRegistering(true)
     setRegisterError(null)
-    const body = { mac: regForm.mac.trim() }
+    const body = { mac: regForm.mac.trim(), boot_firmware: regForm.boot_firmware }
     ;['uuid', 'manufacturer', 'product', 'serial'].forEach((k) => {
       if (regForm[k].trim()) body[k] = regForm[k].trim()
     })
     try {
       await createDevice(body)
-      setRegForm({ mac: '', uuid: '', manufacturer: '', product: '', serial: '' })
+      setRegForm({ mac: '', uuid: '', manufacturer: '', product: '', serial: '', boot_firmware: 'snponly' })
       setShowRegister(false)
       await fetchDevices()
     } catch (err) {
@@ -723,6 +790,16 @@ export default function Devices() {
               name="serial"
               value={regForm.serial}
               onChange={(e) => setRegForm((p) => ({ ...p, serial: e.target.value }))}
+            />
+            <Select
+              label={t('devices.bootFirmware.label')}
+              name="boot_firmware"
+              value={regForm.boot_firmware}
+              onChange={(e) => setRegForm((p) => ({ ...p, boot_firmware: e.target.value }))}
+              options={[
+                { value: 'snponly', label: t('devices.bootFirmware.snponly') },
+                { value: 'full', label: t('devices.bootFirmware.full') },
+              ]}
             />
           </div>
           {registerError && <p className="create-error">{registerError}</p>}
@@ -1178,6 +1255,48 @@ export default function Devices() {
         {windowError && <span className="workers-toolbar-error">{windowError}</span>}
       </div>
 
+      {/* 平台注册面板：窗口开启期间未注册机器经网络写入 Secure Boot 密钥；清单由设备自行上报 */}
+      <div className="enroll-panel">
+        <div className="enroll-head">
+          <span className="reg-window-title">{t('devices.platformEnroll.title')}</span>
+          <Badge variant={enrollWindow?.open ? 'ok' : 'default'}>
+            {enrollWindow?.open
+              ? t('devices.platformEnroll.open')
+              : t('devices.platformEnroll.closed')}
+          </Badge>
+          <span className="enroll-count" title={t('devices.platformEnroll.countHint')}>
+            {t('devices.platformEnroll.count', { n: enrollWindow?.enrolled?.length ?? 0 })}
+          </span>
+          <div className="enroll-actions">
+            {enrollWindow?.open ? (
+              <Button variant="danger" onClick={handleCloseEnroll} disabled={enrollBusy}>
+                {t('devices.platformEnroll.closeBtn')}
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={handleOpenEnroll} disabled={enrollBusy}>
+                {t('devices.platformEnroll.openBtn')}
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="enroll-hint">
+          {enrollWindow?.open
+            ? t('devices.platformEnroll.openHint')
+            : t('devices.platformEnroll.hint')}
+        </p>
+        {enrollError && <span className="workers-toolbar-error">{enrollError}</span>}
+        {enrollWindow?.enrolled?.length > 0 && (
+          <div className="enroll-list">
+            {enrollWindow.enrolled.map((item) => (
+              <div className="enroll-row" key={item.mac}>
+                <code>{item.mac}</code>
+                <span>{fmtTime(item.at)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="workers-toolbar">
         <Select
           label=""
@@ -1338,6 +1457,32 @@ export default function Devices() {
                     <span className="dd-label">{t('devices.lastSeen')}</span>
                     <span>{d.last_seen ? d.last_seen.replace('T', ' ').slice(0, 19) : '—'}</span>
                   </div>
+                  <div className="devices-detail-item">
+                    <span className="dd-label">{t('devices.bootFirmware.label')}</span>
+                    <span className="firmware-switch-cell">
+                      <Badge variant={d.boot_firmware === 'full' ? 'partial' : 'default'}>
+                        {d.boot_firmware === 'full'
+                          ? t('devices.bootFirmware.full')
+                          : t('devices.bootFirmware.snponly')}
+                      </Badge>
+                      {d.state !== 'revoked' && (
+                        <Button
+                          variant="ghost"
+                          disabled={firmwareBusy === d.mac}
+                          onClick={() =>
+                            handleSetFirmware(d.mac, d.boot_firmware === 'full' ? 'snponly' : 'full')
+                          }
+                        >
+                          {d.boot_firmware === 'full'
+                            ? t('devices.bootFirmware.switchToSnponly')
+                            : t('devices.bootFirmware.switchToFull')}
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                  {firmwareError?.mac === d.mac && (
+                    <span className="attest-error">{firmwareError.message}</span>
+                  )}
                   {d.identity?.ak_public ? (
                     <>
                       <div className="devices-detail-item">

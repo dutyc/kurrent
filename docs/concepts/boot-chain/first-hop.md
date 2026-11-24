@@ -4,15 +4,15 @@
 
 ## 取地址与下载
 
-设备经 DHCP 取得地址与 `next-server`，再从 TFTP 下载首跳 `snponly.efi`。TFTP 根只暴露这个文件与 `boot.ipxe` 指针两份，不提供其他内容，把明文可下载的面收到最小。
+设备经 DHCP 取得地址与 `next-server`，再从 TFTP 下载首跳固件。控制面按设备的 `boot_firmware` 在 DHCP 里选中其一：`snponly.efi`（UEFI SNP，默认）或 `ipxe.efi`（全驱动，给无 UEFI SNP 的网卡）。TFTP 根只暴露这两份首跳固件与 `boot.ipxe` 指针，不提供其他内容，把明文可下载的面收到最小。
 
-替换 `snponly.efi` 后需要重启 dnsmasq 容器：容器以文件级挂载该文件，挂载固定的是原文件的 inode，直接覆盖文件内容不会反映到容器里。
+替换首跳固件后需要重启 dnsmasq 容器：容器以文件级挂载这些文件，挂载固定的是原文件的 inode，直接覆盖文件内容不会反映到容器里。
 
 ## 验签
 
 UEFI 用目标机 `db`（固件内置的受信签名证书库）中的站点证书验证 `snponly.efi`。镜像未签名、签名不符或被篡改时，固件直接拒绝执行，网络引导不会开始。
 
-站点证书属于一次性预置：把证书写入目标机 `db` 是部署时执行一次的步骤，不随每次启动重复，也不依赖控制面在线。预置流程见 [Secure Boot 预置](../../firmware/secure-boot.md)。
+站点证书属于一次性预置：首次网络启动时由平台注册窗口将 PK / KEK / db 写入固件，不随每次启动重复，也不依赖控制面在线。写入流程见 [Secure Boot 预置](../../firmware/secure-boot.md)。
 
 ## 内嵌脚本与 boot CA
 

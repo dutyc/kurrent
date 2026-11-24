@@ -1,4 +1,5 @@
-"""引导链端点（不鉴权）：healthz / boot-vars / devices/report / devices/challenge 及注入投影逻辑。"""
+"""引导链端点（不鉴权）：healthz / boot/phase / boot-vars / devices/report /
+devices/enroll-report / devices/challenge 及注入投影逻辑。"""
 
 import logging
 from typing import Any
@@ -10,13 +11,17 @@ from .. import audit, ratelimit, runtime_status
 from ..principal import PrincipalRouter, principal
 
 from ..config import settings
-from ..stores import agents, credentials, devices, dnsmasq, record, store
+from ..stores import (agents, credentials, devices, dnsmasq, record, runtime_settings,
+                      store)
 from ..trust import (
+    PLATFORM_ENROLLED_KEY,
     admission_allowed,
     device_for_boot,
     issue_nonce,
     parse_ak_name,
     parse_ak_public,
+    platform_enrolled,
+    platform_window_open,
     verify_attestation,
     window_open,
 )
@@ -56,6 +61,27 @@ def _enforce_rate(scope: str, request: Request, route: str = "") -> None:
                 client_ip=source)
     raise HTTPException(status_code=429, detail="too many requests",
                         headers={"Retry-After": str(int(retry))})
+
+
+@router.get("/boot/phase")
+@principal("anonymous")
+def boot_phase(request: Request):
+    """平台密钥注册阶段脚本（不鉴权、限速）：平台注册窗口开启时下发 sbenroll，
+    关闭时返回空脚本（#!ipxe 空体）继续引导。
+
+    脚本不含重启：是否重启由 /devices/enroll-report 的返回决定，只有首次注册成功
+    才重启（重启后固件验签进入生产），已注册设备继续引导，避免窗口期重复重启。
+    """
+    _enforce_rate("boot_phase", request, route="/boot/phase")
+    if not platform_window_open():
+        return Response("#!ipxe\n", media_type="text/plain")
+    script = (
+        "#!ipxe\n"
+        "sbenroll\n"
+        "chain --autofree ${https-url}devices/enroll-report"
+        "?mac=${netX/mac}&result=${sbenroll-result} ||\n"
+    )
+    return Response(script, media_type="text/plain")
 
 
 @router.get("/boot-vars")
@@ -200,6 +226,33 @@ def device_report(
         record("device.register", "ok", mac=normalized, source="ipxe", client=client_host(request))
         record("device.ak.register", "ok", mac=normalized)
     return Response("#!ipxe\n", media_type="text/plain", status_code=200)
+
+
+@router.get("/devices/enroll-report")
+@principal("anonymous")
+def device_enroll_report(request: Request, mac: str, result: str):
+    """平台密钥注册结果上报（不鉴权、限速）：记审计并登记已完成注册的 MAC。
+
+    result 取值 ok / foreign / failed（固件 sbenroll 命令的结果）。首次 ok 记录台账并
+    返回 reboot 脚本（重启后固件验签进入生产）；重复上报或非 ok 返回空脚本继续引导。
+    登记不代表授权：设备身份与准入仍由 AK、Secure Boot 状态与注册窗口决定。
+    """
+    _enforce_rate("enroll_report", request, route="/devices/enroll-report")
+    normalized = normalize_boot_mac(mac)
+    if not normalized or result not in {"ok", "foreign", "failed"}:
+        return Response("#!ipxe\n", media_type="text/plain")
+    record("platform.enroll", "ok" if result == "ok" else "failed",
+           mac=normalized, result=result, client=client_host(request))
+    if result != "ok":
+        return Response("#!ipxe\n", media_type="text/plain")
+    reboot = False
+    with runtime_settings.locked():
+        enrolled = platform_enrolled()
+        if normalized not in enrolled:
+            enrolled[normalized] = {"at": now_iso()}
+            runtime_settings.set(PLATFORM_ENROLLED_KEY, enrolled)
+            reboot = True
+    return Response("#!ipxe\nreboot\n" if reboot else "#!ipxe\n", media_type="text/plain")
 
 
 @router.get("/devices/challenge")

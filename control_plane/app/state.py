@@ -1,3 +1,4 @@
+import collections
 import contextvars
 import datetime as _dt
 import json
@@ -217,23 +218,48 @@ class OperationLog:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             return entry
 
-    def read(self, since: int = 0, limit: int = 1000) -> dict[str, Any]:
+    def read(self, since: int = 0, limit: int = 1000, desc: bool = False,
+             mac: str | None = None, op: str | None = None) -> dict[str, Any]:
+        """游标读取（mac/op 可选：过滤后再计 limit）。desc=True 取最新一页（新到旧），
+        该模式不用于向后翻页，next_cursor 为返回页的首条（最新）id。"""
+        def keep(entry: dict[str, Any]) -> bool:
+            return (entry.get("id", 0) > since
+                    and (mac is None or entry.get("mac") == mac)
+                    and (op is None or entry.get("op") == op))
+
         entries: list[dict[str, Any]] = []
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("id", 0) > since:
-                        entries.append(entry)
-                        if len(entries) >= limit:
-                            break
-        return {"next_cursor": entries[-1]["id"] if entries else since, "entries": entries}
+                if desc:
+                    tail: collections.deque[dict[str, Any]] = collections.deque(maxlen=limit)
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if keep(entry):
+                            tail.append(entry)
+                    entries = list(reversed(tail))
+                else:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if keep(entry):
+                            entries.append(entry)
+                            if len(entries) >= limit:
+                                break
+        if not entries:
+            return {"next_cursor": since, "entries": entries}
+        # 升序游标取页尾（继续向后读）；降序取页首（本页最新）
+        return {"next_cursor": entries[0]["id"] if desc else entries[-1]["id"], "entries": entries}
 
 
 def _load_yaml(path: Path, default: dict[str, Any]) -> dict[str, Any]:

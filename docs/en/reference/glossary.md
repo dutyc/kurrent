@@ -14,6 +14,7 @@
 - **Cold migration** — Power off device A, switch the binding to B, and boot the same Worker's system disk on B.
 - **Drain** — Setting a node's `enabled` to false: no new disks, existing disks keep serving.
 - **Registration window** — A time window in which unknown devices may register into the pool, bounded by TTL and device quota.
+- **Platform enrollment** — Writing the platform keys (PK / KEK / db) into firmware on the first network boot; runs only while the platform enrollment window is open, then reboots into verified boot.
 - **Enrollment** — A component exchanging a bootstrap token for a client certificate and registering with the control plane.
 - **Bootstrap token** — A single-use bootstrap credential bound to a node identity, used for node enrollment.
 - **Management token** — A management-plane Bearer token for scripts and WebUI sign-in; only a digest is stored.
@@ -33,7 +34,7 @@
 - **SAN boot** — Booting directly from a network storage disk; implemented here with iPXE `sanboot`.
 - **iPXE** — The open-source network boot firmware used by this project.
 - **PXE** — Preboot Execution Environment; devices obtain the first-hop firmware over DHCP + TFTP.
-- **TFTP** — The first-hop file transfer protocol; currently serves only `snponly.efi` and the `boot.ipxe` pointer.
+- **TFTP** — The first-hop file transfer protocol; serves only the first-stage firmware (`snponly.efi` / `ipxe.efi`) and the `boot.ipxe` pointer.
 - **`snponly`** — The iPXE first-hop artifact used by the main repository by default.
 - **NBFT** — NVMe Boot Firmware Table, the discovery table describing network boot targets.
 - **NBCT** — NVMe Boot Credentials Table, the session credential table handed from firmware to initramfs.

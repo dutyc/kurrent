@@ -16,12 +16,12 @@ Boot-chain status (requires management authentication: `human` or `automation`).
 
 | Field | Description |
 |---|---|
-| `firmware[]` | UEFI firmware declared by `dhcp-boot=tag:efi64`: `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
+| `firmware[]` | First-hop UEFI firmware declared by `dhcp-boot` (`tag:efi64` → `snponly.efi`, `tag:full` → `ipxe.efi`): `tag` (`efi64` / `full`), `mode` (always `uefi`), `label`, `file`, `path`, `host_path`, `status` (ok/incomplete/missing/empty/rejected), `size`, `mtime`; when readable, also `version` and `capabilities[]` (`id`/`label`/`present`) |
 | `stage2[]` | Script-chain files (`boot.ipxe`, `boot.ipxe.cfg`, `menu.ipxe`): `file`, `path`, `host_path`, `status`, `size`, `mtime` |
 | `menu` | `status` (ok/unavailable) and `items` (selectable item count, skipping `--gap` lines) |
 | `secureboot` | Optional Secure Boot artifacts: `present`, `status` (ok/incomplete/missing), `artifact`, `path`, `artifact_sha256`, `artifact_size`, `manifest_present`, `manifest_matches`, `signer`, `built_at`, `boot_https_port`, `port_matches`, `boot_ca_present`, `boot_ca_sha256`, `boot_ca_matches` |
 
-`status=incomplete` means the firmware file exists but lacks any of `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `TOFU` — stock iPXE cannot complete TPM attestation either. `status=empty` is a zero-byte file, `missing` means the file does not exist, and `rejected` means the path escapes the tftp root (the control plane refuses it and never reads it). `host_path` is the host path relative to the deployment root (`tftp/...`), used when adding a missing file. `menu.status=ok` requires at least one `menu` section and one non-`--gap` `item`. `secureboot.status=ok` requires the signed image, a matching manifest hash, a boot HTTPS port baked into the image that equals the deployed `KURRENT_BOOT_HTTPS_PORT`, a present boot CA certificate, and a manifest CA fingerprint that matches the current control-plane boot CA (a wrong port cannot be reached, a wrong anchor is refused by the firmware); without `tftp/secureboot/` artifacts `present=false` and the other checks are unaffected.
+`status=incomplete` means the firmware file exists but lacks any of `HTTPS` / `efi_nvs` / `akgen` / `akpub` / `quote` / `sbenroll` / `TOFU` — stock iPXE cannot complete TPM attestation or platform enrollment either. `status=empty` is a zero-byte file, `missing` means the file does not exist, and `rejected` means the path escapes the tftp root (the control plane refuses it and never reads it). `host_path` is the host path relative to the deployment root (`tftp/...`), used when adding a missing file. `menu.status=ok` requires at least one `menu` section and one non-`--gap` `item`. `secureboot.status=ok` requires the signed image, a matching manifest hash, a boot HTTPS port baked into the image that equals the deployed `KURRENT_BOOT_HTTPS_PORT`, a present boot CA certificate, and a manifest CA fingerprint that matches the current control-plane boot CA (a wrong port cannot be reached, a wrong anchor is refused by the firmware); without `tftp/secureboot/` artifacts `present=false` and the other checks are unaffected.
 
 ### curl
 
@@ -387,3 +387,46 @@ set nonce 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 3. `GET /boot-vars?mac=&hostname=&nonce=&quote=&quote_sig=` → the quote structure is checked (magic `0xFF544347`, type `TPM_ST_ATTEST_QUOTE`, PCR selection fixed to 0/2/4/7 with SHA-256 only), then the AK signature, then `extraData == nonce` and nonce consumption, and finally the PCR digest against the platform baseline; credentials are served only when all pass (injection condition #4, see this section). Any failure → empty script (deny, audited as `boot_vars.credential` and `device.attest`, reasons see this section).
 
 Quote validation runs before the nonce is consumed: a malformed quote or bad signature does not burn the nonce, so the device can correct and retry; replaying a consumed nonce returns `nonce_invalid`.
+
+### Platform key enrollment (/boot/phase, /devices/enroll-report, /settings/platform-enrollment)
+
+The signed image's embedded script requests `/boot/phase` early in boot. While the platform enrollment window is open, the control plane returns an enrollment script: the firmware runs `sbenroll` to write the Secure Boot keys (PK / KEK / db, embedded at build time) and then reports the result to `/devices/enroll-report`. Only the first successful enrollment reboots (the machine then boots the same image with signature verification); running it again on an enrolled machine changes nothing and boot continues. When the window is closed, `/boot/phase` returns an empty script (`#!ipxe`) and boot continues.
+
+Precondition: the target must be in Setup Mode or have Secure Boot disabled. Machines locked to vendor keys cannot be enrolled this way and must use the vendor's own management flow. During the window, any host on the same segment could enroll its own keys on a Setup Mode machine, so enrollment must run on a controlled network segment.
+
+#### GET /boot/phase
+
+**No authentication**; rate-limited per source IP (default 240/min, override with `KURRENT_CP_RATE_LIMIT_BOOT_PHASE`).
+
+| Window state | Response (`text/plain`) |
+|---|---|
+| Closed | `#!ipxe` (empty script; boot continues) |
+| Open | iPXE script containing `sbenroll` and the report step (no reboot; the report decides) |
+
+#### GET /devices/enroll-report
+
+**No authentication**; rate-limited per source IP (default 60/min, override with `KURRENT_CP_RATE_LIMIT_ENROLL_REPORT`).
+
+| Parameter | Required | Description |
+|---|---|---|
+| `mac` | Yes | MAC address (normalized as in `/boot-vars`) |
+| `result` | Yes | `sbenroll` result: `ok` / `foreign` (another PK installed) / `failed` |
+
+- Every report writes an audit entry `platform.enroll` (`ok` → `ok`, otherwise `failed`, with the cause kept in `result`).
+- First `ok`: the MAC is recorded as platform-enrolled (`state/settings.json`) and the response is `#!ipxe` + `reboot`.
+- Repeated `ok` or non-`ok`: empty script; boot continues (no reboot loop on machines locked to vendor keys).
+- Being recorded grants nothing: admission still depends on the TPM AK, `sb=1`, and the registration window.
+
+#### GET/POST/DELETE /settings/platform-enrollment
+
+Platform enrollment window switch and enrolled list (management endpoints, `Authorization: Bearer` required).
+
+- `GET`: `{"open": bool, "opened_at": str|null, "enrolled": [{"mac": str, "at": str}]}`; `enrolled` is newest first and survives window closure.
+- `POST`: open the window (201); already open → 409.
+- `DELETE`: close the window; not open → 409.
+- Open/close is audited as `settings.platform_enrollment`.
+
+```bash
+curl -X POST "$BASE_URL/settings/platform-enrollment" \
+  -H "Authorization: Bearer $TOKEN"
+```

@@ -87,6 +87,53 @@ test('固件缺失为阻塞，能力缺口为降级', () => {
   assert.deepEqual(check.detail.missing, ['挑战签名'])
 })
 
+test('两份首跳固件：任一缺失阻塞，能力缺口降级', () => {
+  const ipxe = {
+    file: 'ipxe.efi',
+    tag: 'full',
+    label: 'UEFI (all drivers)',
+    status: 'ok',
+    version: '2.0.0+ (ge6e51)',
+    host_path: 'tftp/ipxe.efi',
+    capabilities: [
+      { id: 'https', label: 'HTTPS 引导', present: true },
+      { id: 'sign', label: '挑战签名', present: true },
+    ],
+  }
+  const two = { ...ASSETS, firmware: [ASSETS.firmware[0], ipxe] }
+  const check = byId(buildBootChecks({ assets: two, now: NOW })).firmware
+  assert.equal(check.status, 'normal')
+  assert.deepEqual(check.detail.firmwares.map((it) => it.file), ['snponly.efi', 'ipxe.efi'])
+  assert.deepEqual(
+    check.detail.firmwares.map((it) => it.capabilities.map((cap) => cap.id)),
+    [['https', 'sign'], ['https', 'sign']]
+  )
+  const parts = evidenceParts(check, (key) => key, 'zh-CN').map((part) => part.text)
+  assert.ok(parts.includes('snponly.efi (2/2) · ipxe.efi (2/2)'))
+
+  const missing = { ...two, firmware: [ASSETS.firmware[0], { ...ipxe, status: 'missing' }] }
+  assert.equal(byId(buildBootChecks({ assets: missing, now: NOW })).firmware.status, 'blocked')
+
+  const gap = { ...two, firmware: [ASSETS.firmware[0], { ...ipxe, status: 'incomplete' }] }
+  assert.equal(byId(buildBootChecks({ assets: gap, now: NOW })).firmware.status, 'degraded')
+
+  const gapIpxe = {
+    ...ipxe,
+    status: 'incomplete',
+    capabilities: [
+      { id: 'https', label: 'HTTPS 引导', present: true },
+      { id: 'sign', label: '挑战签名', present: false },
+    ],
+  }
+  const mixed = byId(buildBootChecks({
+    assets: { ...two, firmware: [ASSETS.firmware[0], gapIpxe] },
+    now: NOW,
+  })).firmware
+  assert.equal(mixed.status, 'degraded')
+  assert.deepEqual(mixed.detail.firmwares[0].missing, [])
+  assert.deepEqual(mixed.detail.firmwares[1].missing, ['挑战签名'])
+})
+
 test('脚本链缺失为阻塞，菜单不可解析为降级，HTTPS 取回失败为阻塞', () => {
   const broken = {
     ...ASSETS,

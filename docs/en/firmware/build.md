@@ -21,7 +21,11 @@ BOOT_CA_CERT=<state>/control-plane/state/pki/ca/boot/ca.crt \
 
 A signed build requires a signing key, a signing certificate and the boot CA certificate. The port and controller address may be omitted: the port then defaults to `4443`, while the address comes from the DHCP `next-server`; set `CONTROLLER_IP` only when the address must be fixed inside the image.
 
-`build-sb.sh` builds on the ordinary build, embeds the static scripts, the boot CA and the boot HTTPS port, and produces a first stage signed with `sbsign`. Build inputs, the manifest and provisioning steps are in [Secure Boot Provisioning](./secure-boot.md).
+`build-sb.sh` builds on the ordinary build, embeds the static scripts, the boot CA and the boot HTTPS port, and produces a first stage signed with `sbsign`.
+
+To write the platform keys on the device's first network boot, also provide `SB_PK_KEY` / `SB_PK_CERT` / `SB_KEK_KEY` / `SB_KEK_CERT` (as a group): the script generates the signed PK / KEK / db descriptors for `sbenroll`, and db automatically includes the artifact signing certificate and `SB_MS_UEFI_CA_CERT` (default `build/certs/MicrosoftUEFI-CA-2011.pem`). Without this group the image carries no enrollment data and cannot perform platform enrollment.
+
+Build inputs, the manifest and provisioning steps are in [Secure Boot Provisioning](./secure-boot.md).
 
 The ordinary build `./build/build.sh` does not sign; its artifacts are for local debugging and research only, and Secure Boot targets refuse to load them.
 
@@ -60,9 +64,11 @@ Selection rules:
 | No PXE entry; USB/ESP boot required | `direct-uefi/ipxe.efi` |
 | NIC initialization fails | The matching `-debug` artifact |
 
-The main repository uses `tftp/snponly.efi` by default. Different models may need different first-stage artifacts, while the main branch serves only `snponly.efi` and does not switch per device; machines that need `pxe-uefi/ipxe.efi` cannot share a PXE segment with the default first stage, so unify the first-stage artifact before deployment.
+The main repository uses `tftp/snponly.efi` by default. Different models may need different first-stage artifacts: the control plane selects `snponly.efi` (default) or the all-driver `tftp/ipxe.efi` per device through DHCP `boot_firmware`, so both can coexist on one PXE segment. The all-driver first hop uses the existing `direct-uefi/ipxe.efi`: it embeds `auto.ipxe` (DHCP, then `tftp://${next-server}/boot.ipxe`), so the same script serves both as a TFTP first hop and as local-media boot.
 
-The table above describes `build.sh`; at deployment the first stage is replaced by `dist/secureboot/snponly-sb.efi` from `build-sb.sh`, with the same form as `pxe-uefi/snponly.efi`.
+`tftp/*.efi` is not committed; place the files at deployment time: `pxe-uefi/snponly.efi` → `tftp/snponly.efi`, `direct-uefi/ipxe.efi` → `tftp/ipxe.efi`. Both are in dnsmasq's file-level mounts, so neither may be missing.
+
+The table above describes `build.sh`; at deployment the first stages are replaced by `build-sb.sh` artifacts with the same form as `pxe-uefi/snponly.efi`: `dist/secureboot/snponly-sb.efi` over `tftp/snponly.efi`, and `dist/secureboot/ipxe-sb.efi` (built with `KURRENT_SB_TARGET=ipxe`) over `tftp/ipxe.efi`.
 
 ```bash
 cd dist

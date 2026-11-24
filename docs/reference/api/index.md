@@ -19,7 +19,7 @@ title: "API 参考"
 
 它不直接配置存储后端，也不托管引导静态文件：
 
-- `menu.ipxe` 与引导脚本存放在 `tftp/`，由 nginx 经 HTTPS 分发；TFTP 只提供首跳 `snponly.efi` 与 `boot.ipxe` 指针。
+- `menu.ipxe` 与引导脚本存放在 `tftp/`，由 nginx 经 HTTPS 分发；TFTP 只提供首跳固件（`snponly.efi` / `ipxe.efi`）与 `boot.ipxe` 指针。
 - 菜单的默认项、超时与系统标签由控制面经 `/boot-vars` 投影。
 - 存储后端（nvmet configfs 或 iSCSI 的 `tgtadm`/`targetcli`）由节点 Agent 在宿主上配置。
 
@@ -59,8 +59,10 @@ title: "API 参考"
 | `GET` | `/sessions` | 列出未过期会话（管理员，见[身份与 PKI](./identity.md)） |
 | `DELETE` | `/sessions/{session_id}` | 逐个吊销会话（管理员，见[身份与 PKI](./identity.md)） |
 | `DELETE` | `/sessions` | 全部下线：清空登记并递增 epoch（管理员，见[身份与 PKI](./identity.md)） |
+| `GET` | `/boot/phase` | 平台注册阶段脚本：窗口开启下发密钥注册流程，不鉴权（见[引导链](./boot.md)） |
 | `GET` | `/boot-vars` | iPXE 启动变量动态注入，不鉴权（见[引导与设备准入](./boot.md)） |
 | `GET` | `/devices/report` | iPXE 设备信息上报（不鉴权，11 字段指纹 + TPM AK，见[设备池](./devices.md)） |
+| `GET` | `/devices/enroll-report` | 平台密钥注册结果上报（不鉴权，限速，见[引导链](./boot.md)） |
 | `GET` | `/devices/challenge` | 一次性 nonce 签发（不鉴权，挑战-响应，见[引导链](./boot.md)） |
 | `POST` | `/devices/{mac}/approve-baseline` | 批准设备最近一次上报的 PCR 基线（管理员，见[设备池](./devices.md)） |
 | `GET` | `/devices` | 设备池列表（state 过滤，见[设备池](./devices.md)） |
@@ -78,6 +80,9 @@ title: "API 参考"
 | `DELETE` | `/settings/registration-window` | 提前关闭注册窗口（见[引导链](./boot.md)） |
 | `GET` | `/settings/enforcement` | 查询 TPM 证明强制开关（见[引导链](./boot.md)） |
 | `PUT` | `/settings/enforcement` | 切换 TPM 证明强制开关（见[引导链](./boot.md)） |
+| `GET` | `/settings/platform-enrollment` | 查询平台注册窗口与已注册设备清单（见[引导链](./boot.md)） |
+| `POST` | `/settings/platform-enrollment` | 开启平台注册窗口（见[引导链](./boot.md)） |
+| `DELETE` | `/settings/platform-enrollment` | 关闭平台注册窗口（见[引导链](./boot.md)） |
 | `GET` | `/config` | 运行态声明配置与派生件一致性（见[基础与状态](./foundation.md)） |
 | `GET` | `/agents` | 查询 Agent 列表与能力（见[Agent 与存储](./agents.md)） |
 | `POST` | `/agents` | 注册新 Agent（写入 agents.yml，重复 id 返回 409，见[Agent 与存储](./agents.md)） |

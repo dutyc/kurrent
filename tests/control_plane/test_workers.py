@@ -211,6 +211,19 @@ class TestWorkerMac:
         res = client.put("/workers/worker-01/mac", json={"mac": MAC_C}, headers=auth_headers)
         assert res.status_code == 409
 
+    def test_update_mac_projects_full_tag_for_new_device(self, client, auth_headers):
+        """换绑到 full 设备时，dnsmasq 投影带 set:full 标签（首跳固件随设备走）。"""
+        from control_plane.app.config import settings
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        client.post("/devices", json={"mac": MAC_B, "boot_firmware": "full"}, headers=auth_headers)
+        client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
+
+        res = client.put("/workers/worker-01/mac", json={"mac": MAC_B}, headers=auth_headers)
+        assert res.status_code == 200, res.text
+        hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+        assert f"{MAC_B},set:full,worker-01" in hosts
+        assert MAC_A not in hosts
+
 
 class TestWorkerDisks:
     """系统盘：建盘（mock agent）/ 批量建盘 / 删盘 / default_disk 联动。"""

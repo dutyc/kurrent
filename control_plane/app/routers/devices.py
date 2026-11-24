@@ -8,7 +8,8 @@ from fastapi import Depends, HTTPException, Query, Request
 
 from ..attestation import PCR_SELECTION
 from ..auth import authenticate, authorize_request
-from ..models import BatchBindRequest, BindPair, CreateDeviceRequest, ImportDevicesRequest
+from ..models import (BatchBindRequest, BindPair, CreateDeviceRequest, ImportDevicesRequest,
+                      SetDeviceBootFirmwareRequest)
 from ..stores import dnsmasq, devices, record, store
 from ..utils import canonical_mac, clean_str, client_host, now_iso
 
@@ -32,9 +33,7 @@ def list_devices(state: str = Query("all")):
     for mac, record_ in sorted(data["devices"].items()):
         if state != "all" and record_.get("state") != state:
             continue
-        item = copy.deepcopy(record_)
-        item["mac"] = mac
-        items.append(item)
+        items.append(_device_entry(mac, record_))
     return items
 
 
@@ -46,8 +45,14 @@ def get_device(mac: str):
     record_ = data["devices"].get(mac)
     if not record_:
         raise HTTPException(404, f"device not found: {mac}")
+    return _device_entry(mac, record_)
+
+
+def _device_entry(mac: str, record_: dict[str, Any]) -> dict[str, Any]:
+    """设备记录投影：存量记录补默认首跳固件，保持字段契约一致。"""
     item = copy.deepcopy(record_)
     item["mac"] = mac
+    item.setdefault("boot_firmware", "snponly")
     return item
 
 
@@ -69,6 +74,7 @@ def create_device(req: CreateDeviceRequest, request: Request):
             "identity": None,
             "attestation": {"state": "unproven", "last_at": None, "last_reason": None},
             "source": "manual",
+            "boot_firmware": req.boot_firmware,
             "fingerprint": {k: v for k, v in {
                 "manufacturer": clean_str(req.manufacturer),
                 "product": clean_str(req.product),
@@ -115,6 +121,7 @@ def import_devices(req: ImportDevicesRequest, request: Request):
                 "identity": None,
                 "attestation": {"state": "unproven", "last_at": None, "last_reason": None},
                 "source": "manual",
+                "boot_firmware": entry.boot_firmware,
                 "fingerprint": {k: v for k, v in {
                     "manufacturer": clean_str(entry.manufacturer),
                     "product": clean_str(entry.product),
@@ -404,15 +411,57 @@ def approve_device_baseline(mac: str, request: Request):
     return approved
 
 
+@router.put("/devices/{mac}/boot-firmware")
+def set_device_boot_firmware(mac: str, req: SetDeviceBootFirmwareRequest, request: Request):
+    """切换设备首跳固件（snponly / full）。写入设备台账；设备已绑定时重投影该 Worker 的
+    dnsmasq dhcp-host 标签（full → set:full），下次 DHCP 首跳即按新固件下发。"""
+    mac = canonical_mac(mac)
+    with store.locked(), devices.locked():
+        data = devices.load()
+        dev = data["devices"].get(mac)
+        if not dev:
+            raise HTTPException(404, f"device not found: {mac}")
+        if dev.get("state") == "revoked":
+            raise HTTPException(409, f"device revoked: {mac}")
+        hostname = None
+        if dev.get("state") == "bound" and dev.get("bound_worker_id"):
+            worker_id = dev["bound_worker_id"]
+            worker = store.load_workers()["workers"].get(worker_id)
+            if not worker:
+                raise HTTPException(409, f"device bound to unknown worker: {mac} (worker={worker_id})")
+            hostname = str(worker["hostname"])
+        previous = dev.get("boot_firmware", "snponly")
+        dev["boot_firmware"] = req.boot_firmware
+        devices.save(data)
+
+    if hostname:
+        try:
+            dnsmasq.set_binding(mac, hostname, _boot_tag(req.boot_firmware))
+        except Exception as exc:
+            with devices.locked():
+                data = devices.load()
+                if data["devices"].get(mac) and data["devices"][mac].get("boot_firmware") == req.boot_firmware:
+                    data["devices"][mac]["boot_firmware"] = previous
+                    devices.save(data)
+            raise HTTPException(500, f"dnsmasq binding failed: {exc}") from exc
+
+    record("device.boot_firmware", "ok", mac=mac, boot_firmware=req.boot_firmware,
+           previous=previous, client=client_host(request))
+    return _device_record(mac)
+
+
+def _boot_tag(boot_firmware: str | None) -> str | None:
+    """设备首跳固件 → dnsmasq dhcp-host 标签：full → set:full；snponly（默认）不加标签。"""
+    return "full" if boot_firmware == "full" else None
+
+
 def _device_record(mac: str) -> dict[str, Any]:
     """设备台账记录投影（含 mac 字段）。"""
     data = devices.load()
     record_ = data["devices"].get(mac)
     if not record_:
         raise HTTPException(404, f"device not found: {mac}")
-    item = copy.deepcopy(record_)
-    item["mac"] = mac
-    return item
+    return _device_entry(mac, record_)
 
 
 def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
@@ -472,7 +521,7 @@ def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
                     dnsmasq.remove_hostname(old_hostname)
             if old_device and old_device != mac:
                 dnsmasq.remove_hostname(hostname)
-            dnsmasq.add_binding(mac, hostname)
+            dnsmasq.add_binding(mac, hostname, _boot_tag(dev.get("boot_firmware")))
         except Exception as exc:
             # 3) 失败回滚：恢复台账快照 + 尽力恢复 dnsmasq
             data["devices"] = snapshot["devices"]
