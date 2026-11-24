@@ -45,6 +45,7 @@ const zhSidebar = [
         items: [
           { text: '概览', link: '/concepts/boot-chain' },
           { text: '首跳', link: '/concepts/boot-chain/first-hop' },
+          { text: '引导信任', link: '/concepts/boot-chain/trust' },
           { text: '设备身份', link: '/concepts/boot-chain/device-identity' },
           { text: '数据面', link: '/concepts/boot-chain/data-plane' },
           { text: '交接给内核', link: '/concepts/boot-chain/handover' },
@@ -88,22 +89,13 @@ const zhSidebar = [
     text: '任务',
     collapsed: false,
     items: [
+      { text: '构建签名固件', link: '/tasks/build-firmware' },
+      { text: '交付签名固件', link: '/tasks/deploy-firmware' },
+      { text: '预置目标机信任库', link: '/tasks/enroll-platform-keys' },
       { text: '定制母盘', link: '/tasks/system-disk' },
       { text: '从母盘创建系统盘', link: '/tasks/create-system-disk' },
       { text: '日常运维', link: '/tasks/operations' },
       { text: '故障排查', link: '/tasks/troubleshooting' },
-    ],
-  },
-  {
-    text: '固件',
-    collapsed: false,
-    items: [
-      { text: '固件概述', link: '/firmware/' },
-      { text: '固件组成', link: '/firmware/composition' },
-      { text: '引导信任', link: '/firmware/trust' },
-      { text: '构建', link: '/firmware/build' },
-      { text: '部署与预置', link: '/firmware/deploy' },
-      { text: 'Secure Boot 预置', link: '/firmware/secure-boot' },
     ],
   },
   {
@@ -175,6 +167,7 @@ const enSidebar = [
         items: [
           { text: 'Overview', link: '/en/concepts/boot-chain' },
           { text: 'First Hop', link: '/en/concepts/boot-chain/first-hop' },
+          { text: 'Boot Trust', link: '/en/concepts/boot-chain/trust' },
           { text: 'Device Identity', link: '/en/concepts/boot-chain/device-identity' },
           { text: 'Data Plane', link: '/en/concepts/boot-chain/data-plane' },
           { text: 'Hand-over to the Kernel', link: '/en/concepts/boot-chain/handover' },
@@ -218,22 +211,13 @@ const enSidebar = [
     text: 'Tasks',
     collapsed: false,
     items: [
+      { text: 'Build Signed Firmware', link: '/en/tasks/build-firmware' },
+      { text: 'Deliver Signed Firmware', link: '/en/tasks/deploy-firmware' },
+      { text: 'Provision Target Trust Stores', link: '/en/tasks/enroll-platform-keys' },
       { text: 'Customize a Master Image', link: '/en/tasks/system-disk' },
       { text: 'Create a System Disk from a Master Image', link: '/en/tasks/create-system-disk' },
       { text: 'Operations', link: '/en/tasks/operations' },
       { text: 'Troubleshooting', link: '/en/tasks/troubleshooting' },
-    ],
-  },
-  {
-    text: 'Firmware',
-    collapsed: false,
-    items: [
-      { text: 'Firmware Overview', link: '/en/firmware/' },
-      { text: 'Firmware Composition', link: '/en/firmware/composition' },
-      { text: 'Boot Trust', link: '/en/firmware/trust' },
-      { text: 'Build', link: '/en/firmware/build' },
-      { text: 'Deployment and Provisioning', link: '/en/firmware/deploy' },
-      { text: 'Secure Boot Provisioning', link: '/en/firmware/secure-boot' },
     ],
   },
   {

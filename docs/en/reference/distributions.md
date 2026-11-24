@@ -81,6 +81,6 @@ RHEL 9.x has not been tested. Its 5.14 kernel predates the upstream NVMe/TCP TLS
 ## What's next
 
 - [System Disk Customization](../tasks/system-disk.md)
-- [Firmware Overview](../firmware/index.md)
+- [Build Signed Firmware](../tasks/build-firmware.md)
 - [Firmware Contract](./firmware-contract.md)
 - Firmware distribution matrix: <https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>

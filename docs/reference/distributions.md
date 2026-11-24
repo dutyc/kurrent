@@ -83,6 +83,6 @@ RHEL 9.x 尚未实测；其内核为 5.14 系，NVMe/TCP TLS 是上游 6.7+ 特�
 ## 接下来
 
 - [系统盘定制](../tasks/system-disk.md)
-- [固件概述](../firmware/index.md)
+- [构建签名固件](../tasks/build-firmware.md)
 - [固件契约](./firmware-contract.md)
 - 固件仓库发行版矩阵：<https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>

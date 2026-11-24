@@ -87,4 +87,4 @@ See the [Roadmap](../about/roadmap.md) for complete boundaries and the [Security
 - Start deploying: [Deployment](../setup/deployment.md), [System Disk Customization](../tasks/system-disk.md)
 - Operate and troubleshoot: [Operations](../tasks/operations.md), [Troubleshooting](../tasks/troubleshooting.md)
 - Look up parameters and interfaces: [Configuration](../reference/configuration.md), [CLI](../reference/cli.md), [API](../reference/api/)
-- Firmware and branches: [Firmware Overview](../firmware/index.md), [Repositories and Branches](../reference/branches.md)
+- Firmware and branches: [Build Signed Firmware](../tasks/build-firmware.md), [Repositories and Branches](../reference/branches.md)

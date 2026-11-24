@@ -1,6 +1,6 @@
 # Firmware Platform Reference
 
-The platform-side firmware reference includes the patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NV, TOFU for unsigned debugging, challenge-attestation and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building and artifact selection are covered in [Build](../firmware/build.md), deployment in [Deployment and Provisioning](../firmware/deploy.md).
+The platform-side firmware reference includes the patch set, device information fields, NIC support matrix, target configuration and server-side errors. The interface between firmware and the platform (commands, NV, TOFU for unsigned debugging, challenge-attestation and boot variables) is covered in the [Firmware Contract](./firmware-contract.md); building and artifact selection are covered in [Build Signed Firmware](../tasks/build-firmware.md), deployment in [Deliver Signed Firmware](../tasks/deploy-firmware.md).
 
 ## Patch set
 
@@ -203,9 +203,8 @@ The default path encrypts both the firmware segment and the kernel segment. HTTP
 
 ## What's next
 
-- [Firmware Overview](../firmware/index.md)
 - [Firmware Contract](./firmware-contract.md)
-- [Build](../firmware/build.md), [Deployment and Provisioning](../firmware/deploy.md)
+- [Build Signed Firmware](../tasks/build-firmware.md), [Deliver Signed Firmware](../tasks/deploy-firmware.md)
 - [Distribution Matrix](./distributions.md)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../concepts/architecture/security.md)

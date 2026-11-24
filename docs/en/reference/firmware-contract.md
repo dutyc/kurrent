@@ -205,11 +205,10 @@ NBCT exists only in memory, never in NVRAM. The initramfs `nbft-connect` module 
 
 ## What's next
 
-- [Firmware Overview](../firmware/index.md)
+- [Build Signed Firmware](../tasks/build-firmware.md)
+- [Deliver Signed Firmware](../tasks/deploy-firmware.md)
 - [Firmware Platform Reference](./firmware-platform.md)
-- [Build](../firmware/build.md)
-- [Deployment and Provisioning](../firmware/deploy.md)
-- [Device Identity and Trust](../firmware/index.md#device-identity-and-trust)
+- [Device Identity](../concepts/boot-chain/device-identity.md)
 - [Boot Chain](../concepts/boot-chain.md)
 - [Security Model](../concepts/architecture/security.md)
 - [API Reference](./api/index.md)

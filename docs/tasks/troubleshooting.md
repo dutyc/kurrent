@@ -145,4 +145,4 @@ kurrent cert list
 - [日常运维](./operations.md)
 - [引导链](../concepts/boot-chain.md)
 - [存储与数据面](../concepts/storage.md)
-- [固件构建](../firmware/build.md)、[部署与预置](../firmware/deploy.md)
+- [构建签名固件](./build-firmware.md)、[交付签名固件](./deploy-firmware.md)

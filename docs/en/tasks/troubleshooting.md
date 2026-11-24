@@ -145,4 +145,4 @@ Audit write failures return 503 (fail-closed). When reporting an issue, include 
 - [Operations](./operations.md)
 - [Boot chain](../concepts/boot-chain.md)
 - [Storage and data plane](../concepts/storage.md)
-- [Firmware build](../firmware/build.md), [deployment and provisioning](../firmware/deploy.md)
+- [Build Signed Firmware](./build-firmware.md), [Deliver Signed Firmware](./deploy-firmware.md)

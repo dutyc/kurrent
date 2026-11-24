@@ -221,41 +221,11 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ## 第 3 步：固件与设备入池
 
-这一步之前先完成 Secure Boot 准备：boot CA 由 `kurrent init` 生成（`<状态根>/control-plane/state/pki/ca/boot/ca.crt`）；签名镜像在构建时内嵌平台密钥（PK / KEK）与产物签名证书，目标机 `db` 在首次网络启动时由平台注册窗口写入，不需要逐机导入。机制见 [Secure Boot 预置](../firmware/secure-boot.md#预置目标机信任库)。
+这一步之前先完成 Secure Boot 准备：boot CA 由 `kurrent init` 生成（`<状态根>/control-plane/state/pki/ca/boot/ca.crt`）；签名镜像在构建时内嵌平台密钥（PK / KEK）与产物签名证书，目标机 `db` 在首次网络启动时由平台注册窗口写入，不需要逐机导入。
 
 ### 3.1 固件
 
-先在固件仓构建签名首跳，再把产物放进主仓的 TFTP 根：
-
-```bash
-git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
-```
-
-```bash
-# 固件仓：boot CA 取自控制面状态根；SNP 与全驱动两份首跳同源
-SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
-BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
-SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
-SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
-BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
-
-SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
-BOOT_CA_CERT=<状态根>/control-plane/state/pki/ca/boot/ca.crt \
-SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
-SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
-BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
-
-# 主仓库：产物供 /boot-assets 校验，并作为 TFTP 首跳
-sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
-sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
-sudo install -m 0644 /path/to/kurrent/tftp/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
-cd /path/to/kurrent
-eval "$(kurrent deployment show -o env)"
-docker compose restart kurrent-dnsmasq
-```
-
-首跳按设备选择：默认设备取 `snponly.efi`，`boot_firmware=full` 的设备取 `ipxe.efi`；两份都由 dnsmasq 以文件级挂载交付，替换后必须重启 dnsmasq。镜像内嵌 boot CA、4443 端口与平台密钥描述符（`SB_PK_*` / `SB_KEK_*`），换 CA、端口或平台密钥两份都须重签；控制面地址默认由 DHCP 提供。完整构建与预置见 [Secure Boot 预置](../firmware/secure-boot.md)。
+按[构建签名固件](../tasks/build-firmware.md)构建 `snponly-sb.efi` 与 `ipxe-sb.efi`，再按[交付签名固件](../tasks/deploy-firmware.md)放入 TFTP 根并重启 dnsmasq。核对产物：
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -263,7 +233,7 @@ api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
 
 ### 3.2 入池
 
-先在 WebUI 的 **Devices** 页开启平台注册窗口，让目标机网络启动完成平台密钥写入并自动重启；随后开启注册窗口入池。也可以用 API：
+先在 WebUI 的 **Devices** 页开启平台注册窗口，让目标机网络启动完成平台密钥写入并自动重启（机制见[预置目标机信任库](../tasks/enroll-platform-keys.md)）；随后开启注册窗口入池。也可以用 API：
 
 ```bash
 api /settings/platform-enrollment -X POST        # 开启平台注册窗口

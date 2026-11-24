@@ -2,7 +2,7 @@
 
 The boot chain determines three aspects at power-on: the identity, the target, and the disk to boot. Kurrent writes none of them into the machine or the disk; the control plane projects them on every boot from the current binding.
 
-The boot chain obtains the connection information for the Worker's system disk under the current binding; the main path is NVMe/TCP with TLS 1.3, and firmware build and provisioning are covered under [Firmware](../firmware/index.md).
+The boot chain obtains the connection information for the Worker's system disk under the current binding; the main path is NVMe/TCP with TLS 1.3, and firmware build and provisioning are covered under [Build Signed Firmware](../tasks/build-firmware.md) and [Provision Target Trust Stores](../tasks/enroll-platform-keys.md).
 
 ## Three Stages of a Boot
 
@@ -18,7 +18,7 @@ The three stages run in order; if any stage fails, boot stops instead of switchi
 
 ## First Hop
 
-The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The image must be signed with the site certificate in the target's `db` (written on the first network boot by the platform enrollment window; machines locked to vendor keys use the vendor flow), otherwise firmware refuses to run it; the signed image embeds the static scripts, the boot CA and the boot HTTPS port, and leaves the controller address out of the image by default, so later content is fetched only over 4443 HTTPS anchored by that CA.
+The device gets an address and `next-server` over DHCP, then downloads the first stage `snponly.efi` over TFTP. The image must be signed with the site certificate in the target's `db` (written on the first network boot by the platform enrollment window, see [Provision Target Trust Stores](../tasks/enroll-platform-keys.md); machines locked to vendor keys use the vendor flow), otherwise firmware refuses to run it; the signed image embeds the static scripts, the boot CA and the boot HTTPS port, and leaves the controller address out of the image by default, so later content is fetched only over 4443 HTTPS anchored by that CA.
 
 Signature verification and embedded content are covered in [First Hop](./boot-chain/first-hop.md).
 
@@ -50,6 +50,14 @@ The first hop (DHCP → TFTP `snponly.efi`) is verified by UEFI Secure Boot: the
 
 Attackers on the same Layer 2 are therefore limited to denial of service (forged DHCP/ARP, link disruption) and cannot replace the first stage, swap scripts or impersonate the boot server. A compromised host, a compromised running device or physical access is outside this boundary. See the [Security Model](../concepts/architecture/security.md) for the full threat model.
 
+## Protocol Boundaries
+
+- Only x86_64 UEFI and NVMe/TCP are supported; there is no Legacy/CSM form and no RDMA or FC.
+- The boot path is single controller, single namespace; Identify parses 512 B and 4 KB blocks.
+- DH-HMAC-CHAP is one-way authentication; mutual authentication is out of firmware scope.
+- Boot HTTPS uses iPXE's native TLS, capped at TLS 1.2; the data plane uses TLS 1.3 PSK, independently of it.
+- Unsigned artifacts are only for local debugging; Secure Boot enabled machines refuse to load them and they do not satisfy the pool admission conditions.
+
 ## Firmware Split
 
 | Capability | Provided by |
@@ -63,6 +71,7 @@ Attackers on the same Layer 2 are therefore limited to denial of service (forged
 ## What's next
 
 - First-hop verification and embedded content: [First Hop](./boot-chain/first-hop.md)
+- The three trust anchors and their rotation: [Boot Trust](./boot-chain/trust.md)
 - Device AK, registration and attestation: [Device Identity](./boot-chain/device-identity.md)
 - Admission, variables and connection: [Data Plane](./boot-chain/data-plane.md)
 - Credentials and discovery passed to the kernel: [Hand-over to the Kernel](./boot-chain/handover.md)

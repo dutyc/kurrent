@@ -1,6 +1,6 @@
 # 固件平台参考
 
-固件平台侧的参考包括补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NV、未签名调试的 TOFU、挑战-证明与启动变量）见[固件契约](./firmware-contract.md)；构建与产物选择见[构建](../firmware/build.md)，部署见[部署与预置](../firmware/deploy.md)。
+固件平台侧的参考包括补丁集、设备信息字段、网卡支持矩阵、Target 配置与服务端错误。固件与主仓库之间的接口（命令、NV、未签名调试的 TOFU、挑战-证明与启动变量）见[固件契约](./firmware-contract.md)；构建与产物选择见[构建签名固件](../tasks/build-firmware.md)，部署见[交付签名固件](../tasks/deploy-firmware.md)。
 
 ## 补丁集
 
@@ -215,9 +215,8 @@ shell
 
 ## 接下来
 
-- [固件概述](../firmware/index.md)
 - [固件契约](./firmware-contract.md)
-- [构建](../firmware/build.md)、[部署与预置](../firmware/deploy.md)
+- [构建签名固件](../tasks/build-firmware.md)、[交付签名固件](../tasks/deploy-firmware.md)
 - [发行版矩阵](./distributions.md)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../concepts/architecture/security.md)

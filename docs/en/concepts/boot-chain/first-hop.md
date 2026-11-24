@@ -12,7 +12,7 @@ Restart the dnsmasq container after replacing a first-stage image: the file-leve
 
 UEFI verifies `snponly.efi` against the site certificate in the target's `db`. If the image is unsigned, the signature does not match, or the image is tampered with, firmware refuses to run it and network boot never begins.
 
-The site certificate is provisioned once: on the first network boot the platform enrollment window writes PK / KEK / db into firmware, and this is not repeated per boot or dependent on the control plane being online. See [Secure Boot Provisioning](../../firmware/secure-boot.md) for the flow.
+The site certificate is provisioned once: on the first network boot the platform enrollment window writes PK / KEK / db into firmware, and this is not repeated per boot or dependent on the control plane being online. See [Provision Target Trust Stores](../../tasks/enroll-platform-keys.md) for the flow, and [Build Signed Firmware](../../tasks/build-firmware.md) for the first-hop binary.
 
 ## Embedded Scripts and boot CA
 
@@ -28,5 +28,5 @@ The signed image embeds the static scripts, the boot CA and the boot HTTPS port,
 
 - Back to the [Boot Chain](../boot-chain.md)
 - How the device proves itself next: [Device Identity](./device-identity.md)
-- Trust anchors and provisioning: [Secure Boot Provisioning](../../firmware/secure-boot.md)
+- Trust anchors and provisioning: [Boot Trust](./trust.md), [Provision Target Trust Stores](../../tasks/enroll-platform-keys.md)
 - Threat model: [Security Model](../../concepts/architecture/security.md)

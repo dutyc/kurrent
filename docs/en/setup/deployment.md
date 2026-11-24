@@ -211,41 +211,11 @@ sudo ufw allow 4840,4421/tcp && sudo ufw reload
 
 ## Step 3: Firmware and Device Admission
 
-Before starting, prepare Secure Boot: the boot CA is created by `kurrent init` (`<state-root>/control-plane/state/pki/ca/boot/ca.crt`); the signed image embeds the platform keys (PK / KEK) and the artifact signing certificate, and the target's `db` is written by the platform enrollment window on the first network boot, with no per-machine import. See [Secure Boot](../firmware/secure-boot.md#provisioning-the-target-trust-store) for the mechanics.
+Before starting, prepare Secure Boot: the boot CA is created by `kurrent init` (`<state-root>/control-plane/state/pki/ca/boot/ca.crt`); the signed image embeds the platform keys (PK / KEK) and the artifact signing certificate, and the target's `db` is written by the platform enrollment window on the first network boot, with no per-machine import.
 
 ### 3.1 Firmware
 
-Build the signed first hop in the firmware repository, then place the artifacts in the platform repository's TFTP root:
-
-```bash
-git clone https://github.com/dutyc/kurrent-firmware && cd kurrent-firmware
-```
-
-```bash
-# Firmware repository: the boot CA comes from the controller state root; both first hops share it
-SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
-BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
-SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
-SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
-BOOT_HTTPS_PORT=4443 ./build/build-sb.sh                 # dist/secureboot/snponly-sb.efi
-
-SB_KEY=/path/to/artifact-signing.key SB_CERT=/path/to/artifact-signing.crt \
-BOOT_CA_CERT=<state-root>/control-plane/state/pki/ca/boot/ca.crt \
-SB_PK_KEY=/path/to/pk.key SB_PK_CERT=/path/to/pk.crt \
-SB_KEK_KEY=/path/to/kek.key SB_KEK_CERT=/path/to/kek.crt \
-BOOT_HTTPS_PORT=4443 KURRENT_SB_TARGET=ipxe ./build/build-sb.sh   # dist/secureboot/ipxe-sb.efi
-
-# Platform repository: artifacts feed /boot-assets and serve as the TFTP first hops
-sudo install -d -m 0755 /path/to/kurrent/tftp/secureboot
-sudo install -m 0644 dist/secureboot/snponly-sb.efi dist/secureboot/ipxe-sb.efi dist/secureboot/manifest.json /path/to/kurrent/tftp/secureboot/
-sudo install -m 0644 /path/to/kurrent/tftp/secureboot/snponly-sb.efi /path/to/kurrent/tftp/snponly.efi
-sudo install -m 0644 /path/to/kurrent/tftp/secureboot/ipxe-sb.efi /path/to/kurrent/tftp/ipxe.efi
-cd /path/to/kurrent
-eval "$(kurrent deployment show -o env)"
-docker compose restart kurrent-dnsmasq
-```
-
-The first hop is chosen per device: default devices take `snponly.efi`, `boot_firmware=full` devices take `ipxe.efi`; dnsmasq delivers both as file-level mounts, so restart it after replacing them. The images embed the boot CA, the 4443 port and the platform key descriptors (`SB_PK_*` / `SB_KEK_*`), so changing any of them requires rebuilding both; the controller address comes from DHCP by default. Full build and provisioning are in [Secure Boot](../firmware/secure-boot.md).
+Build `snponly-sb.efi` and `ipxe-sb.efi` following [Build Signed Firmware](../tasks/build-firmware.md), then place them in the TFTP root and restart dnsmasq following [Deliver Signed Firmware](../tasks/deploy-firmware.md). Verify the artifacts:
 
 ```bash
 api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
@@ -253,7 +223,7 @@ api /boot-assets | jq '{firmware, secureboot}'   # secureboot.status=ok
 
 ### 3.2 Admit
 
-First open the platform enrollment window in WebUI → **Devices**, let the target network-boot so the platform keys are written and it reboots, then open the registration window for admission. Or:
+First open the platform enrollment window in WebUI → **Devices**, let the target network-boot so the platform keys are written and it reboots (see [Provision Target Trust Stores](../tasks/enroll-platform-keys.md)), then open the registration window for admission. Or:
 
 ```bash
 api /settings/platform-enrollment -X POST        # open the platform enrollment window

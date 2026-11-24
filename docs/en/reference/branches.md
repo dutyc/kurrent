@@ -19,4 +19,4 @@ Kurrent's code lives in two repositories: the main repository [kurrent](https://
 | `research/nvme-of` | Early research on NVMe-oF boot | Research |
 | `legacy-iscsi` | Firmware from the iSCSI era | Archived |
 
-Same-named branches are used together: `main` admits devices by TPM AK and PCR baseline, and boot does not complete when the firmware side lacks an AK, a quote or the signed first hop; `legacy/no-tpm` verifies the registered device key and uses neither a TPM nor a signed first hop. See [Firmware Overview](../firmware/index.md) and [Security Model](../concepts/architecture/security.md) for the trust chain.
+Same-named branches are used together: `main` admits devices by TPM AK and PCR baseline, and boot does not complete when the firmware side lacks an AK, a quote or the signed first hop; `legacy/no-tpm` verifies the registered device key and uses neither a TPM nor a signed first hop. See [Boot Trust](../concepts/boot-chain/trust.md) and [Security Model](../concepts/architecture/security.md) for the trust chain.

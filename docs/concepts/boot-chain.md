@@ -18,7 +18,7 @@
 
 设备开机后先通过 DHCP 拿到地址和 `next-server`（下一跳服务器地址），再从 TFTP 下载第一个执行文件 `snponly.efi`。这段下载是明文的，无法用网络手段保护，是整个引导链里唯一一段可信性必须由目标机固件自己保证的过程。
 
-这个文件必须经过签名，签名证书要装在目标机的 UEFI `db`（固件内置的受信签名证书库）中，默认由首次网络启动时的平台注册窗口写入；出厂已锁厂商密钥的机型经其厂商的管理流程处理。验签不通过，固件直接拒绝执行，网络引导不会开始。
+这个文件必须经过签名，签名证书要装在目标机的 UEFI `db`（固件内置的受信签名证书库）中，默认由首次网络启动时的平台注册窗口写入；写入流程见[预置目标机信任库](../tasks/enroll-platform-keys.md)。出厂已锁厂商密钥的机型经其厂商的管理流程处理。验签不通过，固件直接拒绝执行，网络引导不会开始。
 
 签名镜像里内嵌了三样东西：
 
@@ -78,6 +78,14 @@ initramfs 里的 `nbft-connect` 读取 NBCT 与 NBFT（网络与子系统发现�
 
 同二层攻击者能造成拒绝服务（伪 DHCP/ARP、链路中断），但无法替换首跳、替换脚本或冒充引导服务器。被控宿主、运行期被控设备与物理访问不在该边界内解决。
 
+## 协议边界
+
+- 仅支持 x86_64 UEFI 与 NVMe/TCP，不提供 Legacy/CSM 形态，也不支持 RDMA 与 FC。
+- 引导路径为单控制器、单命名空间；Identify 解析 512 B 与 4 KB 块。
+- DH-HMAC-CHAP 为单向认证，双向认证不在固件实现范围内。
+- 引导 HTTPS 使用 iPXE 原生 TLS，上限 TLS 1.2；数据面使用 TLS 1.3 PSK，两者相互独立。
+- 未签名产物只用于本地调试；开启 Secure Boot 的目标机拒绝加载，也不满足设备入池条件。
+
 ## 固件分工
 
 | 能力 | 提供方 |
@@ -91,7 +99,8 @@ initramfs 里的 `nbft-connect` 读取 NBCT 与 NBFT（网络与子系统发现�
 ## 接下来
 
 - 各阶段的完整机制：[首跳](./boot-chain/first-hop.md)、[设备身份](./boot-chain/device-identity.md)、[数据面](./boot-chain/data-plane.md)、[交接给内核](./boot-chain/handover.md)
-- 固件构建与预置：[固件](../firmware/index.md)
+- 三段信任的锚与轮换：[引导信任](./boot-chain/trust.md)
+- 构建与预置：[构建签名固件](../tasks/build-firmware.md)、[预置目标机信任库](../tasks/enroll-platform-keys.md)
 - AK、quote 格式与信任锚：[固件契约](../reference/firmware-contract.md)
 - 盘、凭据与数据面：[存储与数据面](./storage.md)
 - 完整威胁模型：[安全模型](../concepts/architecture/security.md)

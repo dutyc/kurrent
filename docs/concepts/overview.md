@@ -91,4 +91,4 @@ NQN（NVMe Qualified Name）是 NVMe 协议里标识一个存储目标的全局�
 - 开始部署：[部署](../setup/deployment.md)、[系统盘定制](../tasks/system-disk.md)
 - 日常操作与排障：[日常运维](../tasks/operations.md)、[故障排查](../tasks/troubleshooting.md)
 - 查阅参数与接口：[配置参考](../reference/configuration.md)、[CLI 参考](../reference/cli.md)、[API 参考](../reference/api/)
-- 固件与分支：[固件概述](../firmware/index.md)、[仓库与分支](../reference/branches.md)
+- 固件与分支：[构建签名固件](../tasks/build-firmware.md)、[仓库与分支](../reference/branches.md)

@@ -12,7 +12,7 @@
 
 UEFI 用目标机 `db`（固件内置的受信签名证书库）中的站点证书验证 `snponly.efi`。镜像未签名、签名不符或被篡改时，固件直接拒绝执行，网络引导不会开始。
 
-站点证书属于一次性预置：首次网络启动时由平台注册窗口将 PK / KEK / db 写入固件，不随每次启动重复，也不依赖控制面在线。写入流程见 [Secure Boot 预置](../../firmware/secure-boot.md)。
+站点证书属于一次性预置：首次网络启动时由平台注册窗口将 PK / KEK / db 写入固件，不随每次启动重复，也不依赖控制面在线。写入流程见[预置目标机信任库](../../tasks/enroll-platform-keys.md)。首跳二进制由固件仓构建，见[构建签名固件](../../tasks/build-firmware.md)。
 
 ## 内嵌脚本与 boot CA
 
@@ -30,5 +30,5 @@ UEFI 用目标机 `db`（固件内置的受信签名证书库）中的站点证�
 
 - 返回[引导链](../boot-chain.md)
 - 首跳之后如何证明设备：[设备身份](./device-identity.md)
-- 信任锚与预置：[Secure Boot 预置](../../firmware/secure-boot.md)
+- 信任锚与预置：[引导信任](./trust.md)、[预置目标机信任库](../../tasks/enroll-platform-keys.md)
 - 威胁模型：[安全模型](../../concepts/architecture/security.md)

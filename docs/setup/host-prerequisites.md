@@ -31,7 +31,7 @@
 - CPU 与内存只需满足所装发行版要求。
 - AK 绑定主板与 TPM：清 TPM 或换主板等同换设备，需删登记后重新入池。
 - 不用 USB 或无线网卡引导；网卡兼容性见[固件平台参考](../reference/firmware-platform.md)。
-- 平台密钥写入见 [Secure Boot 预置](../firmware/secure-boot.md)；出厂已锁厂商密钥的机型经其厂商的管理流程处理。
+- 平台密钥写入见 [预置目标机信任库](../tasks/enroll-platform-keys.md)；出厂已锁厂商密钥的机型经其厂商的管理流程处理。
 
 在目标机核对：
 

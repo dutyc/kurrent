@@ -31,7 +31,7 @@ These requirements apply to the `main` line; devices without a TPM use the `lega
 - CPU and memory only need to meet the installed distribution's requirements.
 - Device identity (AK) is bound to the mainboard and TPM: clearing the TPM or replacing the mainboard is equivalent to replacing the device and requires re-admission.
 - USB and wireless NICs are not used for boot; NIC compatibility is in [Firmware Platform Reference](../reference/firmware-platform.md).
-- Platform key enrollment is covered in [Secure Boot](../firmware/secure-boot.md); machines locked to vendor keys use the vendor flow.
+- Platform key enrollment is covered in [Provision Target Trust Stores](../tasks/enroll-platform-keys.md); machines locked to vendor keys use the vendor flow.
 
 Verify on the target:
 

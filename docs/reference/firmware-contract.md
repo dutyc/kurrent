@@ -207,11 +207,10 @@ NBCT 只存在于内存，不落 NVRAM。initramfs 的 `nbft-connect` 读取 `/s
 
 ## 接下来
 
-- [固件概述](../firmware/index.md)
+- [构建签名固件](../tasks/build-firmware.md)
+- [交付签名固件](../tasks/deploy-firmware.md)
 - [固件平台参考](./firmware-platform.md)
-- [构建](../firmware/build.md)
-- [部署与预置](../firmware/deploy.md)
-- [设备身份](../firmware/index.md#设备身份)
+- [设备身份](../concepts/boot-chain/device-identity.md)
 - [引导链](../concepts/boot-chain.md)
 - [安全模型](../concepts/architecture/security.md)
 - [API 参考](./api/index.md)
