@@ -426,3 +426,30 @@ class TestDeviceBootFirmware:
         assert "unknown worker" in res.json()["detail"]
         detail = client.get(f"/devices/{MAC_A}", headers=auth_headers).json()
         assert detail["boot_firmware"] == "snponly"
+
+    def test_rebind_failure_restores_firmware_tags(self, client, auth_headers, worker, monkeypatch):
+        """换绑失败回滚按各自设备的 boot_firmware 重投影标签，不得写回无标签绑定。"""
+        from control_plane.app.routers import devices as devices_router
+
+        client.post("/devices", json={"mac": MAC_A, "boot_firmware": "full"}, headers=auth_headers)
+        client.post("/devices", json={"mac": MAC_B, "boot_firmware": "full"}, headers=auth_headers)
+        worker("worker-01")
+        worker("worker-02")
+        client.post(f"/devices/{MAC_A}/bind", params={"worker_id": "worker-01"}, headers=auth_headers)
+        client.post(f"/devices/{MAC_B}/bind", params={"worker_id": "worker-02"}, headers=auth_headers)
+
+        real_add = devices_router.dnsmasq.add_binding
+
+        def fail_new_binding(mac, hostname, tag=None):
+            if mac == MAC_A and hostname == "worker-02":
+                raise OSError("simulated dnsmasq failure")
+            return real_add(mac, hostname, tag)
+
+        monkeypatch.setattr(devices_router.dnsmasq, "add_binding", fail_new_binding)
+        res = client.post(f"/devices/{MAC_A}/bind",
+                          params={"worker_id": "worker-02", "force": True}, headers=auth_headers)
+        assert res.status_code == 500
+
+        hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
+        assert f"{MAC_A},set:full,worker-01" in hosts
+        assert f"{MAC_B},set:full,worker-02" in hosts

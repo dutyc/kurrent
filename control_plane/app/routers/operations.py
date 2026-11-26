@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from fastapi import Depends
+from fastapi import Depends, Query
 
 from ..auth import authenticate, authorize_request
 from ..stores import operations
@@ -17,7 +17,7 @@ router = PrincipalRouter(
 
 
 @router.get("/operations")
-def get_operations(since: int = 0, limit: int = 1000, mac: str | None = None,
+def get_operations(since: int = 0, limit: int = Query(1000, ge=0), mac: str | None = None,
                    op: str | None = None, order: Literal["asc", "desc"] = "asc"):
     """审计日志（游标分页）；mac/op 可选：规范化/精确匹配后仅返回对应记录，
     过滤在计数 limit 之前完成。order=desc 只取最新一页（新到旧），用于概览类查询。"""
