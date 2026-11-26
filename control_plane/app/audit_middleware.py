@@ -18,7 +18,8 @@ from .utils import client_source
 
 log = logging.getLogger("control-plane")
 
-PUBLIC_PATHS = {"/healthz", "/boot-vars", "/devices/report", "/devices/challenge"}
+PUBLIC_PATHS = {"/healthz", "/boot/phase", "/boot-vars", "/devices/report",
+                "/devices/enroll-report", "/devices/challenge"}
 COMPONENT_CLASSES = {"component", "control"}
 
 

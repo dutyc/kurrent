@@ -80,6 +80,24 @@ def test_fail_closed_when_audit_unwritable(client, secure, monkeypatch):
     assert res.json()["detail"] == "audit unavailable"
 
 
+def test_boot_endpoints_stay_out_of_management_audit(client, secure):
+    """引导链匿名端点不写 authn 审计（否则每次引导都污染审计并受 fail-closed 牵连）。"""
+    before = len(_events())
+    assert client.get("/boot/phase").status_code == 200
+    report = client.get("/devices/enroll-report",
+                        params={"mac": "52:54:00:50:00:31", "result": "failed"})
+    assert report.status_code == 200
+    assert [e for e in _events()[before:] if e.get("event") == "authn"] == []
+
+
+def test_boot_endpoints_survive_audit_failure(client, secure, monkeypatch):
+    def _broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(audit, "emit", _broken)
+    assert client.get("/boot/phase").status_code == 200
+
+
 def test_component_on_management_route_alarms(client, secure):
     res = client.get("/agents", headers={
         "X-Client-Cert-DN": "/CN=agent-node-01",
