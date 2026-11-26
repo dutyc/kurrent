@@ -60,6 +60,16 @@ class TestOperations:
         assert body["entries"][0]["id"] > body["entries"][1]["id"]
         assert body["next_cursor"] == body["entries"][0]["id"]
 
+    def test_negative_limit_rejected(self, client, auth_headers):
+        client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
+        for params in ({"limit": -1}, {"limit": -1, "order": "desc"}):
+            assert client.get("/operations", params=params, headers=auth_headers).status_code == 422
+        # limit=0 合法：空页（desc 也不得因 deque(maxlen=0) 报错）
+        body = client.get("/operations", params={"limit": 0, "order": "desc"},
+                          headers=auth_headers).json()
+        assert body["entries"] == []
+        assert body["next_cursor"] == 0
+
     def test_latest_page_desc_with_mac_filter(self, client, auth_headers):
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
