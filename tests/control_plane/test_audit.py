@@ -126,6 +126,18 @@ def test_auth_failure_burst_alarms(client, secure):
     assert alarms and alarms[-1]["client_ip"] == "10.9.9.9"
 
 
+def test_auth_failure_burst_alarms_on_fresh_clock(client, secure, monkeypatch):
+    """monotonic 从开机或命名空间创建起算：uptime 不足冷却期时，首个风暴仍须告警。"""
+    audit._BURST.clear()
+    audit._BURST_ALARMED.clear()
+    monkeypatch.setattr(audit.time, "monotonic", lambda: 30.0)
+    headers = {"X-Real-IP": "10.9.9.10"}
+    for _ in range(audit._BURST_THRESHOLD):
+        assert client.get("/whoami", headers=headers).status_code == 401
+    alarms = [e for e in _alarms("auth_failure_burst") if e.get("client_ip") == "10.9.9.10"]
+    assert alarms
+
+
 def test_users_file_change_alarms(client, secure):
     audit.check_users_file_change()
     settings.users_file.write_text(yaml.safe_dump(

@@ -230,7 +230,8 @@ def note_auth_failure(client_ip: str, *, route: str, reason: str,
             bucket.popleft()
         if len(bucket) < _BURST_THRESHOLD:
             return
-        if now - _BURST_ALARMED.get(client_ip, 0.0) < _BURST_COOLDOWN_SECONDS:
+        last = _BURST_ALARMED.get(client_ip)
+        if last is not None and now - last < _BURST_COOLDOWN_SECONDS:
             return
         _BURST_ALARMED[client_ip] = now
     alarm("auth_failure_burst", detail=f"{len(bucket)} failures/{_BURST_WINDOW_SECONDS}s",
