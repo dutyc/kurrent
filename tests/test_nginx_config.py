@@ -92,7 +92,8 @@ def test_identity_headers_default_to_none_and_opt_in():
     blocks = _location_blocks(text)
     proxying = {path: body for path, body in blocks.items() if "proxy_pass" in body}
     assert set(proxying) == {
-        "/healthz", "/boot-vars", "/devices/report", "/devices/challenge",
+        "/healthz", "/boot/phase", "/boot-vars", "/devices/report",
+        "/devices/enroll-report", "/devices/challenge",
         "/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl",
     }
 
@@ -214,12 +215,13 @@ def test_boot_routes_are_exact_and_never_inject_identity():
     assert "location ~ ^/(devices/|boot-vars)" not in text
     assert "location ^~ /devices/ {" in text
 
-    for path in ("/boot-vars", "/devices/report", "/devices/challenge"):
+    for path in ("/boot/phase", "/boot-vars", "/devices/report",
+                 "/devices/enroll-report", "/devices/challenge"):
         assert f"location = {path} {{" in text
 
 
 def test_secureboot_listener_is_isolated():
-    """4443 只服务 Secure Boot 引导：boot CA 证书与三个引导端点；不暴露静态资产。"""
+    """4443 只服务 Secure Boot 引导：boot CA 证书与五个引导端点；不暴露静态资产。"""
     text = CONF.read_text(encoding="utf-8")
     block = _server_block(text, "4443")
     assert "ssl_certificate     /etc/nginx/certs/boot-server.crt;" in block
@@ -231,7 +233,8 @@ def test_secureboot_listener_is_isolated():
 
     locations = _location_blocks(block)
     proxying = {path: body for path, body in locations.items() if "proxy_pass" in body}
-    assert set(proxying) == {"/boot-vars", "/devices/report", "/devices/challenge"}
+    assert set(proxying) == {"/boot/phase", "/boot-vars", "/devices/report",
+                             "/devices/enroll-report", "/devices/challenge"}
     for path, body in proxying.items():
         assert "proxy-identity-none.conf" in body, path
     assert 'return 404;' in locations["/"]
