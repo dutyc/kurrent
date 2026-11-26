@@ -534,9 +534,11 @@ def _bind_device(mac: str, worker_id: str, force: bool) -> dict[str, Any]:
                 if old_worker and old_worker != worker_id:
                     old_hostname = _hostname_of(workers, old_worker)
                     if old_hostname:
-                        dnsmasq.add_binding(mac, old_hostname)
+                        dnsmasq.add_binding(mac, old_hostname, _boot_tag(
+                            snapshot["devices"].get(mac, {}).get("boot_firmware")))
                 if old_device and old_device != mac:
-                    dnsmasq.add_binding(old_device, hostname)
+                    dnsmasq.add_binding(old_device, hostname, _boot_tag(
+                        snapshot["devices"].get(old_device, {}).get("boot_firmware")))
             except Exception:
                 log.exception("bind rollback: dnsmasq restore failed")
             raise HTTPException(500, f"dnsmasq binding failed: {exc}") from exc
