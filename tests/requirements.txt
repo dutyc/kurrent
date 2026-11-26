@@ -1,3 +1,4 @@
-# 开发/测试依赖（集中管理单测执行环境）：控制面运行时依赖 + pytest
+# 开发/测试依赖（集中管理单测执行环境）：控制面与存储节点 Agent 运行时依赖 + pytest
 -r ../control_plane/requirements.txt
+-r ../storager/agent/requirements.txt
 pytest==9.1.1
