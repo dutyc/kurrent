@@ -10,10 +10,8 @@ Kurrent is developed by a small group of maintainers working with extensive AI a
 - **`cli/`** — Single-binary CLI written in Go.
 - **`webui/`** — React management UI and nginx deployment.
 - **`tftp/`, `dnsmasq/`** — Boot scripts, first-hop firmware, and DHCP configuration.
-- **`docs/`** — Bilingual documentation site (VitePress).
+- **`docs/`** — Bilingual documentation site (VitePress); the API reference lives in `docs/reference/api/`.
 - **`tests/`** — Python tests, deployment probes, and test tooling.
-- **`scripts/`** — Build-time scripts (such as API documentation sync).
-- **`api/`** — Bilingual control-plane API documentation.
 - **`about/`** — Architecture, roadmap, and project notes.
 
 The repository tracks products, verification, and public documentation only. Upstream reference sources, audit evidence, design blueprints, personal deliverables, and old documentation snapshots live under the local `.local/` directory; runtime data such as disk images is pointed at an out-of-repository directory by `spec.agent.diskDir` / `KURRENT_DISK_DIR`. Neither is versioned.
@@ -38,7 +36,7 @@ Changes touching the boot chain, credentials, or data plane need an end-to-end v
 ## Documentation rules
 
 - Chinese is the default site and `/en/` is its isomorphic English mirror; add or change pages in pairs and keep the page sets aligned.
-- The site gives overviews of the API, CLI, and firmware contract with links to authority; full definitions stay in their repositories to avoid a drifting second reference.
+- Interfaces are authoritative in the bilingual pages under `docs/reference/api/`, maintained as a synchronized pair.
 - Internal risk identifiers, trust-level codes, and test counts must not appear; state facts with descriptive names.
 - Unimplemented capabilities must not be described as implemented; the roadmap and current boundaries must match the code.
 - Site-internal links use relative `.md` paths; manual links on the homepage must remain compatible with GitHub Pages `.html` output.
