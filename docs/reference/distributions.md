@@ -1,6 +1,6 @@
 # 发行版矩阵
 
-固件仓库为每个发行版提供自包含的母盘定制脚本，统一按 A–F 六阶段执行。下表汇总已完成整机冷启动验收的发行版、验收判据与家族差异；母盘制作步骤见[系统盘定制](../tasks/system-disk.md)。
+固件仓库为每个发行版维护母盘定制脚本模板，构建期生成自包含单文件，统一按 A–F 六阶段执行。下表汇总已完成整机冷启动验收的发行版、验收判据与家族差异；母盘制作步骤见[系统盘定制](../tasks/system-disk.md)。
 
 ## 已验证发行版
 
@@ -13,22 +13,26 @@
 | Fedora 44 | Server DVD | kickstart | dracut `95nbft` + `nbft-connect` | 6.19 |
 | AlmaLinux 10.2 | minimal ISO | kickstart | dracut `95nbft` + `nbft-connect` | 6.12 |
 | openSUSE Leap 16.0 | online installer（Agama） | Agama profile | dracut `95nbft` + `nbft-connect` | 6.12 |
+| Arch Linux（rolling，2026.11.01 ISO） | arch ISO | archinstall | mkinitcpio 钩子 `nbft` + `nbft-connect` | 7.3 |
 
-验收指完整链路：PXE 冷启动 → 固件段认证 → GRUB → 内核 → initramfs 消费 NBFT/NBCT → rootfs → 登录提示符。仅验证到 GRUB 或内核启动不构成验收。逐版本的安装介质版本、内核小版本与验收日期见固件仓库[发行版矩阵](https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md)。
+验收指完整链路：PXE 冷启动 → 固件段认证 → GRUB → 内核 → initramfs 消费 NBFT/NBCT → rootfs → 登录提示符。仅验证到 GRUB 或内核启动不构成验收。逐版本的安装介质版本、内核小版本与验收日期见固件仓库[发行版矩阵](https://github.com/dutyc/kurrent-firmware/blob/main/docs/zh/distributions.md)。
+
+支持分为三档。Debian 13 与 Ubuntu 26.04 使用发行版自带组件；Debian 12、Ubuntu 24.04 与 Arch Linux 的发行版未提供带 TLS 能力的 NVMe 用户态工具，脚本在母盘内源码构建 `ktls-utils`（Debian 12 另含 `libnvme`、`nvme-cli`，代价见固件仓矩阵）；Fedora、AlmaLinux 与 openSUSE Leap 用固定有线网卡 allowlist 替换 dracut 的 `kernel-network-modules` 并 `--omit drm`，dracut 重排模块目录时需重验该 override。源码构建的组件在包管理之外，不会随发行版升级或打补丁。
 
 ## 脚本与软件源
 
 | 发行版 | 定制脚本 | 默认软件源 | 安装约束 |
 | --- | --- | --- | --- |
-| Debian 12 | `test/debian12/golden-image-setup-debian12.sh` | 阿里云（bookworm + backports） | ESP 不小于 256 MiB |
-| Debian 13 | `test/debian13/golden-image-setup-debian13.sh` | 阿里云（trixie） | ESP 不小于 256 MiB |
-| Ubuntu 24.04 | `test/ubuntu2404/golden-image-setup-ubuntu2404.sh` | 阿里云（noble） | ESP 需重建 |
-| Ubuntu 26.04 | `test/ubuntu2604/golden-image-setup-ubuntu2604.sh` | 阿里云（suite 运行时检测） | ESP 需 4K 化 |
-| Fedora 44 | `test/fedora44/golden-image-setup-fedora44.sh` | 阿里云（fedora + updates） | XFS；须在 4K 逻辑块盘上安装 |
-| AlmaLinux 10.2 | `test/almalinux10/golden-image-setup-almalinux10.sh` | 华为云（BaseOS/AppStream/CRB/Extras） | XFS；须在 4K 逻辑块盘上安装 |
-| openSUSE Leap 16.0 | `test/opensuse-leap16/golden-image-setup-leap16.sh` | TUNA OSS | XFS；目标盘须为空 |
+| Debian 12 | `dist/golden/debian12/golden-image-setup-debian12.sh` | 阿里云（bookworm + backports） | ESP 不小于 256 MiB |
+| Debian 13 | `dist/golden/debian13/golden-image-setup-debian13.sh` | 阿里云（trixie） | ESP 不小于 256 MiB |
+| Ubuntu 24.04 | `dist/golden/ubuntu2404/golden-image-setup-ubuntu2404.sh` | 阿里云（noble） | ESP 需重建 |
+| Ubuntu 26.04 | `dist/golden/ubuntu2604/golden-image-setup-ubuntu2604.sh` | 阿里云（suite 运行时检测） | ESP 需 4K 化 |
+| Fedora 44 | `dist/golden/fedora44/golden-image-setup-fedora44.sh` | 阿里云（fedora + updates） | XFS；须在 4K 逻辑块盘上安装 |
+| AlmaLinux 10.2 | `dist/golden/almalinux10/golden-image-setup-almalinux10.sh` | 华为云（BaseOS/AppStream/CRB/Extras） | XFS；须在 4K 逻辑块盘上安装 |
+| openSUSE Leap 16.0 | `dist/golden/opensuse-leap16/golden-image-setup-leap16.sh` | TUNA OSS | XFS；目标盘须为空 |
+| Arch Linux | `dist/golden/archlinux/golden-image-setup-archlinux.sh` | TUNA（archlinux） | ext4；mkinitcpio（移除 `autodetect`） |
 
-脚本均内嵌 `initramfs-nbft` 组件与 GRUB 2.14 产物，单文件可拷入母盘执行。组件或 GRUB 产物更新后，需在固件仓库执行 `python3 test/shared/embed-components.py` 重新内嵌。
+生成的脚本内嵌 `initramfs-nbft` 组件与 GRUB 2.14 产物，单文件可拷入母盘执行。模板位于固件仓 `golden/<目录>/`，生成物写到 `dist/golden/`，CI 的 `golden` 任务连同 `SHA256SUMS` 作为 `golden-image-setup` 构建产物上传。组件或 GRUB 产物更新后，在固件仓执行 `golden/shared/build-grub-efi.sh` 与 `golden/shared/embed-components.py` 重新生成，并用 `test/shared/verify-embed.py` 校验。
 
 ## 原生 NBFT 与 NBCT
 
@@ -45,7 +49,7 @@
 - initramfs 集成走 initramfs-tools 的 `hooks/nbft` 与 `scripts/local-top/nbft`。
 - Debian 12 的 6.1 内核不满足 NVMe 认证要求，需 backports 6.12；Debian 13 与 Ubuntu 使用自带内核。
 - Ubuntu 24.04 的云镜像 ESP 仅 106 MiB，需重建为 4K FAT32；26.04 默认 ESP 已满足容量要求，仅需 4K 化。
-- GRUB 参数包含 `net.ifnames=0 ip=dhcp nbft_auto`；Debian 12 自带的 GRUB 2.06 在 SAN 路径挂起，脚本默认使用内嵌 GRUB 2.14。
+- GRUB 参数包含 `net.ifnames=0 ip=dhcp nbft_auto`；Debian 12 自带的 GRUB 2.06 在 SAN 路径挂起，生成脚本时嵌入 GRUB 2.14。
 
 ### Fedora
 
@@ -78,11 +82,11 @@ RHEL 9.x 尚未实测；其内核为 5.14 系，NVMe/TCP TLS 是上游 6.7+ 特�
 2. 目标盘使用 4K 逻辑块虚拟盘；XFS 与 Agama 场景需特别注意磁盘约束。
 3. 完成无人值守安装后，在母盘内执行 A–F；`--skip-disk` 只跳过 GPT 转换与 ESP 重建，ESP 内容仍会刷新。
 4. 在隔离网络完成 PXE 冷启动验收：target 端两条控制器记录、抓包判据与登录提示符。
-5. 组件变更后重跑 `embed-components.py`，并以 dash 与 bash 各跑一次 `test/test-nbft-connect-nbct.sh`。
+5. 组件变更后在固件仓重新生成并校验（`build-grub-efi.sh`、`embed-components.py`、`verify-embed.py`），并以 dash 与 bash 各跑一次 `test/test-nbft-connect-nbct.sh`。
 
 ## 接下来
 
 - [系统盘定制](../tasks/system-disk.md)
 - [构建签名固件](../tasks/build-firmware.md)
 - [固件契约](./firmware-contract.md)
-- 固件仓库发行版矩阵：<https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>
+- 固件仓库发行版矩阵：<https://github.com/dutyc/kurrent-firmware/blob/main/docs/zh/distributions.md>

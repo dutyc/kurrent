@@ -52,9 +52,12 @@ After installation, complete business software, driver, service and user customi
 ### 2. Script acquisition
 
 ```bash
+# download the golden-image-setup artifact from the firmware CI, or generate locally:
 git clone https://github.com/dutyc/kurrent-firmware
 cd kurrent-firmware
-ls test/*/golden-image-setup-*.sh
+bash golden/shared/build-grub-efi.sh
+python3 golden/shared/embed-components.py
+ls dist/golden/*/golden-image-setup-*.sh
 ```
 
 Select the directory and defaults matching the master:
@@ -68,8 +71,9 @@ Select the directory and defaults matching the master:
 | Fedora 44<br>`fedora44` | Server DVD; XFS/LVM; install on a 4K-logical-block disk; dracut `95nbft` | `uname -r`<br>`mirrors.aliyun.com/fedora` |
 | AlmaLinux 10.2<br>`almalinux10` | minimal ISO; kickstart, XFS; install on a 4K-logical-block disk; dracut `95nbft` | `uname -r`<br>`repo.huaweicloud.com/almalinux` |
 | openSUSE Leap 16.0<br>`opensuse-leap16` | online installer (Agama); Agama profile, XFS; target disk must be empty; dracut `95nbft` | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/opensuse` |
+| Arch Linux<br>`archlinux` | arch ISO (2026.11.01); archinstall; mkinitcpio | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/archlinux` |
 
-The scripts embed the initramfs components and the GRUB 2.14 artifact, so a single `.sh` file can be copied into the master and run; cloning the whole repository is unnecessary.
+The generated scripts embed the initramfs components and the GRUB 2.14 artifact, so a single `.sh` file can be copied into the master and run; cloning the whole repository is unnecessary.
 
 ### 3. Script execution
 
@@ -104,7 +108,7 @@ The script does not install the OS, create partitions, expand the ESP, install b
 
 Changes to fstab and GRUB keep `.golden-*.bak` backups; the pre-conversion GPT is saved to `/root/golden-image-gpt-512-*.bak`, and both are kept until the cold-boot validation passes.
 
-Disk contracts and implementation details are in the firmware repository's [master-image guide](https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-customization-debian12.md).
+Disk contracts and implementation details are in the firmware repository's [distribution matrix](https://github.com/dutyc/kurrent-firmware/blob/main/docs/en/distributions.md).
 
 ## Deploy the master to a storage node
 
