@@ -1,6 +1,6 @@
 # Distribution Matrix
 
-The firmware repository provides a self-contained master-image script per distribution, all following the same six phases A–F. The tables below summarize the distributions verified through a full cold boot, the acceptance criteria and family differences. Master preparation is documented in [System Disk Customization](../tasks/system-disk.md).
+The firmware repository keeps a master-image script template per distribution and generates self-contained single files at build time, all following the same six phases A–F. The tables below summarize the distributions verified through a full cold boot, the acceptance criteria and family differences. Master preparation is documented in [System Disk Customization](../tasks/system-disk.md).
 
 ## Verified Distributions
 
@@ -13,22 +13,26 @@ The firmware repository provides a self-contained master-image script per distri
 | Fedora 44 | Server DVD | kickstart | dracut `95nbft` + `nbft-connect` | 6.19 |
 | AlmaLinux 10.2 | minimal ISO | kickstart | dracut `95nbft` + `nbft-connect` | 6.12 |
 | openSUSE Leap 16.0 | online installer (Agama) | Agama profile | dracut `95nbft` + `nbft-connect` | 6.12 |
+| Arch Linux (rolling, 2026.11.01 ISO) | arch ISO | archinstall | mkinitcpio hook `nbft` + `nbft-connect` | 7.3 |
 
-Acceptance covers the full chain: PXE cold boot → firmware-phase authentication → GRUB → kernel → initramfs consuming NBFT/NBCT → rootfs → login prompt. Reaching GRUB or the kernel alone does not constitute acceptance. Exact media versions, kernel point releases and acceptance dates are recorded in the firmware repository's [distribution matrix](https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md).
+Acceptance covers the full chain: PXE cold boot → firmware-phase authentication → GRUB → kernel → initramfs consuming NBFT/NBCT → rootfs → login prompt. Reaching GRUB or the kernel alone does not constitute acceptance. Exact media versions, kernel point releases and acceptance dates are recorded in the firmware repository's [distribution matrix](https://github.com/dutyc/kurrent-firmware/blob/main/docs/en/distributions.md).
+
+Support falls into three tiers. Debian 13 and Ubuntu 26.04 use the distribution's own components. Debian 12, Ubuntu 24.04 and Arch Linux ship no TLS-capable NVMe userspace tooling, so the script builds `ktls-utils` from source inside the master (Debian 12 also builds `libnvme` and `nvme-cli`; the costs are listed in the firmware matrix). Fedora, AlmaLinux and openSUSE Leap replace dracut's `kernel-network-modules` with a fixed wired-NIC allowlist and add `--omit drm`; a dracut module-directory reshuffle requires re-verification of the override. Source-built components sit outside the package manager and receive no distribution upgrades or patches.
 
 ## Scripts and Package Sources
 
 | Distribution | Script | Default repository | Install constraint |
 | --- | --- | --- | --- |
-| Debian 12 | `test/debian12/golden-image-setup-debian12.sh` | Aliyun (bookworm + backports) | ESP at least 256 MiB |
-| Debian 13 | `test/debian13/golden-image-setup-debian13.sh` | Aliyun (trixie) | ESP at least 256 MiB |
-| Ubuntu 24.04 | `test/ubuntu2404/golden-image-setup-ubuntu2404.sh` | Aliyun (noble) | ESP rebuild required |
-| Ubuntu 26.04 | `test/ubuntu2604/golden-image-setup-ubuntu2604.sh` | Aliyun (runtime suite detection) | ESP 4K conversion required |
-| Fedora 44 | `test/fedora44/golden-image-setup-fedora44.sh` | Aliyun (fedora + updates) | XFS; install on a 4K-logical-block disk |
-| AlmaLinux 10.2 | `test/almalinux10/golden-image-setup-almalinux10.sh` | Huawei Cloud (BaseOS/AppStream/CRB/Extras) | XFS; install on a 4K-logical-block disk |
-| openSUSE Leap 16.0 | `test/opensuse-leap16/golden-image-setup-leap16.sh` | TUNA OSS | XFS; target disk must be empty |
+| Debian 12 | `dist/golden/debian12/golden-image-setup-debian12.sh` | Aliyun (bookworm + backports) | ESP at least 256 MiB |
+| Debian 13 | `dist/golden/debian13/golden-image-setup-debian13.sh` | Aliyun (trixie) | ESP at least 256 MiB |
+| Ubuntu 24.04 | `dist/golden/ubuntu2404/golden-image-setup-ubuntu2404.sh` | Aliyun (noble) | ESP rebuild required |
+| Ubuntu 26.04 | `dist/golden/ubuntu2604/golden-image-setup-ubuntu2604.sh` | Aliyun (runtime suite detection) | ESP 4K conversion required |
+| Fedora 44 | `dist/golden/fedora44/golden-image-setup-fedora44.sh` | Aliyun (fedora + updates) | XFS; install on a 4K-logical-block disk |
+| AlmaLinux 10.2 | `dist/golden/almalinux10/golden-image-setup-almalinux10.sh` | Huawei Cloud (BaseOS/AppStream/CRB/Extras) | XFS; install on a 4K-logical-block disk |
+| openSUSE Leap 16.0 | `dist/golden/opensuse-leap16/golden-image-setup-leap16.sh` | TUNA OSS | XFS; target disk must be empty |
+| Arch Linux | `dist/golden/archlinux/golden-image-setup-archlinux.sh` | TUNA (archlinux) | ext4; mkinitcpio (`autodetect` removed) |
 
-Every script embeds the `initramfs-nbft` components and the GRUB 2.14 artifact, so a single file can be copied into the master and executed. After changing components or the GRUB artifact, rerun `python3 test/shared/embed-components.py` in the firmware repository.
+The generated scripts embed the `initramfs-nbft` components and the GRUB 2.14 artifact, so a single file can be copied into the master and executed. Templates live under `golden/<directory>/`; generation writes to `dist/golden/`, and the CI `golden` job uploads that directory with `SHA256SUMS` as the `golden-image-setup` build artifact. After changing components or the GRUB artifact, run `golden/shared/build-grub-efi.sh` and `golden/shared/embed-components.py` in the firmware repository, then verify with `test/shared/verify-embed.py`.
 
 ## Native NBFT and NBCT
 
@@ -43,7 +47,7 @@ This project consumes the custom NBCT table through the dracut `95nbft` module. 
 - initramfs integration uses the initramfs-tools `hooks/nbft` and `scripts/local-top/nbft`.
 - Debian 12's 6.1 kernel lacks NVMe authentication support and requires the 6.12 backports kernel; Debian 13 and Ubuntu use their stock kernels.
 - The Ubuntu 24.04 cloud image ships a 106 MiB ESP and requires a 4K FAT32 rebuild; Ubuntu 26.04 meets the size requirement and needs only the 4K conversion.
-- GRUB arguments include `net.ifnames=0 ip=dhcp nbft_auto`; Debian 12's stock GRUB 2.06 hangs on the SAN path, so the script embeds GRUB 2.14.
+- GRUB arguments include `net.ifnames=0 ip=dhcp nbft_auto`; Debian 12's stock GRUB 2.06 hangs on the SAN path, so generation embeds GRUB 2.14.
 
 ### Fedora
 
@@ -76,11 +80,11 @@ RHEL 9.x has not been tested. Its 5.14 kernel predates the upstream NVMe/TCP TLS
 2. Use a 4K-logical-block virtual disk; XFS and Agama scenarios impose additional disk constraints.
 3. After the unattended installation, run A–F inside the master. `--skip-disk` skips only the GPT conversion and ESP rebuild; ESP contents are still refreshed.
 4. Complete PXE cold-boot acceptance on an isolated network: two controller records on the target, the packet-capture criteria and a login prompt.
-5. After component changes, rerun `embed-components.py` and run `test/test-nbft-connect-nbct.sh` under both dash and bash.
+5. After component changes, regenerate and verify in the firmware repository (`build-grub-efi.sh`, `embed-components.py`, `verify-embed.py`), and run `test/test-nbft-connect-nbct.sh` under both dash and bash.
 
 ## What's next
 
 - [System Disk Customization](../tasks/system-disk.md)
 - [Build Signed Firmware](../tasks/build-firmware.md)
 - [Firmware Contract](./firmware-contract.md)
-- Firmware distribution matrix: <https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-matrix.md>
+- Firmware distribution matrix: <https://github.com/dutyc/kurrent-firmware/blob/main/docs/en/distributions.md>

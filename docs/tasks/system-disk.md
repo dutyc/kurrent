@@ -48,9 +48,12 @@
 ### 2. 脚本获取
 
 ```bash
+# download the golden-image-setup artifact from the firmware CI, or generate locally:
 git clone https://github.com/dutyc/kurrent-firmware
 cd kurrent-firmware
-ls test/*/golden-image-setup-*.sh
+bash golden/shared/build-grub-efi.sh
+python3 golden/shared/embed-components.py
+ls dist/golden/*/golden-image-setup-*.sh
 ```
 
 按下表选择与母盘对应的目录与默认参数：
@@ -64,8 +67,9 @@ ls test/*/golden-image-setup-*.sh
 | Fedora 44<br>`fedora44` | Server DVD；XFS/LVM；须在 4K 逻辑块盘上安装；dracut `95nbft` | `uname -r`<br>`mirrors.aliyun.com/fedora` |
 | AlmaLinux 10.2<br>`almalinux10` | minimal ISO；kickstart，XFS；须在 4K 逻辑块盘上安装；dracut `95nbft` | `uname -r`<br>`repo.huaweicloud.com/almalinux` |
 | openSUSE Leap 16.0<br>`opensuse-leap16` | online installer（Agama）；Agama profile，XFS；目标盘须为空；dracut `95nbft` | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/opensuse` |
+| Arch Linux<br>`archlinux` | arch ISO（2026.11.01）；archinstall；mkinitcpio | `uname -r`<br>`mirrors.tuna.tsinghua.edu.cn/archlinux` |
 
-脚本内嵌 initramfs 组件与 GRUB 2.14，单个 `.sh` 可拷入母盘运行，无需完整仓库。
+生成的脚本内嵌 initramfs 组件与 GRUB 2.14，单个 `.sh` 可拷入母盘运行，无需完整仓库。
 
 ### 3. 脚本执行
 
@@ -100,7 +104,7 @@ A–F：装依赖与内核 → 写 initramfs 消费模块 → 修 fstab 与 GRUB
 
 修改 fstab 与 GRUB 前保留 `.golden-*.bak`；转换前 GPT 备份到 `/root/golden-image-gpt-512-*.bak`，冷启动验收通过前保留。
 
-磁盘契约与实现细节见固件仓[母盘定制指南](https://github.com/dutyc/kurrent-firmware/blob/main/docs/golden-image-customization-debian12.md)。
+磁盘契约与实现细节见固件仓[发行版矩阵](https://github.com/dutyc/kurrent-firmware/blob/main/docs/zh/distributions.md)。
 
 ## 部署到存储节点
 
