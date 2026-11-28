@@ -1,6 +1,6 @@
 """dnsmasq hosts 台账：绑定、吊销封禁与解除。"""
 
-from control_plane.app.dnsmasq import IGNORE, DnsmasqHosts, HostBinding
+from control_plane.app.boot.dnsmasq import IGNORE, DnsmasqHosts, HostBinding
 
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"

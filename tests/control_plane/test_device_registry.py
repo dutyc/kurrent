@@ -178,7 +178,7 @@ class TestRegistrationWindowExpiry:
 
         client.post("/settings/registration-window", json={"ttl_minutes": 30}, headers=auth_headers)
         # 直接改写 settings.json：opened_at 改为 1 小时前 → TTL 已过
-        from control_plane.app.stores import runtime_settings
+        from control_plane.app.core.stores import runtime_settings
         with runtime_settings.locked():
             runtime_settings.set("registration_window", {
                 "opened_at": (_dt.datetime.now().astimezone() - _dt.timedelta(hours=1)).isoformat(),
@@ -194,7 +194,7 @@ class TestRegistrationWindowExpiry:
     def test_expired_window_reopen_overwrites(self, client, auth_headers):
         import datetime as _dt
 
-        from control_plane.app.stores import runtime_settings
+        from control_plane.app.core.stores import runtime_settings
         with runtime_settings.locked():
             runtime_settings.set("registration_window", {
                 "opened_at": (_dt.datetime.now().astimezone() - _dt.timedelta(hours=1)).isoformat(),

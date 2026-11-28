@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from control_plane.app import ratelimit
-from control_plane.app.config import settings
+from control_plane.app.core import ratelimit
+from control_plane.app.core.config import settings
 
 MAC = "00:11:22:33:44:55"
 

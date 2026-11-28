@@ -31,6 +31,8 @@ from typing import Any
 from cryptography import x509
 from fastapi import HTTPException
 
+from .runtime import nqn_to_iqn
+
 log = logging.getLogger("agent")
 
 
@@ -334,16 +336,6 @@ def to_nqn(iqn: str) -> str:
     return "nqn." + iqn
 
 
-def nqn_to_iqn(nqn: str) -> str:
-    """NVMe NQN → iSCSI IQN（同后缀前缀变换，派生方向：NQN 权威，IQN 自动生成）。"""
-    nqn = nqn.strip().lower()
-    if nqn.startswith("iqn."):
-        return nqn
-    if nqn.startswith("nqn."):
-        return "iqn." + nqn[4:]
-    return "iqn." + nqn
-
-
 def disk_gpt_layout(path: str) -> str:
     """盘文件 GPT 扇区布局探测：'4k' | '512' | 'none'（无 GPT 签名或读取失败）。
 
@@ -365,9 +357,9 @@ def disk_gpt_layout(path: str) -> str:
 class NvmetBackend:
     """nvmet 后端（宿主原生，第三实现）。
 
-    不继承 Backend 基类（其 __init__ 初始化 docker 客户端，本后端无 docker 依赖；
-    直接继承会与 main 循环 import）——接口契约与 StgtBackend/LioBackend 一致，
-    由 main._make_backend 按声明 spec.agent.backend=nvmet 分支实例化。
+    不继承 Backend 基类（其 __init__ 初始化 docker 客户端，本后端无 docker 依赖）——
+    接口契约与 StgtBackend/LioBackend 一致，由 backends.create_backend 按声明
+    spec.agent.backend=nvmet 分支实例化。
     子系统标识使用 NQN（盘标识权威）：入参 iqn 为控制面盘标识的派生形态（由盘 NQN 同后缀
     变换而来），内部经 to_nqn 还原为 NQN 写入 configfs（nvmet 不接受 iqn. 前缀的子系统 NQN）。"""
 

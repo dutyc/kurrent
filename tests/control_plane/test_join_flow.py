@@ -12,8 +12,8 @@ import pytest
 import yaml
 
 from control_plane.app import pki as pki_mod
-from control_plane.app.config import settings
-from control_plane.app.stores import agents
+from control_plane.app.core.config import settings
+from control_plane.app.core.stores import agents
 
 _FAKE_CERTS = {"client.crt": b"FAKE-CLIENT", "serving.crt": b"FAKE-SERVING"}
 

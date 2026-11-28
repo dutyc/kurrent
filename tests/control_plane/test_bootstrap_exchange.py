@@ -11,7 +11,8 @@ import os
 import pytest
 import yaml
 
-from control_plane.app import bootstrap_exchange, pki
+from control_plane.app.auth import bootstrap_exchange
+from control_plane.app import pki
 
 
 def _write_source(tmp_path):

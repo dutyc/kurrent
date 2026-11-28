@@ -64,6 +64,7 @@ _cfg.DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE = str(_STATE / "bootstrap-nvmet.token")
 Path(_cfg.DEFAULT_NVMET_BOOTSTRAP_TOKEN_FILE).write_text("placeholder.token\n", encoding="utf-8")
 
 import app.main as agent_main  # noqa: E402
+from app import routes as routes_mod  # noqa: E402
 
 
 @pytest.fixture()
@@ -130,7 +131,7 @@ def fake_host():
             if nqn not in self.subsystems:
                 raise NvmetHostError(404, f"subsystem not found: {nqn}")
             if not self.tls_ready:
-                raise NvmetHostError(409, "TLS port disabled (NVMET_TLS_PORT_ID 为空)")
+                raise NvmetHostError(409, "TLS port disabled (NVMET_TLS_PORT_ID is empty)")
             self.calls.append(("set_tls_key", nqn, hostnqn, psk))
             self.tls_keys[(nqn, hostnqn)] = 1
 
@@ -176,8 +177,8 @@ def agent_client(monkeypatch, fake_host, tmp_path):
     disk_dir = tmp_path / "disks"
     disk_dir.mkdir()
     fake = NvmetBackend(host, cache, str(disk_dir), "nqn.2026-07.com.test")
-    monkeypatch.setattr(agent_main, "backend", fake)
-    agent_main._backend_probe_cache.update(ts=0.0, value=None)  # healthz 探针缓存跨用例不残留
+    monkeypatch.setattr(routes_mod, "backend", fake)
+    routes_mod._backend_probe_cache.update(ts=0.0, value=None)  # healthz 探针缓存跨用例不残留
     client = TestClient(agent_main.app, base_url="https://testserver")
     return client, fake, calls
 

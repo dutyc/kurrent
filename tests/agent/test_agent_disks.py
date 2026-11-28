@@ -64,10 +64,10 @@ def test_backend_validate_disk_file(backend, tmp_path):
 
 def test_create_disk_rejects_512_gpt(agent_client, monkeypatch):
     """512 布局母盘克隆：400 + 可操作指引；不落 backing、不建子系统。"""
-    import app.main as agent_main
+    from app import disks as disks_mod
 
     client, backend, calls = agent_client
-    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    monkeypatch.setattr(disks_mod, "DISK_DIR", backend.disk_dir)
     _write_gpt(os.path.join(backend.disk_dir, "_tpl_win10.img"), 512)
     res = client.post("/lun/disk", json={"iqn": IQN_UBUNTU, "master": "_tpl_win10.img"})
     assert res.status_code == 400
@@ -78,10 +78,10 @@ def test_create_disk_rejects_512_gpt(agent_client, monkeypatch):
 
 def test_create_disk_accepts_4k_gpt(agent_client, monkeypatch):
     """4K 原生 GPT 母盘：正常克隆落盘 + 建子系统。"""
-    import app.main as agent_main
+    from app import disks as disks_mod
 
     client, backend, calls = agent_client
-    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    monkeypatch.setattr(disks_mod, "DISK_DIR", backend.disk_dir)
     _write_gpt(os.path.join(backend.disk_dir, "_tpl_ubuntu.img"), 4096)
     res = client.post("/lun/disk", json={"iqn": IQN_UBUNTU, "master": "_tpl_ubuntu.img"})
     assert res.status_code == 200
@@ -95,10 +95,10 @@ def test_create_disk_accepts_4k_gpt(agent_client, monkeypatch):
 
 def test_create_disk_rejects_master_and_filename_traversal(agent_client, monkeypatch):
     """master/filename 只能是盘目录内的裸文件名：`..` 与分隔符一律 400，且不建子系统。"""
-    import app.main as agent_main
+    from app import disks as disks_mod
 
     client, backend, calls = agent_client
-    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    monkeypatch.setattr(disks_mod, "DISK_DIR", backend.disk_dir)
     for body in (
         {"iqn": IQN_UBUNTU, "master": "../../etc/hostname"},
         {"iqn": IQN_UBUNTU, "master": "/etc/hostname"},
@@ -111,10 +111,10 @@ def test_create_disk_rejects_master_and_filename_traversal(agent_client, monkeyp
 
 def test_create_disk_rejects_iqn_traversal(agent_client, monkeypatch):
     """IQN 后缀会派生宿主 NQN 并拼进 configfs 路径：`..`/分隔符一律 400。"""
-    import app.main as agent_main
+    from app import disks as disks_mod
 
     client, backend, calls = agent_client
-    monkeypatch.setattr(agent_main, "DISK_DIR", backend.disk_dir)
+    monkeypatch.setattr(disks_mod, "DISK_DIR", backend.disk_dir)
     for iqn in (
         "iqn.2026-07.com.test:../../probe",
         "iqn.2026-07.com.test:..",
@@ -157,14 +157,14 @@ def test_backend_scan_skips_master_case_insensitive(backend):
 
 def test_master_scanner_case_insensitive(tmp_path):
     """母盘清单同样认大小写变体（与 scan 的跳过条件严格一致：是母盘 ⇔ 进清单 ⇔ 不建子系统）。"""
-    import app.main as agent_main
+    from app.disks import MasterScanner
 
     d = tmp_path / "masters"
     d.mkdir()
     _write_gpt(str(d / "_tpl_ubuntu.img"), 4096)
     _write_gpt(str(d / "_TPL_win11.img"), 512)
     (d / "worker-01.ubuntu.img").write_bytes(b"x")
-    scanner = agent_main.MasterScanner(str(d))
+    scanner = MasterScanner(str(d))
     items = scanner._scan()
     assert {i["name"]: i["gpt"] for i in items} == {
         "_tpl_ubuntu.img": "4k", "_TPL_win11.img": "512"}
@@ -175,14 +175,14 @@ def test_master_scanner_case_insensitive(tmp_path):
 
 def test_master_scanner_gpt_field(tmp_path):
     """母盘清单带 gpt 布局字段（前端据此标注 512 不可克隆）；非 _tpl_ 文件不入清单。"""
-    import app.main as agent_main
+    from app.disks import MasterScanner
 
     d = tmp_path / "masters"
     d.mkdir()
     _write_gpt(str(d / "_tpl_ubuntu.img"), 4096)
     _write_gpt(str(d / "_tpl_win10.img"), 512)
     (d / "worker-01.ubuntu.img").write_bytes(b"x")
-    scanner = agent_main.MasterScanner(str(d))
+    scanner = MasterScanner(str(d))
     items = scanner._scan()
     assert {i["name"]: i["gpt"] for i in items} == {
         "_tpl_ubuntu.img": "4k", "_tpl_win10.img": "512"}

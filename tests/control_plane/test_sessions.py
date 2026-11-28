@@ -5,10 +5,11 @@ import time
 import pytest
 import yaml
 
-from control_plane.app import auth as auth_mod
-from control_plane.app import config as cp_config
-from control_plane.app import pki, sessions
-from control_plane.app.config import settings
+from control_plane.app.auth import auth as auth_mod
+from control_plane.app.core import config as cp_config
+from control_plane.app import pki
+from control_plane.app.auth import sessions
+from control_plane.app.core.config import settings
 
 ADMIN_DN = "/CN=admin/O=admin"
 

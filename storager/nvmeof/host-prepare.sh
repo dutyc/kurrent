@@ -12,7 +12,7 @@
 set -u
 
 if [ "$#" -ne 0 ]; then
-	printf '不支持参数 %s：本脚本只做需 root 的就位；只读诊断用 kurrent host check --role storage\n' "$*" >&2
+	printf 'unsupported argument %s: this script only performs root-required setup; for read-only diagnostics use kurrent host check --role storage\n' "$*" >&2
 	exit 2
 fi
 
@@ -56,87 +56,87 @@ tlshd_version() {
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
 
 if [ "$(id -u)" -ne 0 ]; then
-	printf '需 root 运行（sudo bash %s）；只读诊断用 kurrent host check --role storage\n' "$0" >&2
+	printf 'must run as root (sudo bash %s); for read-only diagnostics use kurrent host check --role storage\n' "$0" >&2
 	exit 1
 fi
 
-printf '== 1/4 内核模块（%s）\n' "$MODULES"
+printf '== 1/4 kernel modules (%s)\n' "$MODULES"
 for m in $MODULES; do
 	if module_loaded "$m"; then
-		ok "已加载: $m"
+		ok "loaded: $m"
 	elif modprobe "$m" 2>/dev/null && module_loaded "$m"; then
-		ok "已加载: $m（modprobe）"
+		ok "loaded: $m (modprobe)"
 	else
-		fail "加载失败: $m（内核 $(uname -r) 不含该模块？）"
+		fail "load failed: $m (does kernel $(uname -r) provide this module?)"
 	fi
 done
 for m in $MODULES; do
 	if module_persisted "$m"; then
-		ok "重启持久化: $m"
+		ok "persistent across reboot: $m"
 	else
 		[ -f "$CONF" ] || printf '# kurrent 存储节点：nvmet 数据面模块（由 host-prepare.sh 维护）\n' > "$CONF"
 		printf '%s\n' "$m" >> "$CONF"
-		todo "写入 $CONF: $m（重启自动加载）"
+		todo "wrote $CONF: $m (loaded automatically on boot)"
 	fi
 done
 
-printf '== 2/4 configfs 挂载（%s）\n' "$TARGET"
+printf '== 2/4 configfs mount (%s)\n' "$TARGET"
 if configfs_mounted; then
-	ok "已挂载"
+	ok "mounted"
 elif mount -t configfs configfs "$TARGET" 2>/dev/null && configfs_mounted; then
-	ok "已挂载（mount）"
+	ok "mounted (mount)"
 else
-	fail "挂载失败: $TARGET（目录缺失或权限异常）"
+	fail "mount failed: $TARGET (missing directory or permission problem)"
 fi
 if configfs_persisted; then
-	ok "重启持久化: /etc/fstab"
+	ok "persistent across reboot: /etc/fstab"
 else
 	printf 'configfs %s configfs defaults 0 0\n' "$TARGET" >> /etc/fstab
-	todo "写入 /etc/fstab（重启自动挂载）"
+	todo "wrote /etc/fstab (mounted automatically on boot)"
 fi
 
-printf '== 3/4 验证\n'
+printf '== 3/4 verification\n'
 if [ -d "$TARGET/nvmet" ]; then
-	ok "configfs nvmet 就绪: $TARGET/nvmet"
+	ok "configfs nvmet ready: $TARGET/nvmet"
 else
-	fail "configfs nvmet 不可见（模块或挂载异常）"
+	fail "configfs nvmet not visible (module or mount problem)"
 fi
 
-printf '== 4/4 NVMe/TCP TLS 握手服务（tlshd >= %s）\n' "$TLSHD_MIN"
+printf '== 4/4 NVMe/TCP TLS handshake service (tlshd >= %s)\n' "$TLSHD_MIN"
 bin=$(tlshd_bin)
 if [ -z "$bin" ]; then
 	tlshd_bad=true
-	fail "未安装 tlshd（ktls-utils >= $TLSHD_MIN；内核 TLS 握手依赖它）"
+	fail "tlshd not installed (ktls-utils >= $TLSHD_MIN; the kernel TLS handshake depends on it)"
 else
 	ver=$(tlshd_version "$bin")
 	if [ -z "$ver" ]; then
 		tlshd_bad=true
-		fail "无法解析版本: $bin -v（需要 ktls-utils >= $TLSHD_MIN）"
+		fail "cannot parse the version: $bin -v (ktls-utils >= $TLSHD_MIN required)"
 	elif version_ge "$ver" "$TLSHD_MIN"; then
-		ok "版本 $ver: $bin"
+		ok "version $ver: $bin"
 	else
 		tlshd_bad=true
-		fail "版本过低: $ver（需 >= $TLSHD_MIN；1.5.0 起进程 keyring 优先，旧版会让轮换后的旧 PSK 遮蔽新 PSK）"
+		fail "version too old: $ver (need >= $TLSHD_MIN; since 1.5.0 the process keyring takes precedence; older versions let the old PSK mask the new one after a rotation)"
 	fi
 	if command -v systemctl >/dev/null 2>&1; then
 		state=$(systemctl is-active tlshd 2>/dev/null || true)
 		if [ "$state" = "active" ]; then
-			ok "服务运行中: tlshd"
+			ok "service running: tlshd"
 		elif [ "$state" = "unknown" ]; then
-			todo "无 tlshd systemd 单元（确认该服务由其他方式常驻）"
+			todo "no tlshd systemd unit (make sure the service runs some other way)"
 		else
 			tlshd_bad=true
-			fail "服务未运行: tlshd（${state:-未知状态}；sudo systemctl enable --now tlshd）"
+			fail "service not running: tlshd (${state:-unknown}; sudo systemctl enable --now tlshd)"
 		fi
 	fi
 fi
 
 if [ "$failed" -ne 0 ]; then
-	printf '宿主前置未就绪（见上方 FAIL 项）\n' >&2
+	printf 'host prerequisites are not ready (see FAIL items above)\n' >&2
 	if $tlshd_bad; then
-		printf '  tlshd: 安装/升级 ktls-utils >= %s 并 sudo systemctl enable --now tlshd；构建步骤见 %s\n' \
+		printf '  tlshd: install/upgrade ktls-utils >= %s and run sudo systemctl enable --now tlshd; build steps: %s\n' \
 			"$TLSHD_MIN" "$SCRIPT_DIR/nvmet-host/README.md" >&2
 	fi
 	exit 1
 fi
-printf '宿主前置就绪：nvmet 数据面可对外服务\n'
+printf 'host prerequisites ready: the nvmet data plane can serve\n'

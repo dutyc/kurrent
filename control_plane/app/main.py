@@ -1,7 +1,8 @@
-"""控制面组装入口：装配共享存储（stores）、信任根域（trust）与资源域路由。
+"""控制面组装入口：装配共享存储、各域服务与 HTTP 路由。
 
-业务逻辑按域拆分到 app/utils.py（纯工具）、app/stores.py（全局单例 + 审计）、
-app/auth.py（认证器链/RBAC/会话）、app/trust.py（注册窗口/证明强制）与 app/routers/ 各域。
+业务逻辑按域分包：core/（配置、存储、工具、限流）、auth/（认证器链、会话、审计）、
+pki/（CA、证书登记与 CRL）、trust/（注册窗口、TPM 证明）、boot/（引导资产与 DHCP 派生）、
+fleet/（设备、Worker、Agent 与凭据调度）、admin/（设置与运维审计）。
 本模块仅负责：创建 FastAPI 应用、按序挂载路由、启动时执行一次旧数据迁移与凭据自举。
 """
 
@@ -12,13 +13,29 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
-from . import (audit, audit_middleware, boot_pki, bootstrap_exchange, cert_bootstrap,
-               config, dnsmasq_conf, maintenance, nginx_reload, pki,
-               runtime_status, users, utils)
-from .principal import enforce_principal
-from .routers import (agents, boot, boot_assets, certs, devices, enroll,
-                      operations, session, settings, tokens, workers)
-from .routers import config as config_status
+from . import pki
+from .admin import routes_config as config_status
+from .admin import routes_operations as operations
+from .admin import routes_settings as settings
+from .auth import (audit, bootstrap_exchange, cert_bootstrap, users)
+from .auth import middleware
+from .auth import routes_session as session
+from .auth import routes_tokens as tokens
+from .auth.principal import enforce_principal
+from .boot import conf
+from .boot import nginx_reload
+from .boot import routes
+from .boot import routes_assets
+from .core import (config, maintenance, runtime_status, utils)
+from .fleet import credentials as worker_credentials
+from .fleet import routes_agents as agents
+from .fleet import routes_credentials as credentials_routes
+from .fleet import routes_devices as devices
+from .fleet import routes_worker_disks as worker_disks
+from .fleet import routes_workers as workers
+from .pki import boot as boot_pki
+from .pki import routes as certs
+from .pki import routes_enroll as enroll
 
 log = logging.getLogger("control-plane")
 
@@ -26,7 +43,7 @@ log = logging.getLogger("control-plane")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 凭据对账线程：控制面→Agent 推送的幂等重放（间隔 ≤0 禁用，测试环境用）
-    workers.start_credential_reconciler()
+    worker_credentials.start_credential_reconciler()
     # CRL 定期重签：防止长跑超过 nextUpdate 后 nginx 拒绝全部客户端证书
     crl_stop = maintenance.start_crl_refresher()
     yield
@@ -35,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="IPXE-All-Ready Control Plane",
+    title="Kurrent Control Plane",
     lifespan=lifespan,
     # 全路由主体类比对先于各路由的认证依赖执行（越类 403）
     dependencies=[Depends(enforce_principal)],
@@ -46,15 +63,17 @@ app = FastAPI(
 )
 
 # 认证审计：每请求 allow/deny 事件（写失败 → 503）；引导链端点不在管理面审计范围
-audit_middleware.install(app)
+middleware.install(app)
 
 # boot 域最先挂载：/devices/report、/devices/challenge 必须先于 devices 域 /devices/{mac} 匹配
-app.include_router(boot.router)
-app.include_router(boot_assets.router)
+app.include_router(routes.router)
+app.include_router(routes_assets.router)
 app.include_router(devices.router)
 app.include_router(settings.router)
 app.include_router(agents.router)
 app.include_router(workers.router)
+app.include_router(worker_disks.router)
+app.include_router(credentials_routes.router)
 app.include_router(operations.router)
 app.include_router(tokens.router)
 app.include_router(certs.router)
@@ -78,10 +97,10 @@ runtime_status.reset()
 
 # 启动时按 spec.networking 生成 dnsmasq.conf（yml 是权威，conf 为派生物）
 try:
-    dnsmasq_conf.ensure_dnsmasq_conf(config.DEFAULT_DNSMASQ_CONF)
+    conf.ensure_dnsmasq_conf(config.DEFAULT_DNSMASQ_CONF)
 except Exception as exc:
     log.exception("dnsmasq: failed to render dnsmasq.conf")
-    runtime_status.record_error("dnsmasq.conf 生成失败", exc)
+    runtime_status.record_error("failed to render dnsmasq.conf", exc)
 
 # 启动时幂等生成 TOFU 引导链服务器证书；声明漂移默认只报告，rotateOnChange=true 时重签
 try:
@@ -93,10 +112,10 @@ try:
             nginx_reload.reload_nginx()
         except Exception as exc:
             log.exception("cert: rotated but nginx reload failed")
-            runtime_status.record_warning("服务器证书已轮换但 nginx reload 失败", exc)
+            runtime_status.record_warning("server certificate rotated but nginx reload failed", exc)
 except Exception as exc:
     log.exception("cert: failed to ensure server certificate")
-    runtime_status.record_error("服务器证书生成失败", exc)
+    runtime_status.record_error("failed to ensure the server certificate", exc)
 
 # 启动时幂等生成组件 PKI：三分根（users/nodes/control）+ 控制面自身 client cert +
 # 管理凭据（admin 证书/admin.conf/会话密钥）——CLI 自动发现 admin.conf 走 443 mTLS。
@@ -126,7 +145,7 @@ try:
     utils.align_owner(config.settings.agents_file, ref=state_root)
 except Exception as exc:
     log.exception("pki: failed to ensure component PKI")
-    runtime_status.record_error("组件 PKI 初始化失败", exc)
+    runtime_status.record_error("failed to initialize the component PKI", exc)
 
 # 首次部署的管理凭据交换：交换目录存在 request 时发布 admin.conf 副本与 ready
 # 清单（含 SHA-256），CLI 安装并自检后删除。失败进入 runtime_status（/healthz 503）。
@@ -136,7 +155,7 @@ try:
     )
 except Exception as exc:
     log.exception("bootstrap exchange: failed to publish management credentials")
-    runtime_status.record_error("管理凭据交换失败", exc)
+    runtime_status.record_error("failed to publish the management credential exchange", exc)
 
 # 启动时幂等生成 Secure Boot 引导 PKI（boot CA 10 年 + 4443 叶证书 1 年）。
 # 与组件三分根完全分离；失败会让 4443 引导入口与 TPM 准入不可用，不影响 443 管理面。

@@ -351,8 +351,8 @@ def test_push_credential_endpoint(agent_client):
     assert ("set_host", NQN_UBUNTU, HOST_NQN, SECRET) in calls
     assert "worker-01" in backend.cache._entries
     # 审计：op=credential，req 只含布尔标记不含明文
-    import app.main as agent_main
-    entries = agent_main.oplog.read()["entries"]
+    from app.oplog import oplog as oplog_mod
+    entries = oplog_mod.read()["entries"]
     cred = [e for e in entries if e["op"] == "credential"]
     assert cred and cred[-1]["result"] == "ok"
     assert SECRET not in json.dumps(cred, ensure_ascii=False)
@@ -426,7 +426,7 @@ def test_verify_client_cert_requires_tls():
     """明文（scheme=http）一律 401；TLS 路径在单测放行（CN/CRL 由 component 测试覆盖）。"""
     from fastapi import HTTPException
 
-    import app.main as agent_main
+    from app import routes as routes_mod
 
     class _Plain:
         scope = {"scheme": "http"}
@@ -435,9 +435,9 @@ def test_verify_client_cert_requires_tls():
         scope = {"scheme": "https"}
 
     with pytest.raises(HTTPException) as exc_info:
-        agent_main.verify_client_cert(_Plain())
+        routes_mod.verify_client_cert(_Plain())
     assert exc_info.value.status_code == 401
-    agent_main.verify_client_cert(_TLS())  # insecure 测试模式放行
+    routes_mod.verify_client_cert(_TLS())  # insecure 测试模式放行
 
 
 def test_push_credential_requires_nvmet_backend(monkeypatch):
@@ -445,8 +445,9 @@ def test_push_credential_requires_nvmet_backend(monkeypatch):
     from fastapi.testclient import TestClient
 
     from app import main as agent_main
+    from app import routes as routes_mod
 
-    monkeypatch.setattr(agent_main, "backend", object())
+    monkeypatch.setattr(routes_mod, "backend", object())
     client = TestClient(agent_main.app, base_url="https://testserver")
     res = client.post("/credential", json={"worker_id": "w"})
     assert res.status_code == 400

@@ -35,7 +35,7 @@ spec:
 )
 os.environ["KURRENT_CONFIG_FILE"] = str(_CONF_FILE)
 
-import control_plane.app.config as cp_cfg  # noqa: E402
+import control_plane.app.core.config as cp_cfg  # noqa: E402
 # 容器内路径常量重定向到测试状态目录（Settings 属性动态读常量，无需重建实例）
 cp_cfg.DEFAULT_AGENTS_FILE = str(_STATE_DIR / "agents.yml")
 cp_cfg.DEFAULT_WORKERS_FILE = str(_STATE_DIR / "workers.yml")

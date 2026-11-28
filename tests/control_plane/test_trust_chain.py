@@ -6,7 +6,7 @@ boot-vars 携带 quote 验签放行。强制开关开启后未登记 AK 的设�
 
 import pytest
 
-from control_plane.app.config import settings
+from control_plane.app.core.config import settings
 
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
@@ -393,7 +393,7 @@ class TestBootVarsWithDisk:
 
 
 class TestDeviceBindingAuthority:
-    """设备台账 bound_worker_id 是绑定权威；hostname/dnsmasq 投影只作兜底，不得反向覆盖。"""
+    """设备台账 bound_worker_id 是绑定权威；hostname/dnsmasq 投影只作回退，不得反向覆盖。"""
 
     def test_device_binding_beats_stale_dnsmasq_projection(self, client, auth_headers, tpm_identity):
         # 设备台账（权威）绑定到 worker-01；伪造滞后的 dnsmasq 投影指向 worker-02
@@ -470,7 +470,7 @@ class TestBaselineApproval:
 
 def test_menu_default_derivation_prefers_explicit_override():
     """menu_default 推导：显式覆盖 > default_disk(boot-os) > reboot。"""
-    from control_plane.app.routers.boot import _menu_default_for
+    from control_plane.app.boot.routes import _menu_default_for
 
     assert _menu_default_for({"boot": {"menu_default": "config"}, "default_disk": "abc"}) == "config"
     assert _menu_default_for({"boot": {"menu-default": "exit"}, "default_disk": "abc"}) == "exit"

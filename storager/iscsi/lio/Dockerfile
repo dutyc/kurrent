@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 
 # 换阿里云源。bookworm 源在 deb822 格式的 debian.sources（URIs 字段），
 # 老镜像才在 sources.list；只替换域名，协议和路径不动，两种格式都覆盖。

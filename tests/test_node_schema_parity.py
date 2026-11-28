@@ -54,7 +54,7 @@ CORPUS = [
     {**_valid_node(), "apiVersion": "kurrent.io/v2"},
     {**_valid_node(), "kind": "Other"},
     {**_valid_node(), "metadata": {"name": "3f2a9c1d8b7e"}},
-    {**_valid_node(), "metadata": {"remark": "生产存储"}},
+    {**_valid_node(), "metadata": {"remark": "production storage"}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "/x", "nqnBase": "nqn.2026-07.com.x"}}},
     {**_valid_node(), "spec": {"agent": {"diskDir": "relative", "nqnBase": "nqn.2026-07.com.x"},
                               "controlPlane": {"url": "https://10.0.0.1"}}},

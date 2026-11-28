@@ -2,17 +2,17 @@
 
 常规用例在 tests/conftest.py 的 KURRENT_CP_INSECURE=1 下运行（开发放行）；本模块
 用例先关闭开发模式（secure fixture），再逐凭据断言链行为——对应
-control_plane/app/auth.py 的 authenticate / authorize_request / sign_session。
+control_plane/app/auth/auth.py 的 authenticate / authorize_request / sign_session。
 """
 
 import pytest
 import yaml
 from cryptography.x509.oid import NameOID
 
-from control_plane.app import auth as auth_mod
-from control_plane.app import config as cp_config
+from control_plane.app.auth import auth as auth_mod
+from control_plane.app.core import config as cp_config
 from control_plane.app import pki
-from control_plane.app.config import settings
+from control_plane.app.core.config import settings
 
 ADMIN_DN = "/CN=admin/O=admin"
 VIEWER_DN = "/CN=alice/O=viewer"
@@ -120,7 +120,7 @@ class TestSession:
             name, _, value = part.strip().partition("=")
             if name == auth_mod.SESSION_COOKIE and value:
                 return {"Cookie": f"{auth_mod.SESSION_COOKIE}={value}"}
-        raise AssertionError(f"set-cookie 缺 {auth_mod.SESSION_COOKIE}: {raw!r}")
+        raise AssertionError(f"set-cookie missing {auth_mod.SESSION_COOKIE}: {raw!r}")
 
     def test_session_roundtrip(self, client, secure):
         token = issue_admin_token()
@@ -195,7 +195,7 @@ class TestPrincipalMatrix:
         assert res.status_code == 403
 
     def test_unknown_user_forbidden(self, client, secure):
-        """证书 CN 不在 users.yml → 403（默认拒绝，不再按 CN 兜底 admin）。"""
+        """证书 CN 不在 users.yml → 403（默认拒绝，不再按 CN 回退 admin）。"""
         headers = {"X-Client-Cert-DN": "/CN=mallory", "X-Client-Class": "human"}
         assert client.get("/whoami", headers=headers).status_code == 403
 
@@ -209,7 +209,7 @@ class TestPrincipalMatrix:
         assert client.post("/devices", json={"mac": TEST_MAC}, headers=headers).status_code == 201
 
     def test_every_route_declares_principal(self):
-        """导入期兜底：任何 APIRoute 未声明主体类都应启动失败（此处断言装配结果）。"""
+        """导入期回退：任何 APIRoute 未声明主体类都应启动失败（此处断言装配结果）。"""
         from fastapi.routing import APIRoute
         from control_plane.app.main import app
         for route in app.routes:

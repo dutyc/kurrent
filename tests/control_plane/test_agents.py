@@ -2,7 +2,7 @@
 
 import pytest
 
-from control_plane.app.agent_client import AgentClient
+from control_plane.app.fleet.client import AgentClient
 
 
 @pytest.fixture()
@@ -13,7 +13,7 @@ def agent_payload():
         "role": {"disk": True, "cd": True},
         "tags": ["storage", "stgt"],
         "enabled": True,
-        "remark": "主存储节点",
+        "remark": "primary storage node",
     }
 
 
@@ -27,7 +27,7 @@ class TestAgentCrud:
         assert body["id"] == "a1b2c3d4e5f6"
         assert body["role"] == {"disk": True, "cd": True}
         assert body["storager_ip"] is None  # 未显式配置 → 缺省空；回退 base_url 主机名仅在 boot-vars 投影时
-        assert body["remark"] == "主存储节点"  # 备注（人类识别用，展示性质）
+        assert body["remark"] == "primary storage node"  # 备注（人类识别用，展示性质）
         assert "token" not in body  # 身份由 mTLS 组件证书承载，注册表无 token 字段
         # 列表（live=false：不做健康探测，返回纯台账）
         listing = client.get("/agents", params={"live": "false"}, headers=auth_headers).json()
@@ -59,7 +59,7 @@ class TestAgentCrud:
             "role": {"disk": True, "cd": False},
             "tags": ["storage", "lio"],
             "enabled": False,
-            "remark": "备存储节点",
+            "remark": "standby storage node",
         }, headers=auth_headers)
         assert res.status_code == 200
         body = res.json()
@@ -68,7 +68,7 @@ class TestAgentCrud:
         assert body["tags"] == ["storage", "lio"]
         assert body["enabled"] is False
         assert body["storager_ip"] is None
-        assert body["remark"] == "备存储节点"
+        assert body["remark"] == "standby storage node"
 
     def test_update_base_url_refused_for_auto_registered(self, client, auth_headers):
         """自动登记（tags 含 auto）节点：base_url 由节点声明管理，PUT 改地址 → 409 并指路
@@ -197,7 +197,7 @@ class TestAgentProbe:
     def test_probe_capabilities_error_dict_detail(self, client, auth_headers, monkeypatch):
         """capabilities 失败：502 + {"agent": base_url, "error": ...} dict detail 契约——
         API 文档「LUN 管理」节的 Agent 代理错误透传结构，WebUI extractDetail 与 CLI detailOf 消费。"""
-        from control_plane.app.agent_client import AgentAPIError
+        from control_plane.app.fleet.client import AgentAPIError
 
         monkeypatch.setattr(AgentClient, "healthz", lambda self: {"status": "ok"})
 
@@ -289,7 +289,7 @@ class TestMasters:
     def test_masters_aggregate(self, client, auth_headers, monkeypatch):
         from types import SimpleNamespace
 
-        from control_plane.app.stores import agents
+        from control_plane.app.core.stores import agents
 
         def fake_client(agent):
             return SimpleNamespace(list_masters=lambda: {
@@ -313,8 +313,8 @@ class TestMasters:
     def test_masters_partial_failure(self, client, auth_headers, monkeypatch):
         from types import SimpleNamespace
 
-        from control_plane.app.agent_client import AgentAPIError
-        from control_plane.app.stores import agents
+        from control_plane.app.fleet.client import AgentAPIError
+        from control_plane.app.core.stores import agents
 
         def flaky(agent):
             if agent.id == "b2c3d4e5f601":
@@ -402,7 +402,7 @@ class TestMasterTags:
         """/masters 聚合：已登记的母盘条目附加 os/os_version；未登记的不附加。"""
         from types import SimpleNamespace
 
-        from control_plane.app.stores import agents
+        from control_plane.app.core.stores import agents
 
         def fake_client(agent):
             return SimpleNamespace(list_masters=lambda: {
