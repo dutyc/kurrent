@@ -47,6 +47,7 @@ Changes touching the boot chain, credentials, or data plane need an end-to-end v
 AI is used in this project to generate implementation, tests, and refactoring. The division of responsibility:
 
 - **Syntax and implementation can go to AI**; architectural judgment, boundary drawing, and state ownership stay with people.
+- AI tools are driven by people and are not independent contributors; changes produced with their assistance remain the responsibility of the person directing the work, who must run the actual builds and tests and report measured results before submitting.
 - Whoever submits a PR must be able to explain the control-plane/data-plane boundary, boot ordering, and ownership of state and derived artifacts affected by the change.
 - Implementation-level imperfections are acceptable and can be iterated; changes that break load-bearing structure are not.
 - A change whose rationale cannot be explained beyond what was changed should begin as an Issue; that is more valuable than a direct PR.
