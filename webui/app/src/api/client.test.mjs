@@ -45,7 +45,7 @@ test('顶层 error 键（非 detail 结构）直用', () => {
   assert.equal(extractDetail({ error: 'boom' }), 'boom')
 })
 
-test('空对象 → ""（调用侧落 HTTP 状态兜底，不显示 "{}"）', () => {
+test('空对象 → ""（调用侧回退到 HTTP 状态，不显示 "{}"）', () => {
   assert.equal(extractDetail({}), '')
 })
 

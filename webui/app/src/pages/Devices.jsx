@@ -45,7 +45,7 @@ const TTL_OPTIONS = (t, max) => {
   return values.map((v) => ({ value: String(v), label: t('devices.regWindow.ttlUnit', { n: v }) }))
 }
 
-// 缺省上限（limits 未加载时的兜底，与 schema 默认值一致）
+// 缺省上限（limits 未加载时的回退，与 schema 默认值一致）
 const DEFAULT_MAX_DEVICES_UPPER = 1000
 const DEFAULT_MAX_TTL_MINUTES = 60
 
