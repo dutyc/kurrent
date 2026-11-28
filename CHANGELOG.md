@@ -9,7 +9,7 @@
 - **变更**：行为调整、接口变更、数据模型调整
 - **修复**：缺陷修复
 - 记录行为与接口层面的变化；注释、措辞等无行为影响的调整不单列
-- 涉及多个模块的改动，按模块分条列出；接口变更同时需同步 `api/control-plane-api.zh-CN.md` 与 `api/control-plane-api.en.md`（控制面 API 参考唯一权威；docs/ 文档站同步维护）
+- 涉及多个模块的改动，按模块分条列出；接口变更同时需同步 `docs/reference/api/` 与 `docs/en/reference/api/` 下的中英文页面
 
 ---
 
