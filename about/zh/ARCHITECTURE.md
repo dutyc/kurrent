@@ -57,11 +57,11 @@
 1. 设备通电 → DHCP（dnsmasq）→ TFTP 下载 iPXE 与 `boot.ipxe` 指针 → iPXE 启动，经 HTTPS 取回 `boot.ipxe.cfg`
 2. **设备身份**：`akgen` 在 TPM 内创建 AK（私钥不可导出）→ `akpub` 导出公钥与名称 → `/devices/report` 上报指纹、AK 与 Secure Boot 状态；未知 MAC **仅在注册窗口开启、携带有效 AK 且 Secure Boot 开启时**入池
 3. **挑战-证明**：`/devices/challenge` 取一次性 nonce → `quote ${nonce}` 对 PCR 0/2/4/7 生成 SHA-256 quote → `/boot-vars?…&quote=&quote_sig=`
-4. **`/boot-vars` 准入**：识别命中（MAC 经设备台账反查；未传 MAC 或台账未命中时用 hostname 兜底）→ **绑定即认证**（请求 MAC 必须属于命中 Worker 的绑定设备）→ TPM 证明（强制默认开启，无 AK / quote 无效 / nonce 重放 / PCR 与基线不符一律拒绝）→ 密钥库有条目才注入凭据（**nvmet 节点上，建系统盘时即自动签发**）；全部通过才投影 root-path、NQN 与密钥
+4. **`/boot-vars` 准入**：识别命中（MAC 经设备台账反查；未传 MAC 或台账未命中时用 hostname 回退）→ **绑定即认证**（请求 MAC 必须属于命中 Worker 的绑定设备）→ TPM 证明（强制默认开启，无 AK / quote 无效 / nonce 重放 / PCR 与基线不符一律拒绝）→ 密钥库有条目才注入凭据（**nvmet 节点上，建系统盘时即自动签发**）；全部通过才投影 root-path、NQN 与密钥
 5. 池中未绑定设备：reboot 循环等待绑定
 6. **连接数据面**：root-path 为 `nvme://<storager>:4421/<盘 NQN>?secret=…&tls_psk=…&tls_trsvcid=4421`，以 **DH-HMAC-CHAP** 完成连接控制、以 **TLS 1.3** 完成传输加密；密钥按 Worker 跟盘、仅随本次引导会话存活，不落盘
 7. **交接给 OS**：固件在 sanboot 时安装 **NBCT** 凭据表（自定义 ACPI 表，iBFT 式注册，每条记录含 traddr / trsvcid / nqn / hostnqn / secret，控制面已下发时还带 TLS PSK 与 TLS 端口）；initramfs 的 `nbft-connect` 消费 **NBFT**（网络与子系统发现）与 **NBCT**（凭据与 hostnqn 身份中继），带 PSK 时以 `--tls` 连 TLS 端口重连，并挂载根文件系统
-8. 系统启动到登录提示符——**盘内不写死任何一个字节的机器身份**
+8. 系统启动到登录提示符——**盘内不固定任何一个字节的机器身份**
 
 > 完成度：NBCT 由固件生成（固件补丁 `0009`）；**iPXE 侧生成 NBFT 仍是待实现项**——已验证的整机链路（QEMU + nvmet 六环，含认证）用注入的 NBFT 表模拟"固件预生成"阶段。
 
