@@ -1,4 +1,4 @@
-package main
+package validate
 
 import (
 	"strings"
@@ -20,7 +20,7 @@ func TestNormalizeCpURL(t *testing.T) {
 		{"api cp as path segment", "https://cp.example.com/api/cpx", "https://cp.example.com/api/cpx"},
 	}
 	for _, c := range cases {
-		got, err := normalizeCpURL("--cp-url", c.in)
+		got, err := NormalizeCPURL("--cp-url", c.in)
 		if err != nil || got != c.want {
 			t.Errorf("%s: got %q err=%v, want %q", c.name, got, err, c.want)
 		}
@@ -35,36 +35,36 @@ func TestValidateHTTPURLRejectsSensitiveParts(t *testing.T) {
 		"ftp://cp.example.com",
 		"https:///no-host",
 	} {
-		if _, err := validateHTTPURL("--server", raw); err == nil {
-			t.Errorf("%q 应被拒绝", raw)
+		if _, err := ValidateHTTPURL("--server", raw); err == nil {
+			t.Errorf("%q must be rejected", raw)
 		}
 	}
 }
 
 func TestValidateTokenID(t *testing.T) {
-	if got, err := validateTokenID(" abcdef "); err != nil || got != "abcdef" {
+	if got, err := ValidateTokenID(" abcdef "); err != nil || got != "abcdef" {
 		t.Fatalf("token id = %q, %v", got, err)
 	}
 	for _, raw := range []string{"abcdef.0123456789abcdef", "ABCDEF", "abcde", "abcdef0", ""} {
-		if _, err := validateTokenID(raw); err == nil {
-			t.Errorf("%q 应被拒绝", raw)
+		if _, err := ValidateTokenID(raw); err == nil {
+			t.Errorf("%q must be rejected", raw)
 		}
 	}
 }
 
 func TestValidateSerialAndReason(t *testing.T) {
-	if got, err := validateSerial("ABCDEF0123"); err != nil || got != "abcdef0123" {
+	if got, err := ValidateSerial("ABCDEF0123"); err != nil || got != "abcdef0123" {
 		t.Fatalf("serial = %q, %v", got, err)
 	}
-	if got, err := validateSerial("0xABCDEF"); err != nil || got != "abcdef" {
+	if got, err := ValidateSerial("0xABCDEF"); err != nil || got != "abcdef" {
 		t.Fatalf("0x serial = %q, %v", got, err)
 	}
 	for _, raw := range []string{"not-hex", "0x"} {
-		if _, err := validateSerial(raw); err == nil {
-			t.Errorf("%q 应被拒绝", raw)
+		if _, err := ValidateSerial(raw); err == nil {
+			t.Errorf("%q must be rejected", raw)
 		}
 	}
-	if _, err := validateRevocationReason("lost"); err == nil || !strings.Contains(err.Error(), "unspecified") {
-		t.Fatalf("未知原因 err = %v", err)
+	if _, err := ValidateRevocationReason("lost"); err == nil || !strings.Contains(err.Error(), "unspecified") {
+		t.Fatalf("unknown reason err = %v", err)
 	}
 }

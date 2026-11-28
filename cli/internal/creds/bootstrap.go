@@ -4,13 +4,15 @@
 // 的存在把凭据与证书复制到交换目录，重写为相对路径并写 ready（含 SHA-256）
 // 后删除 request。CLI 校验哈希、证书/私钥配对与 server 地址，安装到
 // ~/.kurrent 后用安装副本做一次 mTLS GET /whoami，全部通过才删除交换包。
-package main
+package creds
 
 import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"kurrent/cli/internal/fsx"
+	"kurrent/cli/internal/validate"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,15 +31,15 @@ const (
 	exchangePKI      = "pki"
 )
 
-// exchangeReadyFile 控制面发布的就绪清单（写 ready 先于删除 request）。
-type exchangeReadyFile struct {
+// ExchangeReadyFile 控制面发布的就绪清单（写 ready 先于删除 request）。
+type ExchangeReadyFile struct {
 	CreatedAt string            `json:"createdAt"`
 	Files     []string          `json:"files"`
 	SHA256    map[string]string `json:"sha256"`
 }
 
-// bootstrapBundle 校验通过、可安装的交换包。
-type bootstrapBundle struct {
+// BootstrapBundle 校验通过、可安装的交换包。
+type BootstrapBundle struct {
 	Dir       string
 	AdminConf string
 	Server    string
@@ -46,9 +48,9 @@ type bootstrapBundle struct {
 	Key       string
 }
 
-// requestBootstrapExchange 清掉上一次交换残留并写入本次请求。
-func requestBootstrapExchange(bootstrapDir string) error {
-	if err := ensurePrivateDir(bootstrapDir); err != nil {
+// RequestBootstrapExchange 清掉上一次交换残留并写入本次请求。
+func RequestBootstrapExchange(bootstrapDir string) error {
+	if err := fsx.EnsurePrivateDir(bootstrapDir); err != nil {
 		return err
 	}
 	for _, name := range []string{exchangeReady, exchangeConsumed, exchangeAdmin, exchangePKI} {
@@ -57,14 +59,14 @@ func requestBootstrapExchange(bootstrapDir string) error {
 		}
 	}
 	body := fmt.Sprintf("requested-at: %s\n", time.Now().UTC().Format(time.RFC3339))
-	if err := writeFileAtomic(filepath.Join(bootstrapDir, exchangeRequest), []byte(body), 0o600); err != nil {
+	if err := fsx.WriteFileAtomic(filepath.Join(bootstrapDir, exchangeRequest), []byte(body), 0o600); err != nil {
 		return fmt.Errorf("write bootstrap request: %w", err)
 	}
 	return nil
 }
 
-// waitBootstrapExchange 轮询 ready；超时返回错误（保留交换包供排查/重跑）。
-func waitBootstrapExchange(dir string, timeout time.Duration) error {
+// WaitBootstrapExchange 轮询 ready；超时返回错误（保留交换包供排查/重跑）。
+func WaitBootstrapExchange(dir string, timeout time.Duration) error {
 	ready := filepath.Join(dir, exchangeReady)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -78,13 +80,13 @@ func waitBootstrapExchange(dir string, timeout time.Duration) error {
 	}
 }
 
-// validateExchangeBundle 校验交换包：哈希、路径不越界、证书/私钥配对、CA 可解析、server 合法。
-func validateExchangeBundle(dir string) (*bootstrapBundle, error) {
+// ValidateExchangeBundle 校验交换包：哈希、路径不越界、证书/私钥配对、CA 可解析、server 合法。
+func ValidateExchangeBundle(dir string) (*BootstrapBundle, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, exchangeReady))
 	if err != nil {
 		return nil, fmt.Errorf("read bootstrap ready file: %w", err)
 	}
-	var ready exchangeReadyFile
+	var ready ExchangeReadyFile
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		return nil, fmt.Errorf("parse bootstrap ready file: %w", err)
 	}
@@ -104,7 +106,7 @@ func validateExchangeBundle(dir string) (*bootstrapBundle, error) {
 		if !fi.Mode().IsRegular() {
 			return nil, fmt.Errorf("bootstrap bundle entry is not a regular file: %s", name)
 		}
-		actual, err := hashFile(path)
+		actual, err := fsx.HashFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("hash %s: %w", name, err)
 		}
@@ -118,14 +120,14 @@ func validateExchangeBundle(dir string) (*bootstrapBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read exchanged admin.conf: %w", err)
 	}
-	var cf credentialsFile
+	var cf CredentialsFile
 	if err := yaml.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse exchanged admin.conf: %w", err)
 	}
 	if cf.Server == "" || cf.CA == "" || cf.ClientCert == "" || cf.ClientKey == "" {
 		return nil, fmt.Errorf("exchanged admin.conf is missing server/certificate-authority/client-certificate/client-key")
 	}
-	server, err := validateHTTPURL("exchanged admin server", cf.Server)
+	server, err := validate.ValidateHTTPURL("exchanged admin server", cf.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -163,16 +165,16 @@ func validateExchangeBundle(dir string) (*bootstrapBundle, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("exchanged management CA contains no valid certificate")
 	}
-	return &bootstrapBundle{
+	return &BootstrapBundle{
 		Dir: dir, AdminConf: adminConf, Server: server,
 		CA: caPath, Cert: certPath, Key: keyPath,
 	}, nil
 }
 
-// finishBootstrapExchange 标记已消费并删除凭据副本（只留 consumed 审计标记）。
-func finishBootstrapExchange(dir string) error {
+// FinishBootstrapExchange 标记已消费并删除凭据副本（只留 consumed 审计标记）。
+func FinishBootstrapExchange(dir string) error {
 	marker := fmt.Sprintf("consumed-at: %s\n", time.Now().UTC().Format(time.RFC3339))
-	if err := writeFileAtomic(filepath.Join(dir, exchangeConsumed), []byte(marker), 0o600); err != nil {
+	if err := fsx.WriteFileAtomic(filepath.Join(dir, exchangeConsumed), []byte(marker), 0o600); err != nil {
 		return fmt.Errorf("write bootstrap consumed marker: %w", err)
 	}
 	for _, name := range []string{exchangeRequest, exchangeReady, exchangeAdmin, exchangePKI} {
@@ -183,8 +185,8 @@ func finishBootstrapExchange(dir string) error {
 	return nil
 }
 
-// managementSelfTest 用给定凭据做一次 mTLS GET /whoami；有限重试覆盖容器刚重启的窗口。
-func managementSelfTest(server, ca, cert, key string, timeout time.Duration) error {
+// ManagementSelfTest 用给定凭据做一次 mTLS GET /whoami；有限重试覆盖容器刚重启的窗口。
+func ManagementSelfTest(server, ca, cert, key string, timeout time.Duration) error {
 	certificate, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
 		return fmt.Errorf("load management certificate: %w", err)

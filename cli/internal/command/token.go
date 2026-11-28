@@ -6,11 +6,14 @@
 // list：列出未过期台账条目（无明文/hash）；revoke：删条目即失效。
 // nvmet-host 组件凭据不在此签发：agent enroll 上报 backend=nvmet 时控制面
 // 派生随响应下发（能力上报驱动，签发不预知后端）。
-package main
+package command
 
 import (
 	"encoding/json"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
+	"kurrent/cli/internal/validate"
 	"net/url"
 	"os"
 	"strconv"
@@ -76,7 +79,7 @@ func cmdToken(args []string) {
 	case "revoke":
 		tokenRevoke(args[1:])
 	default:
-		usageError(tokenGroupUsage, fmt.Errorf("unknown token subcommand: %s", args[0]))
+		cli.UsageError(tokenGroupUsage, fmt.Errorf("unknown token subcommand: %s", args[0]))
 	}
 }
 
@@ -87,7 +90,7 @@ func tokenCreate(args []string) {
 	}
 	usage := p.opt("usage", "bootstrap")
 	if usage != "bootstrap" && usage != "admin" {
-		usageError(tokenCreateUsage, fmt.Errorf("--usage accepts only bootstrap or admin (got %q)", usage))
+		cli.UsageError(tokenCreateUsage, fmt.Errorf("--usage accepts only bootstrap or admin (got %q)", usage))
 	}
 
 	var body any
@@ -97,31 +100,31 @@ func tokenCreate(args []string) {
 	if usage == "admin" {
 		for _, flag := range []string{"agent-id", "cp-url", "uses"} {
 			if p.has(flag) {
-				usageError(tokenCreateUsage, fmt.Errorf("--%s applies only to bootstrap tokens", flag))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--%s applies only to bootstrap tokens", flag))
 			}
 		}
 		req := map[string]any{"usage": "admin"}
 		if p.has("scope") {
 			scopes, err := parseScopes(p.opt("scope", ""))
 			if err != nil {
-				usageError(tokenCreateUsage, err)
+				cli.UsageError(tokenCreateUsage, err)
 			}
 			req["scopes"] = scopes
 		}
 		if p.has("ttl") {
 			raw := strings.TrimSpace(p.opt("ttl", ""))
 			if raw == "" {
-				usageError(tokenCreateUsage, fmt.Errorf("--ttl requires a duration (e.g. 24h)"))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--ttl requires a duration (e.g. 24h)"))
 			}
 			d, err := time.ParseDuration(raw)
 			if err != nil || d <= 0 {
-				usageError(tokenCreateUsage, fmt.Errorf("--ttl must be a positive duration (e.g. 24h): %q", raw))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--ttl must be a positive duration (e.g. 24h): %q", raw))
 			}
 			// 上限是控制面策略（tokenMaxTtlHours，默认 720h，schema 绝对上限 8760h），
 			// CLI 只挡住超出 schema 的值，具体策略由服务端裁决。先比较再向上取整，
 			// 避免接近 Duration 上限时加法溢出。
 			if d > 8760*time.Hour {
-				usageError(tokenCreateUsage, fmt.Errorf("--ttl exceeds the 8760h (365-day) limit: %s", raw))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--ttl exceeds the 8760h (365-day) limit: %s", raw))
 			}
 			hours := int((d + time.Hour - 1) / time.Hour)
 			req["ttl_hours"] = hours
@@ -130,19 +133,19 @@ func tokenCreate(args []string) {
 	} else {
 		for _, flag := range []string{"scope", "ttl"} {
 			if p.has(flag) {
-				usageError(tokenCreateUsage, fmt.Errorf("--%s applies only to admin tokens", flag))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--%s applies only to admin tokens", flag))
 			}
 		}
 		if p.has("agent-id") {
 			var err error
-			if agentID, err = validateAgentID(p.opt("agent-id", "")); err != nil {
-				usageError(tokenCreateUsage, err)
+			if agentID, err = validate.ValidateAgentID(p.opt("agent-id", "")); err != nil {
+				cli.UsageError(tokenCreateUsage, err)
 			}
 		}
 		if p.has("cp-url") {
 			var err error
-			if cpURL, err = normalizeCpURL("--cp-url", p.opt("cp-url", "")); err != nil {
-				usageError(tokenCreateUsage, err)
+			if cpURL, err = validate.NormalizeCPURL("--cp-url", p.opt("cp-url", "")); err != nil {
+				cli.UsageError(tokenCreateUsage, err)
 			}
 		}
 		req := map[string]any{"usage": "bootstrap"}
@@ -154,7 +157,7 @@ func tokenCreate(args []string) {
 			uses, err := strconv.Atoi(raw)
 			// 1000 是控制面 schema 的绝对值；实际上限由 bootstrapTokenMaxUses 决定
 			if err != nil || uses < 1 || uses > 1000 {
-				usageError(tokenCreateUsage, fmt.Errorf("--uses must be an integer in 1..1000: %q", raw))
+				cli.UsageError(tokenCreateUsage, fmt.Errorf("--uses must be an integer in 1..1000: %q", raw))
 			}
 			req["max_uses"] = uses
 		}
@@ -165,22 +168,22 @@ func tokenCreate(args []string) {
 	if usage == "bootstrap" {
 		var err error
 		if joinURL, err = joinCpURL(cpURL); err != nil {
-			fatal("%v", err)
+			cli.Fatal("%v", err)
 		}
 	}
 	var out tokenResp
-	if err := json.Unmarshal(api("POST", "/pki/tokens", body), &out); err != nil {
-		fatal("parse token response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("POST", "/pki/tokens", body), &out); err != nil {
+		cli.Fatal("parse token response: %v", err)
 	}
 	if strings.TrimSpace(out.Token) == "" {
-		fatal("the control plane returned no token (missing token field)")
+		cli.Fatal("the control plane returned no token (missing token field)")
 	}
 	if usage == "bootstrap" {
 		if strings.TrimSpace(out.AgentID) == "" {
-			fatal("the control plane returned no agent_id")
+			cli.Fatal("the control plane returned no agent_id")
 		}
 		if agentID != "" && out.AgentID != agentID {
-			fatal("server returned agent_id %q, request was %q", out.AgentID, agentID)
+			cli.Fatal("server returned agent_id %q, request was %q", out.AgentID, agentID)
 		}
 	}
 	if usage == "admin" {
@@ -231,14 +234,14 @@ func tokenList(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(tokenListUsage, err)
+		cli.UsageError(tokenListUsage, err)
 	}
 	var items []tokenInfo
-	if err := json.Unmarshal(api("GET", "/pki/tokens", nil), &items); err != nil {
-		fatal("parse token list: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/pki/tokens", nil), &items); err != nil {
+		cli.Fatal("parse token list: %v", err)
 	}
 	if format == "json" {
-		printJSON(items)
+		cli.PrintJSON(items)
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -261,11 +264,11 @@ func tokenRevoke(args []string) {
 	if help {
 		return
 	}
-	id, err := validateTokenID(p.pos[0])
+	id, err := validate.ValidateTokenID(p.pos[0])
 	if err != nil {
-		usageError(tokenRevokeUsage, err)
+		cli.UsageError(tokenRevokeUsage, err)
 	}
-	api("DELETE", "/pki/tokens/"+url.PathEscape(id), nil)
+	cpapi.Do("DELETE", "/pki/tokens/"+url.PathEscape(id), nil)
 	fmt.Printf("token %s revoked (ledger entry deleted; Bearer validation fails immediately)\n", id)
 }
 
@@ -302,7 +305,7 @@ func joinCpURL(explicit string) (string, error) {
 	if explicit != "" {
 		return strings.TrimRight(explicit, "/"), nil
 	}
-	server, err := apiServerURL()
+	server, err := cpapi.ServerURL()
 	if err != nil {
 		return "", err
 	}

@@ -1,10 +1,10 @@
-// 版本号：发版构建时经 go build -ldflags "-X main.version=vX.Y.Z" 注入；
+// Version 由进程入口注入（cli/main.go 的 main.version，发版经 -ldflags 注入）；
 // 日常构建未注入时显示 dev。
-package main
+package command
 
 import "fmt"
 
-var version = "dev"
+var Version = "dev"
 
 var versionSpec = cmdSpec{usage: versionUsage, maxPos: 0}
 
@@ -12,5 +12,5 @@ func cmdVersion(args []string) {
 	if _, help := mustParse(args, versionSpec); help {
 		return
 	}
-	fmt.Printf("kurrent %s\n", version)
+	fmt.Printf("kurrent %s\n", Version)
 }

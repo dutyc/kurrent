@@ -1,9 +1,10 @@
 // 跨命令的解析、分发与“用法错误零副作用”回归。
-package main
+package command
 
 import (
 	"encoding/json"
 	"io"
+	"kurrent/cli/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,7 @@ type exitPanic struct{ code int }
 // captureCLI 捕获命令的 stdout/stderr 与退出码（fatal/usageError 经注入的 exit 转 panic）。
 func captureCLI(t *testing.T, fn func()) (code int, stdout, stderr string) {
 	t.Helper()
-	oldExit, oldStdout, oldStderr := exit, os.Stdout, os.Stderr
+	oldExit, oldStdout, oldStderr := cli.Exit, os.Stdout, os.Stderr
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -28,10 +29,10 @@ func captureCLI(t *testing.T, fn func()) (code int, stdout, stderr string) {
 		t.Fatal(err)
 	}
 	os.Stdout, os.Stderr = outW, errW
-	exit = func(code int) { panic(exitPanic{code}) }
+	cli.Exit = func(code int) { panic(exitPanic{code}) }
 	defer func() {
 		os.Stdout, os.Stderr = oldStdout, oldStderr
-		exit = oldExit
+		cli.Exit = oldExit
 	}()
 
 	func() {
@@ -83,9 +84,9 @@ func newAPIStub(t *testing.T, status int, response string) *apiStub {
 		io.WriteString(w, s.response)
 	}))
 	t.Cleanup(s.srv.Close)
-	old := flagServer
-	flagServer = s.srv.URL
-	t.Cleanup(func() { flagServer = old })
+	old := cli.Server
+	cli.Server = s.srv.URL
+	t.Cleanup(func() { cli.Server = old })
 	return s
 }
 
@@ -114,7 +115,7 @@ func decodeBody(t *testing.T, call apiCall) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(call.Body, &m); err != nil {
-		t.Fatalf("请求体不是 JSON: %v（%s）", err, call.Body)
+		t.Fatalf("request body is not JSON: %v (%s)", err, call.Body)
 	}
 	return m
 }
@@ -147,10 +148,10 @@ func TestHelpNeverCallsAPI(t *testing.T) {
 				t.Fatalf("code = %d, stderr = %s", code, stderr)
 			}
 			if stub.HitCount() != 0 {
-				t.Fatalf("帮助触发了 API 调用: %+v", stub.Calls())
+				t.Fatalf("help triggered an API call: %+v", stub.Calls())
 			}
 			if !strings.Contains(stdout, c.want) {
-				t.Fatalf("stdout 缺少 %q:\n%s", c.want, stdout)
+				t.Fatalf("stdout is missing %q:\n%s", c.want, stdout)
 			}
 		})
 	}
@@ -198,10 +199,10 @@ func TestInvalidArgsNeverCallAPI(t *testing.T) {
 				t.Fatalf("code = %d, want 2（stderr=%s）", code, stderr)
 			}
 			if stub.HitCount() != 0 {
-				t.Fatalf("用法错误触发了 API 调用: %+v", stub.Calls())
+				t.Fatalf("usage error triggered an API call: %+v", stub.Calls())
 			}
 			if !strings.Contains(stderr, c.want) {
-				t.Fatalf("stderr 缺少 %q:\n%s", c.want, stderr)
+				t.Fatalf("stderr is missing %q:\n%s", c.want, stderr)
 			}
 		})
 	}
@@ -215,7 +216,7 @@ func TestGroupGlobalFlagHint(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	if stub.HitCount() != 0 {
-		t.Fatal("组级错误触发了 API 调用")
+		t.Fatal("group-level error triggered an API call")
 	}
 }
 
@@ -233,17 +234,17 @@ func TestTokenCreateBootstrap(t *testing.T) {
 	}
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].Method != "POST" || calls[0].Path != "/pki/tokens" {
-		t.Fatalf("API 调用 = %+v", calls)
+		t.Fatalf("API calls = %+v", calls)
 	}
 	body := decodeBody(t, calls[0])
 	if body["usage"] != "bootstrap" || body["agent_id"] != "0123456789ab" || body["max_uses"] != float64(500) {
-		t.Fatalf("请求体 = %v", body)
+		t.Fatalf("request body = %v", body)
 	}
 	if !strings.Contains(stdout, "kurrent join https://cp.example.com --token") {
-		t.Fatalf("join 命令未归一化 /api/cp:\n%s", stdout)
+		t.Fatalf("join did not normalize /api/cp:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "/api/cp") {
-		t.Fatalf("join 命令不应带 /api/cp:\n%s", stdout)
+		t.Fatalf("join must not keep /api/cp:\n%s", stdout)
 	}
 }
 
@@ -258,10 +259,10 @@ func TestTokenCreateBootstrapOmitsAgentID(t *testing.T) {
 	}
 	body := decodeBody(t, stub.Calls()[0])
 	if _, ok := body["agent_id"]; ok {
-		t.Fatalf("未指定 --agent-id 时不应自行生成身份：%v", body)
+		t.Fatalf("join must not invent an identity without --agent-id: %v", body)
 	}
 	if !strings.Contains(stdout, "--agent-id 0a1b2c3d4e5f") {
-		t.Fatalf("join 命令应使用控制面返回的身份:\n%s", stdout)
+		t.Fatalf("join must use the identity returned by the control plane:\n%s", stdout)
 	}
 }
 
@@ -288,10 +289,10 @@ func TestTokenCreateAdminTTLIsPolicyDriven(t *testing.T) {
 	}
 	body := decodeBody(t, stub.Calls()[0])
 	if body["ttl_hours"] != float64(900) {
-		t.Fatalf("请求体 = %v", body)
+		t.Fatalf("request body = %v", body)
 	}
 	if _, ok := body["scopes"].([]any); !ok {
-		t.Fatalf("scopes 未发送: %v", body)
+		t.Fatalf("scopes were not sent: %v", body)
 	}
 	if !strings.Contains(stdout, "admin token") {
 		t.Fatalf("stdout:\n%s", stdout)
@@ -320,7 +321,7 @@ func TestAgentsDisabledFalseMeansEnabled(t *testing.T) {
 				t.Fatalf("enabled = %v, want %v（body=%v）", body["enabled"], c.want, body)
 			}
 			if tags, ok := body["tags"].([]any); !ok || len(tags) != 0 {
-				t.Fatalf("空标签应为 []，实际 %v", body["tags"])
+				t.Fatalf("empty tags should be [], got %v", body["tags"])
 			}
 		})
 	}
@@ -344,7 +345,7 @@ func TestCertIssueChecksOutputBeforeAPI(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	if stub.HitCount() != 0 {
-		t.Fatalf("输出文件已存在仍调用了签发 API: %+v", stub.Calls())
+		t.Fatalf("issue API was called although the output file exists: %+v", stub.Calls())
 	}
 }
 
@@ -358,7 +359,7 @@ func TestCertIssueMissingCSRNoAPI(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	if stub.HitCount() != 0 {
-		t.Fatal("缺少 CSR 仍调用了签发 API")
+		t.Fatal("issue API was called without a CSR")
 	}
 }
 
@@ -429,10 +430,10 @@ func TestWorkerCredentialRejectsUnsafeInputBeforeAPI(t *testing.T) {
 				t.Fatalf("code=%d want %d（stderr=%s）", code, c.code, stderr)
 			}
 			if !strings.Contains(stderr, c.want) {
-				t.Fatalf("stderr 缺少 %q:\n%s", c.want, stderr)
+				t.Fatalf("stderr is missing %q:\n%s", c.want, stderr)
 			}
 			if stub.HitCount() != 0 {
-				t.Fatalf("非法输入仍调用 API: %+v", stub.Calls())
+				t.Fatalf("API was called with invalid input: %+v", stub.Calls())
 			}
 		})
 	}
@@ -457,7 +458,7 @@ func TestWorkerCredentialAcceptsValidDHHC(t *testing.T) {
 	}
 	body := decodeBody(t, stub.Calls()[0])
 	if body["secret"] != secret {
-		t.Fatal("请求体中的密钥与文件不一致")
+		t.Fatal("the key in the request body differs from the file")
 	}
 	if !strings.Contains(stdout, "credential set") {
 		t.Fatalf("stdout:\n%s", stdout)
@@ -476,7 +477,7 @@ func TestWorkerCredentialGenerate(t *testing.T) {
 	body := decodeBody(t, stub.Calls()[0])
 	secret, _ := body["secret"].(string)
 	if _, err := validateSecretInput(secret); err != nil {
-		t.Fatalf("生成的密钥不合规: %v", err)
+		t.Fatalf("generated key is invalid: %v", err)
 	}
 }
 
@@ -509,7 +510,7 @@ func TestWorkerCredentialReadsStdin(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	if got := decodeBody(t, stub.Calls()[0])["secret"]; got != secret {
-		t.Fatal("stdin 密钥未发送")
+		t.Fatal("the stdin secret was not sent")
 	}
 }
 

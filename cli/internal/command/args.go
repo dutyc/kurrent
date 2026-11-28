@@ -8,11 +8,12 @@
 //   - 布尔标志不吞下一个 token；--flag=false 显式关闭，--flag value 报错；
 //   - -- 之后全部按位置参数处理（值以 - 开头时用 --key=value 或 -- 分隔）；
 //   - -h/--help 在任意位置优先，打印该命令用法并返回 0，不执行任何副作用。
-package main
+package command
 
 import (
 	"errors"
 	"fmt"
+	"kurrent/cli/internal/cli"
 	"strings"
 )
 
@@ -170,7 +171,7 @@ func mustParse(args []string, spec cmdSpec) (parsedArgs, bool) {
 		return parsedArgs{}, true
 	}
 	if err != nil {
-		usageError(spec.usage, err)
+		cli.UsageError(spec.usage, err)
 	}
 	return p, false
 }

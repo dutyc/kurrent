@@ -1,19 +1,18 @@
-package main
+package command
 
 import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"io"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/creds"
+	"kurrent/cli/internal/fsx"
 	"math/big"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +27,7 @@ func selfSignedCert(t *testing.T, cn string, ips []net.IP) (certPEM, keyPEM []by
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("生成密钥: %v", err)
+		t.Fatalf("generate key: %v", err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
@@ -43,11 +42,11 @@ func selfSignedCert(t *testing.T, cn string, ips []net.IP) (certPEM, keyPEM []by
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		t.Fatalf("签发证书: %v", err)
+		t.Fatalf("issue certificate: %v", err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		t.Fatalf("序列化私钥: %v", err)
+		t.Fatalf("marshal private key: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
@@ -56,7 +55,7 @@ func selfSignedCert(t *testing.T, cn string, ips []net.IP) (certPEM, keyPEM []by
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("写文件 %s: %v", path, err)
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -64,9 +63,9 @@ func writeFile(t *testing.T, path string, data []byte) {
 func stubUserHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	old := userHomeDir
-	userHomeDir = func() string { return home }
-	t.Cleanup(func() { userHomeDir = old })
+	old := fsx.UserHomeDir
+	fsx.UserHomeDir = func() string { return home }
+	t.Cleanup(func() { fsx.UserHomeDir = old })
 	return home
 }
 
@@ -74,17 +73,17 @@ func stubUserHome(t *testing.T) string {
 func clearCredentialFlags(t *testing.T) {
 	t.Helper()
 	t.Setenv("KURRENT_CREDENTIALS", "")
-	oldCred, oldServer, oldToken := flagCredentials, flagServer, flagToken
-	flagCredentials, flagServer, flagToken = "", "", ""
-	t.Cleanup(func() { flagCredentials, flagServer, flagToken = oldCred, oldServer, oldToken })
+	oldCred, oldServer, oldToken := cli.Credentials, cli.Server, cli.Token
+	cli.Credentials, cli.Server, cli.Token = "", "", ""
+	t.Cleanup(func() { cli.Credentials, cli.Server, cli.Token = oldCred, oldServer, oldToken })
 }
 
 // stubExeDir 注入可执行文件目录（隔离真实二进制位置）。
 func stubExeDir(t *testing.T, dir string) {
 	t.Helper()
-	old := exeDir
-	exeDir = func() string { return dir }
-	t.Cleanup(func() { exeDir = old })
+	old := fsx.ExeDir
+	fsx.ExeDir = func() string { return dir }
+	t.Cleanup(func() { fsx.ExeDir = old })
 }
 
 // makeRepoCredentials 构造仓库布局的管理凭据（control_plane/state/admin.conf +
@@ -114,15 +113,15 @@ func makeRepoCredentials(t *testing.T, root string) string {
 }
 
 // readConf 解析凭据文件（快照内容断言用）。
-func readConf(t *testing.T, path string) credentialsFile {
+func readConf(t *testing.T, path string) creds.CredentialsFile {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("读取 %s: %v", path, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	var cf credentialsFile
+	var cf creds.CredentialsFile
 	if err := yaml.Unmarshal(data, &cf); err != nil {
-		t.Fatalf("解析 %s: %v", path, err)
+		t.Fatalf("parse %s: %v", path, err)
 	}
 	return cf
 }
@@ -149,247 +148,14 @@ func copyDir(t *testing.T, src, dst string) {
 		return os.WriteFile(target, data, 0o600)
 	})
 	if err != nil {
-		t.Fatalf("复制目录 %s → %s: %v", src, dst, err)
+		t.Fatalf("copy directory %s -> %s: %v", src, dst, err)
 	}
 }
 
-// adminConfBody 完整的管理凭据文件内容（三键齐备，避免 loadCredentials 因缺键 fatal 退出测试进程）；
+// adminConfBody 完整的管理凭据文件内容（三键齐备，避免 creds.LoadCredentials 因缺键 fatal 退出测试进程）；
 // 证书路径只做发现/解析用，测试不实际加载证书，故指向不存在的相对路径即可。
 const adminConfBody = "server: https://127.0.0.1/api/cp\n" +
 	"client-certificate: admin.crt\nclient-key: admin.key\n"
-
-// TestCredentialsMTLSRequest：admin.conf（扁平 YAML，相对路径）→ mTLS 请求，服务端验证客户端证书 CN。
-func TestCredentialsMTLSRequest(t *testing.T) {
-	clientCertPEM, clientKeyPEM := selfSignedCert(t, "admin", nil)
-	clientPool := x509.NewCertPool()
-	if !clientPool.AppendCertsFromPEM(clientCertPEM) {
-		t.Fatal("客户端证书入池失败")
-	}
-
-	var peerCN string
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			peerCN = r.TLS.PeerCertificates[0].Subject.CommonName
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"name":"admin","groups":["admin"],"method":"cert"}`))
-	}))
-	srv.TLS = &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientPool}
-	srv.StartTLS()
-	defer srv.Close()
-
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "admin.crt"), clientCertPEM)
-	writeFile(t, filepath.Join(dir, "admin.key"), clientKeyPEM)
-	writeFile(t, filepath.Join(dir, "server.crt"), pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
-	confPath := filepath.Join(dir, "admin.conf")
-	writeFile(t, confPath, []byte("server: "+srv.URL+"\ncertificate-authority: server.crt\n"+
-		"client-certificate: admin.crt\nclient-key: admin.key\n"))
-
-	old := flagCredentials
-	flagCredentials = confPath
-	t.Cleanup(func() { flagCredentials = old })
-
-	cc := loadCredentials()
-	if cc == nil {
-		t.Fatal("管理凭据未加载")
-	}
-	if cc.certFile != filepath.Join(dir, "admin.crt") {
-		t.Fatalf("相对路径未按凭据文件目录解析: %s", cc.certFile)
-	}
-	serverURL, err := cc.serverURL()
-	if err != nil {
-		t.Fatalf("凭据 server 解析失败: %v", err)
-	}
-	resp, err := cc.client().Get(serverURL + "/whoami")
-	if err != nil {
-		t.Fatalf("mTLS 请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || peerCN != "admin" {
-		t.Fatalf("期望 200 且服务端收到 CN=admin，实际 status=%d cn=%q body=%s", resp.StatusCode, peerCN, body)
-	}
-}
-
-// TestWriteFileAtomic：覆盖已有文件时内容完整、权限收敛为指定值、不残留临时文件。
-func TestWriteFileAtomic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "token")
-	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFileAtomic(path, []byte("new"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "new" {
-		t.Fatalf("内容 = %q, %v", data, err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("权限 = %v, %v", info.Mode().Perm(), err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("临时文件残留: %v, %v", entries, err)
-	}
-}
-
-// TestCredentialsServerOverride：--server 显式覆盖凭据文件的 server 地址。
-func TestCredentialsServerOverride(t *testing.T) {
-	c := &credentialsClient{server: "https://127.0.0.1"}
-	old := flagServer
-	t.Cleanup(func() { flagServer = old })
-	flagServer = ""
-	if got, err := c.serverURL(); err != nil || got != "https://127.0.0.1" {
-		t.Fatalf("缺省应取凭据文件 server，实际 %s（err=%v）", got, err)
-	}
-	flagServer = "https://cp.example.com/"
-	if got, err := c.serverURL(); err != nil || got != "https://cp.example.com" {
-		t.Fatalf("--server 应覆盖并去尾斜杠，实际 %s（err=%v）", got, err)
-	}
-}
-
-// TestCredentialsDiscovery：发现顺序与回退（无配置返回 nil）。
-func TestCredentialsDiscovery(t *testing.T) {
-	t.Setenv("KURRENT_CREDENTIALS", "")
-	stubUserHome(t)
-	old := flagCredentials
-	flagCredentials = ""
-	t.Cleanup(func() { flagCredentials = old })
-
-	dir := t.TempDir()
-	t.Chdir(dir)
-	if p := discoverCredentials(); p != "" {
-		t.Fatalf("空目录不应发现管理凭据: %s", p)
-	}
-	if c := loadCredentials(); c != nil {
-		t.Fatal("无管理凭据时 loadCredentials 应返回 nil（回退 Bearer 通道）")
-	}
-
-	def := filepath.Join(dir, "control_plane", "state")
-	if err := os.MkdirAll(def, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	conf := filepath.Join(def, "admin.conf")
-	writeFile(t, conf, []byte("server: https://127.0.0.1/api/cp\n"))
-	if p := discoverCredentials(); p != conf {
-		t.Fatalf("默认路径发现失败: %s", p)
-	}
-
-	// --credentials 优先于默认路径与 env
-	flagCredentials = "/custom/admin.conf"
-	if p := discoverCredentials(); p != "/custom/admin.conf" {
-		t.Fatalf("--credentials 应优先: %s", p)
-	}
-}
-
-// TestCredentialsDiscoveryUpward：从仓库子目录调用也能上溯找到凭据。
-// 回归：只认 cwd 时在 cli/ 下静默回退成无凭据通道，表现为无从定位的 HTTP 401。
-func TestCredentialsDiscoveryUpward(t *testing.T) {
-	t.Setenv("KURRENT_CREDENTIALS", "")
-	stubUserHome(t)
-	old := flagCredentials
-	flagCredentials = ""
-	t.Cleanup(func() { flagCredentials = old })
-
-	root := t.TempDir()
-	def := filepath.Join(root, "control_plane", "state")
-	if err := os.MkdirAll(def, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	conf := filepath.Join(def, "admin.conf")
-	writeFile(t, conf, []byte(adminConfBody))
-
-	sub := filepath.Join(root, "cli")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(sub)
-	if p := discoverCredentials(); p != conf {
-		t.Fatalf("子目录应上溯发现 %s，实际 %q", conf, p)
-	}
-	if loadCredentials() == nil {
-		t.Fatal("子目录应走管理凭据（mTLS）通道")
-	}
-}
-
-// TestCredentialsDiscoveryNearest：多级祖先都放凭据时取最近的一级，不越级。
-func TestCredentialsDiscoveryNearest(t *testing.T) {
-	t.Setenv("KURRENT_CREDENTIALS", "")
-	stubUserHome(t)
-	old := flagCredentials
-	flagCredentials = ""
-	t.Cleanup(func() { flagCredentials = old })
-
-	root := t.TempDir()
-	outer := filepath.Join(root, "control_plane", "state")
-	inner := filepath.Join(root, "sub", "control_plane", "state")
-	for _, d := range []string{outer, inner} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		writeFile(t, filepath.Join(d, "admin.conf"), []byte(adminConfBody))
-	}
-	deep := filepath.Join(root, "sub", "cli")
-	if err := os.MkdirAll(deep, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(deep)
-	if p := discoverCredentials(); p != filepath.Join(inner, "admin.conf") {
-		t.Fatalf("应取最近祖先 %s，实际 %q", filepath.Join(inner, "admin.conf"), p)
-	}
-}
-
-// TestCredentialsDiscoveryExeFallback：cwd 与祖先均无凭据时，按可执行文件旁（仓库布局 bin/kurrent → 仓库根）发现。
-func TestCredentialsDiscoveryExeFallback(t *testing.T) {
-	t.Setenv("KURRENT_CREDENTIALS", "")
-	stubUserHome(t)
-	old := flagCredentials
-	flagCredentials = ""
-	t.Cleanup(func() { flagCredentials = old })
-	oldExe := exeDir
-	t.Cleanup(func() { exeDir = oldExe })
-
-	root := t.TempDir()
-	def := filepath.Join(root, "control_plane", "state")
-	if err := os.MkdirAll(def, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	conf := filepath.Join(def, "admin.conf")
-	writeFile(t, conf, []byte(adminConfBody))
-	exeDir = func() string { return filepath.Join(root, "cli") }
-
-	t.Chdir(t.TempDir()) // cwd 及各级祖先均无凭据
-	if p := discoverCredentials(); p != conf {
-		t.Fatalf("应按可执行文件旁发现 %s，实际 %q", conf, p)
-	}
-}
-
-// TestAuthHint：两条凭据通道都空时给出发现提示；有凭据或显式 token 时不干扰（401 归因于凭据本身）。
-func TestAuthHint(t *testing.T) {
-	t.Setenv("KURRENT_CREDENTIALS", "")
-	stubUserHome(t)
-	oldCred, oldToken := flagCredentials, flagToken
-	flagCredentials, flagToken = "", ""
-	t.Cleanup(func() { flagCredentials, flagToken = oldCred, oldToken })
-	oldExe := exeDir
-	t.Cleanup(func() { exeDir = oldExe })
-
-	empty := t.TempDir()
-	t.Chdir(empty)
-	exeDir = func() string { return filepath.Join(empty, "cli") }
-	hint := authHint()
-	if !strings.Contains(hint, "No management credentials found") || !strings.Contains(hint, "kurrent credentials install") {
-		t.Fatalf("无凭据无 token 应提示发现路径与安装命令，实际 %q", hint)
-	}
-	flagToken = "1a78c3.2dea22c2a4888435"
-	if hint := authHint(); hint != "" {
-		t.Fatalf("已给 --token 时不应追加提示，实际 %q", hint)
-	}
-}
 
 // TestCredentialsInstall：install 复制为自包含快照（相对键 + 溯源 + 0700/0600 权限），
 // 仓库外命中快照且证书可加载；整目录拷贝到别处仍可用。
@@ -401,30 +167,30 @@ func TestCredentialsInstall(t *testing.T) {
 	conf := makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, source, err := installCredentialsFrom(discoverCredentials(), "")
+	target, source, err := installCredentialsFrom(creds.DiscoverCredentials(), "")
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	wantTarget := filepath.Join(home, ".kurrent", "admin.conf")
 	if target != wantTarget || source != conf {
-		t.Fatalf("install 返回 target=%q source=%q，want %q / %q", target, source, wantTarget, conf)
+		t.Fatalf("install returned target=%q source=%q, want %q / %q", target, source, wantTarget, conf)
 	}
 
 	snapDir := filepath.Dir(target)
 	if fi, err := os.Stat(snapDir); err != nil || fi.Mode().Perm() != 0o700 {
-		t.Fatalf("快照目录权限异常（err=%v）", err)
+		t.Fatalf("snapshot directory has unexpected permissions (err=%v)", err)
 	}
 	if fi, err := os.Stat(target); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("快照 admin.conf 权限异常（err=%v）", err)
+		t.Fatalf("snapshot admin.conf has unexpected permissions (err=%v)", err)
 	}
 
 	cf := readConf(t, target)
 	if cf.Server != "https://127.0.0.1/api/cp" ||
 		cf.CA != "pki/server.crt" || cf.ClientCert != "pki/client.crt" || cf.ClientKey != "pki/client.key" {
-		t.Fatalf("快照证书键应重写为 pki/<文件名> 相对路径: %+v", cf)
+		t.Fatalf("snapshot cert keys must be rewritten to pki/<file> relative paths: %+v", cf)
 	}
 	if cf.InstalledFrom != conf || cf.InstalledAt == "" {
-		t.Fatalf("快照缺溯源键: %+v", cf)
+		t.Fatalf("snapshot is missing provenance keys: %+v", cf)
 	}
 	for rel, srcPath := range map[string]string{
 		"pki/server.crt": filepath.Join(repo, "control_plane/state/certs/server.crt"),
@@ -433,38 +199,38 @@ func TestCredentialsInstall(t *testing.T) {
 	} {
 		got, err := os.ReadFile(filepath.Join(snapDir, rel))
 		if err != nil {
-			t.Fatalf("快照缺 %s: %v", rel, err)
+			t.Fatalf("snapshot is missing %s: %v", rel, err)
 		}
 		want, _ := os.ReadFile(srcPath)
 		if !bytes.Equal(got, want) {
-			t.Fatalf("%s 与源内容不一致", rel)
+			t.Fatalf("%s differs from the source", rel)
 		}
 		if fi, _ := os.Stat(filepath.Join(snapDir, rel)); fi.Mode().Perm() != 0o600 {
-			t.Fatalf("%s 权限 %v，want 0600", rel, fi.Mode().Perm())
+			t.Fatalf("%s mode %v, want 0600", rel, fi.Mode().Perm())
 		}
 	}
 
 	// 脱离仓库：仓库外命中用户级快照，证书经快照内副本加载
 	outside := t.TempDir()
 	t.Chdir(outside)
-	if p := discoverCredentials(); p != wantTarget {
-		t.Fatalf("仓库外应命中用户级快照 %s，实际 %q", wantTarget, p)
+	if p := creds.DiscoverCredentials(); p != wantTarget {
+		t.Fatalf("outside the repository the user-level snapshot %s should match, got %q", wantTarget, p)
 	}
-	cc := loadCredentials()
-	if cc == nil || cc.certFile != filepath.Join(snapDir, "pki", "client.crt") {
-		t.Fatalf("快照凭据解析错误: %+v", cc)
+	cc := creds.LoadCredentials()
+	if cc == nil || cc.CertFile != filepath.Join(snapDir, "pki", "client.crt") {
+		t.Fatalf("snapshot credentials failed to parse: %+v", cc)
 	}
-	_ = cc.client() // 证书副本可加载（失败会以 fatal 终止测试进程）
+	_ = cc.Client() // 证书副本可加载（失败会以 fatal 终止测试进程）
 
 	// 自包含：整目录拷贝到别处，凭相对键仍可用
 	moved := filepath.Join(t.TempDir(), "admin-creds")
 	copyDir(t, snapDir, moved)
-	flagCredentials = filepath.Join(moved, "admin.conf")
-	cc2 := loadCredentials()
-	if cc2 == nil || cc2.certFile != filepath.Join(moved, "pki", "client.crt") {
-		t.Fatalf("拷贝后的快照不可用: %+v", cc2)
+	cli.Credentials = filepath.Join(moved, "admin.conf")
+	cc2 := creds.LoadCredentials()
+	if cc2 == nil || cc2.CertFile != filepath.Join(moved, "pki", "client.crt") {
+		t.Fatalf("copied snapshot is unusable: %+v", cc2)
 	}
-	_ = cc2.client()
+	_ = cc2.Client()
 }
 
 // TestCredentialsInstallRefresh：重跑 install 刷新快照（快照被篡改后恢复为源内容）。
@@ -476,7 +242,7 @@ func TestCredentialsInstallRefresh(t *testing.T) {
 	makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, _, err := installCredentialsFrom(discoverCredentials(), "")
+	target, _, err := installCredentialsFrom(creds.DiscoverCredentials(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,13 +250,13 @@ func TestCredentialsInstallRefresh(t *testing.T) {
 	if err := os.WriteFile(copied, []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err != nil {
-		t.Fatalf("重跑 install: %v", err)
+	if _, _, err := installCredentialsFrom(creds.DiscoverCredentials(), ""); err != nil {
+		t.Fatalf("rerun install: %v", err)
 	}
 	got, _ := os.ReadFile(copied)
 	want, _ := os.ReadFile(filepath.Join(repo, "control_plane/state/pki/users/admin/client.key"))
 	if !bytes.Equal(got, want) {
-		t.Fatal("重跑 install 未刷新证书副本")
+		t.Fatal("rerun install did not refresh the certificate copies")
 	}
 }
 
@@ -506,8 +272,8 @@ func TestCredentialsInstallRefuseSelf(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(snapDir, "admin.conf"), []byte(adminConfBody))
-	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err == nil || !strings.Contains(err.Error(), "user-level snapshot") {
-		t.Fatalf("应拒绝以快照为源，实际 err=%v", err)
+	if _, _, err := installCredentialsFrom(creds.DiscoverCredentials(), ""); err == nil || !strings.Contains(err.Error(), "user-level snapshot") {
+		t.Fatalf("using the snapshot as the source must be rejected, got err=%v", err)
 	}
 }
 
@@ -518,7 +284,7 @@ func TestCredentialsDiscoveryPriority(t *testing.T) {
 	repo := t.TempDir()
 	conf := makeRepoCredentials(t, repo)
 
-	snap := userCredentialsPath()
+	snap := fsx.UserCredentialsPath()
 	if err := os.MkdirAll(filepath.Dir(snap), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -529,15 +295,15 @@ func TestCredentialsDiscoveryPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
-	if p := discoverCredentials(); p != conf {
-		t.Fatalf("仓库内应优先实时源 %s，实际 %q", conf, p)
+	if p := creds.DiscoverCredentials(); p != conf {
+		t.Fatalf("inside the repository the live source %s must win, got %q", conf, p)
 	}
 
 	outside := t.TempDir()
 	stubExeDir(t, filepath.Join(outside, "bin"))
 	t.Chdir(outside)
-	if p := discoverCredentials(); p != snap {
-		t.Fatalf("仓库外应命中用户级快照 %s，实际 %q", snap, p)
+	if p := creds.DiscoverCredentials(); p != snap {
+		t.Fatalf("outside the repository the user-level snapshot %s should match, got %q", snap, p)
 	}
 }
 
@@ -550,27 +316,27 @@ func TestCredentialsRemove(t *testing.T) {
 	conf := makeRepoCredentials(t, repo)
 	t.Chdir(repo)
 
-	target, _, err := installCredentialsFrom(discoverCredentials(), "")
+	target, _, err := installCredentialsFrom(creds.DiscoverCredentials(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := removeCredentials(); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if fileExists(target) || fileExists(filepath.Join(filepath.Dir(target), "pki")) {
-		t.Fatal("快照未删净")
+	if fsx.FileExists(target) || fsx.FileExists(filepath.Join(filepath.Dir(target), "pki")) {
+		t.Fatal("snapshot was not fully removed")
 	}
-	if !fileExists(conf) {
-		t.Fatal("remove 不应动仓库源")
+	if !fsx.FileExists(conf) {
+		t.Fatal("remove must not touch the repository source")
 	}
 
 	outside := t.TempDir()
 	t.Chdir(outside)
-	if p := discoverCredentials(); p != "" {
-		t.Fatalf("移除后仓库外不应发现凭据，实际 %q", p)
+	if p := creds.DiscoverCredentials(); p != "" {
+		t.Fatalf("no credentials should be discovered outside the repository after removal, got %q", p)
 	}
 	if err := removeCredentials(); err == nil || !strings.Contains(err.Error(), "not installed") {
-		t.Fatalf("重复 remove 应报未安装，实际 err=%v", err)
+		t.Fatalf("a repeated remove must report not installed, got err=%v", err)
 	}
 }
 
@@ -588,10 +354,10 @@ func TestCredentialsShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, conf) || !strings.Contains(out, "not installed") {
-		t.Fatalf("show 应含生效凭据与未安装提示: %s", out)
+		t.Fatalf("show must include the active credentials and the not-installed hint: %s", out)
 	}
 
-	if _, _, err := installCredentialsFrom(discoverCredentials(), ""); err != nil {
+	if _, _, err := installCredentialsFrom(creds.DiscoverCredentials(), ""); err != nil {
 		t.Fatal(err)
 	}
 	outside := t.TempDir()
@@ -602,6 +368,6 @@ func TestCredentialsShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "user-level snapshot") || !strings.Contains(out, "installed-from: "+conf) {
-		t.Fatalf("show 应含快照来源与溯源: %s", out)
+		t.Fatalf("show must include the snapshot source and provenance: %s", out)
 	}
 }

@@ -2,10 +2,13 @@
 //
 // kurrent deployment show [-o yaml|env]
 // env 输出可直接用于手工 docker compose（状态根绝对路径是挂载源）。
-package main
+package command
 
 import (
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/creds"
+	"kurrent/cli/internal/deploy"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +30,7 @@ func cmdDeployment(args []string) {
 	case "show":
 		deploymentShow(args[1:])
 	default:
-		usageError(deploymentGroupUsage, fmt.Errorf("unknown deployment subcommand: %s", args[0]))
+		cli.UsageError(deploymentGroupUsage, fmt.Errorf("unknown deployment subcommand: %s", args[0]))
 	}
 }
 
@@ -38,46 +41,46 @@ func deploymentShow(args []string) {
 	}
 	format := p.opt("output", "yaml")
 	if format != "yaml" && format != "env" {
-		usageError(deploymentShowUsage, fmt.Errorf("--output must be yaml or env: %s", format))
+		cli.UsageError(deploymentShowUsage, fmt.Errorf("--output must be yaml or env: %s", format))
 	}
-	q, err := resolveDeployment("", "")
+	q, err := deploy.ResolveDeployment("", "")
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	switch format {
 	case "yaml":
-		rec := deploymentRecord{
-			Project:        q.project(),
-			StorageProject: q.storageProject(),
-			RepoRoot:       q.repoRoot,
-			StateDir:       q.stateDir,
-			Status:         deployStatusReady,
+		rec := deploy.DeploymentRecord{
+			Project:        q.Project(),
+			StorageProject: q.StorageProject(),
+			RepoRoot:       q.RepoRoot,
+			StateDir:       q.StateDir,
+			Status:         deploy.StatusReady,
 		}
-		if q.record != nil {
-			rec = *q.record
+		if q.Record != nil {
+			rec = *q.Record
 		}
-		rec.APIVersion = deploymentAPIVersion
-		rec.Kind = deploymentKind
+		rec.APIVersion = deploy.DeploymentAPIVersion
+		rec.Kind = deploy.DeploymentKind
 		body, err := yaml.Marshal(rec)
 		if err != nil {
-			fatal("serialize deployment: %v", err)
+			cli.Fatal("serialize deployment: %v", err)
 		}
 		fmt.Print(string(body))
-		if creds := discoverCredentials(); creds != "" {
+		if creds := creds.DiscoverCredentials(); creds != "" {
 			fmt.Printf("# management credentials: %s\n", creds)
 		}
 	case "env":
-		node := q.storager("")
-		env := q.composeEnv()
+		node := q.Storager("")
+		env := q.ComposeEnv()
 		env = append(env,
-			"KURRENT_NODE_STATE_DIR="+node.root,
-			"KURRENT_CP_CA_FILE="+node.cpCA,
-			"KURRENT_DEPLOYMENT_FILE="+deploymentRecordPath(),
+			"KURRENT_NODE_STATE_DIR="+node.Root,
+			"KURRENT_CP_CA_FILE="+node.CPCA,
+			"KURRENT_DEPLOYMENT_FILE="+deploy.DeploymentRecordPath(),
 		)
-		if id, ok, err := readNodeID(filepath.Join(node.state, "agent.id")); err == nil && ok {
+		if id, ok, err := readNodeID(filepath.Join(node.State, "agent.id")); err == nil && ok {
 			env = append(env, "KURRENT_AGENT_ID="+id)
 		}
-		if data, err := os.ReadFile(filepath.Join(q.repoRoot, "storager", "kurrent.yaml")); err == nil {
+		if data, err := os.ReadFile(filepath.Join(q.RepoRoot, "storager", "kurrent.yaml")); err == nil {
 			if diskDir := strings.TrimSpace(nodeValueFromYAML(data, "spec", "agent", "diskDir")); diskDir != "" {
 				env = append(env, "KURRENT_DISK_DIR="+diskDir)
 			}

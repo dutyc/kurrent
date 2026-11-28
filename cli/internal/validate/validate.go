@@ -1,5 +1,5 @@
 // 命令参数语义校验（严格解析之后的第二步）：URL / 身份 / IP / 吊销原因 / 序列号。
-package main
+package validate
 
 import (
 	"fmt"
@@ -21,9 +21,9 @@ var (
 	}
 )
 
-// validateTokenID token 台账 key = token 明文点号前的前缀（6 位小写 hex）。
+// ValidateTokenID token 台账 key = token 明文点号前的前缀（6 位小写 hex）。
 // 完整 token 含 secret，绝不能被拼进 URL 路径（会进服务端访问日志）。
-func validateTokenID(raw string) (string, error) {
+func ValidateTokenID(raw string) (string, error) {
 	id := strings.TrimSpace(raw)
 	if strings.Contains(id, ".") {
 		return "", fmt.Errorf("token_id is the prefix before the dot; do not paste the full token: %q", raw)
@@ -34,15 +34,15 @@ func validateTokenID(raw string) (string, error) {
 	return id, nil
 }
 
-func validateAgentID(raw string) (string, error) {
+func ValidateAgentID(raw string) (string, error) {
 	id := strings.TrimSpace(raw)
-	if !validAgentID(id) {
+	if !ValidAgentID(id) {
 		return "", fmt.Errorf("agent id must be 12 lowercase hex characters (machine identity; put descriptive names in --remark): %q", raw)
 	}
 	return id, nil
 }
 
-func validateHTTPURL(label, raw string) (string, error) {
+func ValidateHTTPURL(label, raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -54,11 +54,11 @@ func validateHTTPURL(label, raw string) (string, error) {
 	return strings.TrimRight(s, "/"), nil
 }
 
-// normalizeCpURL 校验控制面入口并去掉误贴的 /api/cp 后缀：agent/nvmet-host 自己
+// NormalizeCPURL 校验控制面入口并去掉误贴的 /api/cp 后缀：agent/nvmet-host 自己
 // 在该地址后追加 /api/cp/enroll；粘贴 API 根会把路径拼成 /api/cp/api/cp/enroll。
 // 其他路径前缀（反向代理）保留。
-func normalizeCpURL(label, raw string) (string, error) {
-	s, err := validateHTTPURL(label, raw)
+func NormalizeCPURL(label, raw string) (string, error) {
+	s, err := ValidateHTTPURL(label, raw)
 	if err != nil {
 		return "", err
 	}
@@ -68,7 +68,7 @@ func normalizeCpURL(label, raw string) (string, error) {
 	return s, nil
 }
 
-func validateIP(label, raw string) (string, error) {
+func ValidateIP(label, raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", nil
@@ -79,7 +79,7 @@ func validateIP(label, raw string) (string, error) {
 	return s, nil
 }
 
-func validateRevocationReason(raw string) (string, error) {
+func ValidateRevocationReason(raw string) (string, error) {
 	reason := strings.TrimSpace(raw)
 	if !revocationReasons[reason] {
 		return "", fmt.Errorf("--reason accepts only unspecified|key_compromise|superseded|cessation_of_operation (got %q)", raw)
@@ -87,7 +87,7 @@ func validateRevocationReason(raw string) (string, error) {
 	return reason, nil
 }
 
-func validateSerial(raw string) (string, error) {
+func ValidateSerial(raw string) (string, error) {
 	serial := strings.ToLower(strings.TrimSpace(raw))
 	if serial == "" {
 		return "", nil
@@ -98,4 +98,18 @@ func validateSerial(raw string) (string, error) {
 		return "", fmt.Errorf("--serial must be 1..64 hex digits (optional 0x prefix): %q", raw)
 	}
 	return serial, nil
+}
+
+// ValidAgentID 节点身份（agent_id）只接受 12 位小写 hex：证书 CN、控制面登记键与
+// 状态文件名共用这一形态，任何宽松格式都会在证书/台账/文件系统之间产生歧义。
+func ValidAgentID(id string) bool {
+	if len(id) != 12 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }

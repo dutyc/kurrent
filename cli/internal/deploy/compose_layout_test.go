@@ -1,6 +1,6 @@
 // 编排清单静态断言：项目名固定、运行时状态挂载源只来自状态根环境变量、
 // 旧仓库内相对状态路径不再出现。
-package main
+package deploy
 
 import (
 	"os"
@@ -68,9 +68,9 @@ var legacyStateSources = []string{
 }
 
 func TestRootComposePinsProjectAndStateRoot(t *testing.T) {
-	doc := readCompose(t, filepath.Join("..", "docker-compose.yml"))
-	if doc.Name != defaultComposeProject {
-		t.Fatalf("name = %q, want %q", doc.Name, defaultComposeProject)
+	doc := readCompose(t, filepath.Join("..", "..", "..", "docker-compose.yml"))
+	if doc.Name != DefaultComposeProject {
+		t.Fatalf("name = %q, want %q", doc.Name, DefaultComposeProject)
 	}
 	var stateMounts int
 	for service, svc := range doc.Services {
@@ -99,12 +99,12 @@ func TestRootComposePinsProjectAndStateRoot(t *testing.T) {
 
 func TestStorageComposePinsProjectAndNodeState(t *testing.T) {
 	for _, file := range []string{
-		filepath.Join("..", "storager", "nvmeof", "docker-compose.yml"),
-		filepath.Join("..", "storager", "iscsi", "docker-compose.yml"),
+		filepath.Join("..", "..", "..", "storager", "nvmeof", "docker-compose.yml"),
+		filepath.Join("..", "..", "..", "storager", "iscsi", "docker-compose.yml"),
 	} {
 		doc := readCompose(t, file)
-		if doc.Name != defaultStorageProject {
-			t.Errorf("%s: name = %q, want %q", file, doc.Name, defaultStorageProject)
+		if doc.Name != DefaultStorageProject {
+			t.Errorf("%s: name = %q, want %q", file, doc.Name, DefaultStorageProject)
 		}
 		destinations := map[string]string{}
 		for service, svc := range doc.Services {

@@ -9,12 +9,15 @@
 //	kurrent config validate [--node] [--config PATH] [--dir REPO]
 //	kurrent config show     [--node] [--config PATH] [--dir REPO]
 //	kurrent config status
-package main
+package command
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
+	"kurrent/cli/internal/deploy"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,7 +52,7 @@ func cmdConfig(args []string) {
 	case "status":
 		configStatus(args[1:])
 	default:
-		usageError(configGroupUsage, fmt.Errorf("unknown config subcommand: %s", args[0]))
+		cli.UsageError(configGroupUsage, fmt.Errorf("unknown config subcommand: %s", args[0]))
 	}
 }
 
@@ -64,7 +67,7 @@ func configPrint(args []string) {
 	case "node-defaults":
 		fmt.Print(nodeDefaultsTemplate)
 	default:
-		usageError(configPrintUsage, fmt.Errorf("unknown template %q: supported values are init-defaults and node-defaults", p.pos[0]))
+		cli.UsageError(configPrintUsage, fmt.Errorf("unknown template %q: supported values are init-defaults and node-defaults", p.pos[0]))
 	}
 }
 
@@ -75,11 +78,11 @@ func configInspectCmd(cmd string, args []string) {
 	}
 	for _, flag := range []string{"config", "dir"} {
 		if p.has(flag) && strings.TrimSpace(p.opt(flag, "")) == "" {
-			usageError(configInspectUsage, fmt.Errorf("--%s must not be empty", flag))
+			cli.UsageError(configInspectUsage, fmt.Errorf("--%s must not be empty", flag))
 		}
 	}
 	if err := configInspect(cmd, p); err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 }
 
@@ -87,7 +90,7 @@ func configStatus(args []string) {
 	if _, help := mustParse(args, configStatusSpec); help {
 		return
 	}
-	printPrettyJSON(api("GET", "/config", nil))
+	printPrettyJSON(cpapi.Do("GET", "/config", nil))
 }
 
 func printPrettyJSON(data []byte) {
@@ -104,7 +107,7 @@ func printPrettyJSON(data []byte) {
 
 // configInspect validate/show 共用入口：解析候选声明 → 选定组件镜像 → 容器内校验/展示。
 func configInspect(cmd string, p parsedArgs) error {
-	root, err := resolveRepoRoot(p.opt("dir", ""))
+	root, err := deploy.ResolveRepoRoot(p.opt("dir", ""))
 	if err != nil {
 		return err
 	}
@@ -120,9 +123,9 @@ func configInspect(cmd string, p parsedArgs) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", configFile, err)
 	}
-	var composeDir, image, label, project string
+	var composeDir, image, module, label, project string
 	var buildEnv []string
-	query, err := resolveDeployment(root, "")
+	query, err := deploy.ResolveDeployment(root, "")
 	if err != nil {
 		return err
 	}
@@ -130,9 +133,10 @@ func configInspect(cmd string, p parsedArgs) error {
 	case "ControlPlaneConfiguration":
 		composeDir = root
 		image = "kurrent-control-plane"
+		module = "app.core.config_tool"
 		label = "control_plane/kurrent.yaml"
-		project = query.project()
-		buildEnv = query.composeEnv()
+		project = query.Project()
+		buildEnv = query.ComposeEnv()
 	case "NodeConfiguration":
 		backend := nodeValueFromYAML(data, "spec", "agent", "backend")
 		sub := "nvmeof"
@@ -141,15 +145,16 @@ func configInspect(cmd string, p parsedArgs) error {
 		}
 		composeDir = filepath.Join(root, "storager", sub)
 		image = "storager-agent"
+		module = "app.config_tool"
 		label = "storager/kurrent.yaml"
-		project = query.storageProject()
+		project = query.StorageProject()
 		// compose 的 ${VAR:?} 在 build 阶段同样参与渲染；校验镜像不挂载这些路径，
 		// 只需满足插值（真实值由 join 在启动容器时注入）。
 		diskDir := strings.TrimSpace(nodeValueFromYAML(data, "spec", "agent", "diskDir"))
 		if diskDir == "" {
 			diskDir = root
 		}
-		buildEnv = query.nodeComposeEnv("validation", diskDir, query.storager("validation").cpCA)
+		buildEnv = query.NodeComposeEnv("validation", diskDir, query.Storager("validation").CPCA)
 	default:
 		return fmt.Errorf("%s: kind = %q (expected ControlPlaneConfiguration|NodeConfiguration)",
 			configFile, kind)
@@ -159,7 +164,7 @@ func configInspect(cmd string, p parsedArgs) error {
 	if err := composeRunStderr(composeDir, project, buildEnv, "build", image); err != nil {
 		return err
 	}
-	out, err := runConfigTool(image, cmd, data)
+	out, err := runConfigTool(image, module, cmd, data)
 	if err != nil {
 		return fmt.Errorf("%s validation failed (%s):\n%s", configFile, label, err)
 	}
@@ -169,53 +174,6 @@ func configInspect(cmd string, p parsedArgs) error {
 	}
 	fmt.Fprintf(os.Stderr, "%s: valid (%s)\n", configFile, strings.TrimSpace(out))
 	return nil
-}
-
-// resolveRepoRoot 定位仓库根：--dir 显式；否则部署记录（部署身份优先于 cwd）；
-// 再否则从 cwd 逐级上溯（含 control_plane/ 与 storager/）。--dir 也接受 control_plane/
-// 或 storager/ 本身。
-func resolveRepoRoot(explicit string) (string, error) {
-	start := explicit
-	if start == "" {
-		if rec, err := readDeploymentRecord(); err != nil {
-			return "", err
-		} else if rec != nil {
-			if isDir(filepath.Join(rec.RepoRoot, "control_plane")) && isDir(filepath.Join(rec.RepoRoot, "storager")) {
-				return rec.RepoRoot, nil
-			}
-			return "", fmt.Errorf("the deployment record points at %s, but that checkout no longer exists; pass --dir with its new location (or run kurrent init --dir <new-checkout>)", rec.RepoRoot)
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("get current directory: %w", err)
-		}
-		start = cwd
-	}
-	abs, err := filepath.Abs(start)
-	if err != nil {
-		return "", fmt.Errorf("resolve --dir: %w", err)
-	}
-	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("--dir is not a directory: %s", abs)
-	}
-	base := filepath.Base(abs)
-	if base == "control_plane" || base == "storager" {
-		abs = filepath.Dir(abs)
-	}
-	for dir := abs; ; dir = filepath.Dir(dir) {
-		if isDir(filepath.Join(dir, "control_plane")) && isDir(filepath.Join(dir, "storager")) {
-			return dir, nil
-		}
-		if parent := filepath.Dir(dir); parent == dir {
-			break
-		}
-	}
-	return "", fmt.Errorf("repository root not found (control_plane/ and storager/ must both exist; run inside the repository or pass --dir)")
-}
-
-func isDir(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }
 
 // resolveConfigFile 候选声明路径：--config 优先；否则按 --node 取节点/控制面默认位，
@@ -269,11 +227,11 @@ func nodeValueFromYAML(data []byte, path ...string) string {
 
 // runConfigTool 在组件镜像内执行 config_tool：候选配置经 stdin 传入，不落临时文件，
 // 不挂载宿主路径；--network none 保证校验过程无外部访问。
-func runConfigTool(image, cmd string, configData []byte) (string, error) {
+func runConfigTool(image, module, cmd string, configData []byte) (string, error) {
 	args := []string{
 		"run", "--rm", "-i", "--network", "none",
 		"--entrypoint", "python", image,
-		"-m", "app.config_tool", cmd,
+		"-m", module, cmd,
 	}
 	command := exec.Command("docker", args...)
 	command.Stdin = bytes.NewReader(configData)

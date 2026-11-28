@@ -3,13 +3,14 @@
 // 监听面、Docker 守护进程与防火墙检查对两种角色都生效（端口白名单按角色区分）；
 // control 另查控制面容器暴露面与凭据权限，storage 另查内核 nvmet 前置。
 // 全部只读，不修改系统状态；无 root 时防火墙类检查标记为 SKIP（--strict 可将其视为失败）。
-package main
+package hostcheck
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"kurrent/cli/internal/deploy"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,56 +21,56 @@ import (
 	"syscall"
 )
 
-type checkStatus string
+type CheckStatus string
 
 const (
-	checkOK   checkStatus = "ok"
-	checkWarn checkStatus = "warn"
-	checkFail checkStatus = "fail"
-	checkSkip checkStatus = "skip"
+	checkOK   CheckStatus = "ok"
+	checkWarn CheckStatus = "warn"
+	checkFail CheckStatus = "fail"
+	checkSkip CheckStatus = "skip"
 )
 
-type hostCheck struct {
+type HostCheck struct {
 	ID     string      `json:"id"`
 	Title  string      `json:"title"`
-	Status checkStatus `json:"status"`
+	Status CheckStatus `json:"status"`
 	Detail string      `json:"detail,omitempty"`
 	Hint   string      `json:"hint,omitempty"`
 }
 
-type hostSummary struct {
+type HostSummary struct {
 	OK   int `json:"ok"`
 	Warn int `json:"warn"`
 	Fail int `json:"fail"`
 	Skip int `json:"skip"`
 }
 
-type hostReport struct {
+type HostReport struct {
 	Role    string      `json:"role"`
 	Strict  bool        `json:"strict"`
-	Summary hostSummary `json:"summary"`
-	Checks  []hostCheck `json:"checks"`
+	Summary HostSummary `json:"summary"`
+	Checks  []HostCheck `json:"checks"`
 }
 
-type hostRole string
+type HostRole string
 
 const (
-	roleControl hostRole = "control"
-	roleStorage hostRole = "storage"
-	roleAll     hostRole = "all"
+	RoleControl HostRole = "control"
+	RoleStorage HostRole = "storage"
+	RoleAll     HostRole = "all"
 )
 
-// hostEnv 宿主检查的只读探针。字段为 nil 时回落到真实系统调用；
+// HostEnv 宿主检查的只读探针。字段为 nil 时回落到真实系统调用；
 // 测试按需替换路径、命令输出或权限判定。
-type hostEnv struct {
-	procMounts        string
-	sysModuleRoot     string
-	controlStateDir   string
-	stateRoot         string
-	deployment        *deploymentRecord
-	deploymentErr     string
-	deploymentChecked bool
-	tlshdVersion      func() (string, error)
+type HostEnv struct {
+	ProcMounts        string
+	SysModuleRoot     string
+	ControlStateDir   string
+	StateRoot         string
+	Deployment        *deploy.DeploymentRecord
+	DeploymentErr     string
+	DeploymentChecked bool
+	TlshdVersion      func() (string, error)
 	uid               func() int
 	readFile          func(string) ([]byte, error)
 	statFile          func(string) (fs.FileInfo, error)
@@ -78,30 +79,30 @@ type hostEnv struct {
 	output            func(string, ...string) (string, error)
 }
 
-var hostEnvPaths = hostEnv{procMounts: "/proc/mounts", sysModuleRoot: "/sys/module"}
+var HostEnvPaths = HostEnv{ProcMounts: "/proc/mounts", SysModuleRoot: "/sys/module"}
 
-func (e hostEnv) mountsPath() string {
-	if e.procMounts != "" {
-		return e.procMounts
+func (e HostEnv) mountsPath() string {
+	if e.ProcMounts != "" {
+		return e.ProcMounts
 	}
 	return "/proc/mounts"
 }
 
-func (e hostEnv) moduleRoot() string {
-	if e.sysModuleRoot != "" {
-		return e.sysModuleRoot
+func (e HostEnv) moduleRoot() string {
+	if e.SysModuleRoot != "" {
+		return e.SysModuleRoot
 	}
 	return "/sys/module"
 }
 
-func (e hostEnv) stateDir(root string) string {
-	if e.controlStateDir != "" {
-		return e.controlStateDir
+func (e HostEnv) stateDir(root string) string {
+	if e.ControlStateDir != "" {
+		return e.ControlStateDir
 	}
 	return filepath.Join(root, "control_plane", "state")
 }
 
-func (e hostEnv) out(name string, args ...string) (string, error) {
+func (e HostEnv) out(name string, args ...string) (string, error) {
 	if e.output != nil {
 		return e.output(name, args...)
 	}
@@ -109,7 +110,7 @@ func (e hostEnv) out(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-func (e hostEnv) hasTool(name string) bool {
+func (e HostEnv) hasTool(name string) bool {
 	if e.lookPath != nil {
 		_, err := e.lookPath(name)
 		return err == nil
@@ -118,28 +119,28 @@ func (e hostEnv) hasTool(name string) bool {
 	return err == nil
 }
 
-func (e hostEnv) uidValue() int {
+func (e HostEnv) uidValue() int {
 	if e.uid != nil {
 		return e.uid()
 	}
 	return os.Geteuid()
 }
 
-func (e hostEnv) read(path string) ([]byte, error) {
+func (e HostEnv) read(path string) ([]byte, error) {
 	if e.readFile != nil {
 		return e.readFile(path)
 	}
 	return os.ReadFile(path)
 }
 
-func (e hostEnv) stat(path string) (fs.FileInfo, error) {
+func (e HostEnv) stat(path string) (fs.FileInfo, error) {
 	if e.statFile != nil {
 		return e.statFile(path)
 	}
 	return os.Stat(path)
 }
 
-func (e hostEnv) globFiles(pattern string) []string {
+func (e HostEnv) globFiles(pattern string) []string {
 	if e.glob != nil {
 		out, _ := e.glob(pattern)
 		return out
@@ -148,25 +149,25 @@ func (e hostEnv) globFiles(pattern string) []string {
 	return out
 }
 
-func (e hostEnv) tlshd() (string, error) {
-	if e.tlshdVersion != nil {
-		return e.tlshdVersion()
+func (e HostEnv) tlshd() (string, error) {
+	if e.TlshdVersion != nil {
+		return e.TlshdVersion()
 	}
 	return detectTlshdVersion()
 }
 
 // ── 角色与检查矩阵 ──
 
-func parseHostRole(v string) (hostRole, error) {
-	switch hostRole(v) {
-	case roleControl, roleStorage, roleAll:
-		return hostRole(v), nil
+func ParseHostRole(v string) (HostRole, error) {
+	switch HostRole(v) {
+	case RoleControl, RoleStorage, RoleAll:
+		return HostRole(v), nil
 	}
 	return "", fmt.Errorf("invalid role %q (expected control|storage|all)", v)
 }
 
-// inferHostRole 按运行中的 compose 服务推断角色；显式 --role 时不调用。
-func inferHostRole(env hostEnv) (hostRole, error) {
+// InferHostRole 按运行中的 compose 服务推断角色；显式 --role 时不调用。
+func InferHostRole(env HostEnv) (HostRole, error) {
 	if !env.hasTool("docker") {
 		return "", fmt.Errorf("cannot infer the host role: docker is not available; pass --role control|storage|all")
 	}
@@ -185,31 +186,31 @@ func inferHostRole(env hostEnv) (hostRole, error) {
 	}
 	switch {
 	case control && storage:
-		return roleAll, nil
+		return RoleAll, nil
 	case control:
-		return roleControl, nil
+		return RoleControl, nil
 	case storage:
-		return roleStorage, nil
+		return RoleStorage, nil
 	}
 	return "", fmt.Errorf("no Kurrent containers are running; pass --role control|storage|all")
 }
 
-func runHostChecks(env hostEnv, root string, role hostRole) hostReport {
-	report := hostReport{Role: string(role)}
+func RunHostChecks(env HostEnv, root string, role HostRole) HostReport {
+	report := HostReport{Role: string(role)}
 	report.Checks = append(report.Checks,
 		listenerCheck(env, role),
 		dockerDaemonCheck(env),
 	)
-	if role == roleControl || role == roleAll {
+	if role == RoleControl || role == RoleAll {
 		report.Checks = append(report.Checks, controlContainerChecks(env)...)
 	}
 	report.Checks = append(report.Checks, firewallCheck(env))
-	if role == roleControl || role == roleAll {
+	if role == RoleControl || role == RoleAll {
 		report.Checks = append(report.Checks, deploymentChecks(env, root)...)
 		report.Checks = append(report.Checks, credentialChecks(env, root)...)
 	}
-	if role == roleStorage || role == roleAll {
-		report.Checks = append(report.Checks, storageHostChecks(env, root)...)
+	if role == RoleStorage || role == RoleAll {
+		report.Checks = append(report.Checks, StorageHostChecks(env, root)...)
 	}
 	for _, c := range report.Checks {
 		switch c.Status {
@@ -226,20 +227,20 @@ func runHostChecks(env hostEnv, root string, role hostRole) hostReport {
 	return report
 }
 
-func (r hostReport) blocks(strict bool) bool {
+func (r HostReport) Blocks(strict bool) bool {
 	return r.Summary.Fail > 0 || (strict && r.Summary.Skip > 0)
 }
 
 // ── storage 角色：内核 nvmet 数据面前置 ──
 
-const tlshdMinVersion = "1.5.0"
+const TlshdMinVersion = "1.5.0"
 
-func storageHostChecks(env hostEnv, root string) []hostCheck {
+func StorageHostChecks(env HostEnv, root string) []HostCheck {
 	prepareHint := "sudo bash " + filepath.Join(root, "storager", "nvmeof", "host-prepare.sh")
-	var checks []hostCheck
+	var checks []HostCheck
 	for _, mod := range []string{"nvmet", "nvmet_tcp"} {
 		name := strings.ReplaceAll(mod, "_", "-")
-		c := hostCheck{ID: "storage.module." + name, Title: "kernel module " + name}
+		c := HostCheck{ID: "storage.module." + name, Title: "kernel module " + name}
 		if _, err := env.stat(filepath.Join(env.moduleRoot(), mod)); err != nil {
 			c.Status = checkFail
 			c.Detail = "kernel module not loaded: " + name
@@ -251,7 +252,7 @@ func storageHostChecks(env hostEnv, root string) []hostCheck {
 		checks = append(checks, c)
 	}
 
-	c := hostCheck{ID: "storage.configfs", Title: "configfs mounted"}
+	c := HostCheck{ID: "storage.configfs", Title: "configfs mounted"}
 	if configfsMounted(env) {
 		c.Status = checkOK
 		c.Detail = "configfs mounted at /sys/kernel/config"
@@ -262,17 +263,17 @@ func storageHostChecks(env hostEnv, root string) []hostCheck {
 	}
 	checks = append(checks, c)
 
-	c = hostCheck{ID: "storage.tlshd", Title: "tlshd >= " + tlshdMinVersion}
+	c = HostCheck{ID: "storage.tlshd", Title: "tlshd >= " + TlshdMinVersion}
 	ver, err := env.tlshd()
 	switch {
 	case err != nil:
 		c.Status = checkFail
 		c.Detail = "tlshd unavailable: " + err.Error()
 		c.Hint = fmt.Sprintf("install/upgrade ktls-utils >= %s and run sudo systemctl enable --now tlshd (build steps: %s)",
-			tlshdMinVersion, filepath.Join(root, "storager", "nvmeof", "nvmet-host", "README.md"))
-	case !versionAtLeast(ver, tlshdMinVersion):
+			TlshdMinVersion, filepath.Join(root, "storager", "nvmeof", "nvmet-host", "README.md"))
+	case !versionAtLeast(ver, TlshdMinVersion):
 		c.Status = checkFail
-		c.Detail = fmt.Sprintf("tlshd version too old: %s (requires >= %s; 1.5.0+ prefers the process keyring, older versions mask new keys after a PSK rotation)", ver, tlshdMinVersion)
+		c.Detail = fmt.Sprintf("tlshd version too old: %s (requires >= %s; 1.5.0+ prefers the process keyring, older versions mask new keys after a PSK rotation)", ver, TlshdMinVersion)
 		c.Hint = "install/upgrade ktls-utils and run sudo systemctl enable --now tlshd"
 	default:
 		c.Status = checkOK
@@ -282,7 +283,7 @@ func storageHostChecks(env hostEnv, root string) []hostCheck {
 	return checks
 }
 
-func configfsMounted(env hostEnv) bool {
+func configfsMounted(env HostEnv) bool {
 	data, err := env.read(env.mountsPath())
 	if err != nil {
 		return false
@@ -334,11 +335,11 @@ func findComposeService(containers []composeContainer, service string) (composeC
 	return composeContainer{}, false
 }
 
-func controlContainerChecks(env hostEnv) []hostCheck {
-	var checks []hostCheck
+func controlContainerChecks(env HostEnv) []HostCheck {
+	var checks []HostCheck
 	containers, dockerOK := listComposeContainers(env)
 	if !dockerOK {
-		return []hostCheck{
+		return []HostCheck{
 			{ID: "control.control-plane", Title: "control plane exposure", Status: checkSkip,
 				Detail: "docker is not available; container exposure was not checked"},
 			{ID: "control.docker-socket", Title: "docker.sock mount", Status: checkSkip,
@@ -353,8 +354,8 @@ func controlContainerChecks(env hostEnv) []hostCheck {
 	return checks
 }
 
-func listenerCheck(env hostEnv, role hostRole) hostCheck {
-	c := hostCheck{ID: "host.listeners", Title: "public TCP listeners"}
+func listenerCheck(env HostEnv, role HostRole) HostCheck {
+	c := HostCheck{ID: "host.listeners", Title: "public TCP listeners"}
 	if !env.hasTool("ss") {
 		c.Status = checkWarn
 		c.Detail = "cannot read the listener table (ss is not installed)"
@@ -404,14 +405,14 @@ func publicListeners(out string) []string {
 	return listeners
 }
 
-func allowedPorts(role hostRole) map[string]bool {
+func allowedPorts(role HostRole) map[string]bool {
 	allowed := map[string]bool{"22": true}
-	if role == roleControl || role == roleAll {
+	if role == RoleControl || role == RoleAll {
 		for _, p := range []string{"53", "67", "69", "80", "443"} {
 			allowed[p] = true
 		}
 	}
-	if role == roleStorage || role == roleAll {
+	if role == RoleStorage || role == RoleAll {
 		for _, p := range []string{"4840", "4421"} {
 			allowed[p] = true
 		}
@@ -433,8 +434,8 @@ func portHint(port string) string {
 	return ""
 }
 
-func dockerDaemonCheck(env hostEnv) hostCheck {
-	c := hostCheck{ID: "host.docker-daemon", Title: "docker daemon exposure"}
+func dockerDaemonCheck(env HostEnv) HostCheck {
+	c := HostCheck{ID: "host.docker-daemon", Title: "docker daemon exposure"}
 	if !env.hasTool("docker") {
 		c.Status = checkWarn
 		c.Detail = "docker is not installed; container checks were skipped"
@@ -457,7 +458,7 @@ func dockerDaemonCheck(env hostEnv) hostCheck {
 	return c
 }
 
-func listComposeContainers(env hostEnv) ([]composeContainer, bool) {
+func listComposeContainers(env HostEnv) ([]composeContainer, bool) {
 	if !env.hasTool("docker") {
 		return nil, false
 	}
@@ -468,8 +469,8 @@ func listComposeContainers(env hostEnv) ([]composeContainer, bool) {
 	return parseComposePS(out), true
 }
 
-func controlPlaneExposureCheck(env hostEnv, containers []composeContainer) hostCheck {
-	c := hostCheck{ID: "control.control-plane", Title: "control plane exposure"}
+func controlPlaneExposureCheck(env HostEnv, containers []composeContainer) HostCheck {
+	c := HostCheck{ID: "control.control-plane", Title: "control plane exposure"}
 	cp, ok := findComposeService(containers, "kurrent-control-plane")
 	if !ok {
 		c.Status = checkSkip
@@ -491,8 +492,8 @@ func publishedToHost(ports string) bool {
 	return strings.Contains(ports, "0.0.0.0:") || strings.Contains(ports, "[::]:")
 }
 
-func dockerSocketCheck(env hostEnv, containers []composeContainer) hostCheck {
-	c := hostCheck{ID: "control.docker-socket", Title: "docker.sock mount"}
+func dockerSocketCheck(env HostEnv, containers []composeContainer) HostCheck {
+	c := HostCheck{ID: "control.docker-socket", Title: "docker.sock mount"}
 	cp, ok := findComposeService(containers, "kurrent-control-plane")
 	if !ok {
 		c.Status = checkSkip
@@ -516,8 +517,8 @@ func dockerSocketCheck(env hostEnv, containers []composeContainer) hostCheck {
 	return c
 }
 
-func nginxPKICheck(env hostEnv, containers []composeContainer) hostCheck {
-	c := hostCheck{ID: "control.nginx-pki", Title: "nginx PKI mounts"}
+func nginxPKICheck(env HostEnv, containers []composeContainer) HostCheck {
+	c := HostCheck{ID: "control.nginx-pki", Title: "nginx PKI mounts"}
 	webui, ok := findComposeService(containers, "kurrent-nginx")
 	if !ok {
 		c.Status = checkSkip
@@ -555,13 +556,13 @@ func exposesPKIPrivateKey(mounts string) bool {
 	return false
 }
 
-func containerMounts(env hostEnv, id string) (string, error) {
+func containerMounts(env HostEnv, id string) (string, error) {
 	return env.out("docker", "inspect", id, "--format",
 		`{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}`)
 }
 
-func firewallCheck(env hostEnv) hostCheck {
-	c := hostCheck{ID: "host.firewall", Title: "Docker-published port filtering"}
+func firewallCheck(env HostEnv) HostCheck {
+	c := HostCheck{ID: "host.firewall", Title: "Docker-published port filtering"}
 	if env.uidValue() != 0 {
 		c.Status = checkSkip
 		c.Detail = "requires root; re-run with sudo to check firewall state"
@@ -602,15 +603,15 @@ func hasIptablesRule(out string) bool {
 
 // deploymentChecks 校验状态根与部署记录：状态必须落在仓库之外、目录 0700 且属于
 // 当前用户；记录存在且可解析。未注入部署上下文（单元测试）时不产生检查项。
-func deploymentChecks(env hostEnv, root string) []hostCheck {
-	if !env.deploymentChecked {
+func deploymentChecks(env HostEnv, root string) []HostCheck {
+	if !env.DeploymentChecked {
 		return nil
 	}
-	stateRoot := env.stateRoot
+	stateRoot := env.StateRoot
 	if stateRoot == "" {
 		stateRoot = filepath.Dir(filepath.Dir(env.stateDir(root)))
 	}
-	c := hostCheck{ID: "control.state-root", Title: "state root outside the repository"}
+	c := HostCheck{ID: "control.state-root", Title: "state root outside the repository"}
 	insideRepo := false
 	if rel, err := filepath.Rel(root, stateRoot); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		insideRepo = true
@@ -639,34 +640,34 @@ func deploymentChecks(env hostEnv, root string) []hostCheck {
 		}
 	}
 
-	r := hostCheck{ID: "control.deployment-record", Title: "deployment record"}
+	r := HostCheck{ID: "control.Deployment-record", Title: "deployment record"}
 	switch {
-	case env.deploymentErr != "":
+	case env.DeploymentErr != "":
 		r.Status = checkFail
-		r.Detail = env.deploymentErr
+		r.Detail = env.DeploymentErr
 		r.Hint = "remove ~/.kurrent/deployment.yaml and re-run kurrent init"
-	case env.deployment == nil:
+	case env.Deployment == nil:
 		r.Status = checkWarn
 		r.Detail = "no deployment record (~/.kurrent/deployment.yaml)"
 		r.Hint = "run kurrent init (or --adopt-state for a legacy deployment)"
 	default:
 		r.Status = checkOK
-		r.Detail = fmt.Sprintf("repo=%s state=%s status=%s", env.deployment.RepoRoot, env.deployment.StateDir, env.deployment.Status)
-		if env.deployment.StateDir != stateRoot {
+		r.Detail = fmt.Sprintf("repo=%s state=%s status=%s", env.Deployment.RepoRoot, env.Deployment.StateDir, env.Deployment.Status)
+		if env.Deployment.StateDir != stateRoot {
 			r.Status = checkWarn
 			r.Detail += fmt.Sprintf(" (record state root differs from %s)", stateRoot)
 		}
 	}
-	return []hostCheck{c, r}
+	return []HostCheck{c, r}
 }
 
-func credentialChecks(env hostEnv, root string) []hostCheck {
+func credentialChecks(env HostEnv, root string) []HostCheck {
 	stateDir := env.stateDir(root)
 	if fi, err := env.stat(stateDir); err != nil || !fi.IsDir() {
-		return []hostCheck{{ID: "control.credentials", Title: "control-plane credentials",
+		return []HostCheck{{ID: "control.credentials", Title: "control-plane credentials",
 			Status: checkSkip, Detail: "control-plane state directory not found: " + stateDir}}
 	}
-	var checks []hostCheck
+	var checks []HostCheck
 	paths := []string{
 		filepath.Join(stateDir, "pki", "ca"),
 		filepath.Join(stateDir, "users.yml"),
@@ -681,7 +682,7 @@ func credentialChecks(env hostEnv, root string) []hostCheck {
 			continue
 		}
 		mode := fi.Mode().Perm()
-		c := hostCheck{ID: "control.credentials." + filepath.Base(path),
+		c := HostCheck{ID: "control.credentials." + filepath.Base(path),
 			Title: "credential file " + filepath.Base(path)}
 		if secureMode(mode) {
 			c.Status = checkOK
@@ -700,7 +701,7 @@ func credentialChecks(env hostEnv, root string) []hostCheck {
 			continue
 		}
 		mode := fi.Mode().Perm()
-		c := hostCheck{ID: "control.credentials.ca-key." + filepath.Base(filepath.Dir(key)),
+		c := HostCheck{ID: "control.credentials.ca-key." + filepath.Base(filepath.Dir(key)),
 			Title: "CA private key " + filepath.Base(filepath.Dir(key))}
 		if mode == 0o600 {
 			c.Status = checkOK
@@ -713,7 +714,7 @@ func credentialChecks(env hostEnv, root string) []hostCheck {
 		checks = append(checks, c)
 	}
 	if len(checks) == 0 {
-		checks = append(checks, hostCheck{ID: "control.credentials", Title: "control-plane credentials",
+		checks = append(checks, HostCheck{ID: "control.credentials", Title: "control-plane credentials",
 			Status: checkSkip, Detail: "no credential files found in " + stateDir})
 	}
 	return checks
@@ -729,7 +730,7 @@ func secureMode(mode fs.FileMode) bool {
 
 // ── 输出 ──
 
-func printHostReport(w io.Writer, report hostReport, asJSON bool) error {
+func PrintHostReport(w io.Writer, report HostReport, asJSON bool) error {
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -751,7 +752,7 @@ func printHostReport(w io.Writer, report hostReport, asJSON bool) error {
 	return nil
 }
 
-func statusLabel(s checkStatus) string {
+func statusLabel(s CheckStatus) string {
 	if s == checkFail {
 		return "FAIL"
 	}
@@ -761,7 +762,7 @@ func statusLabel(s checkStatus) string {
 func detectTlshdVersion() (string, error) {
 	bin := tlshdBinaryPath()
 	if bin == "" {
-		return "", fmt.Errorf("not installed (ktls-utils >= %s required)", tlshdMinVersion)
+		return "", fmt.Errorf("not installed (ktls-utils >= %s required)", TlshdMinVersion)
 	}
 	out, err := exec.Command(bin, "-v").CombinedOutput()
 	if err != nil {
@@ -831,4 +832,29 @@ func versionAtLeast(v, min string) bool {
 		}
 	}
 	return true
+}
+
+// HostPreflightNvmet 校验 nvmet 数据面的宿主前置（join 预检与 host check 共用同一套检查）。
+func HostPreflightNvmet(storagerDir string) error {
+	var missing []string
+	tlshdBad := false
+	for _, c := range StorageHostChecks(HostEnvPaths, filepath.Dir(storagerDir)) {
+		if c.Status != checkFail {
+			continue
+		}
+		missing = append(missing, c.Detail)
+		if c.ID == "storage.tlshd" {
+			tlshdBad = true
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	hint := fmt.Sprintf("fix (root required, idempotent): sudo bash %s", filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
+	if tlshdBad {
+		hint += fmt.Sprintf("\n  tlshd: install/upgrade ktls-utils >= %s and run sudo systemctl enable --now tlshd (build steps: %s)",
+			TlshdMinVersion, filepath.Join(storagerDir, "nvmeof", "nvmet-host", "README.md"))
+	}
+	return fmt.Errorf("host nvmet prerequisites are not ready (the storage data plane cannot start):\n  %s\n  %s",
+		strings.Join(missing, "\n  "), hint)
 }

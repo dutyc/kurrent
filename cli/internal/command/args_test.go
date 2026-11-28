@@ -1,7 +1,8 @@
-package main
+package command
 
 import (
 	"errors"
+	"kurrent/cli/internal/cli"
 	"strings"
 	"testing"
 )
@@ -25,13 +26,13 @@ func TestParseCommandMixedOrder(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(p.pos) != 2 || p.pos[1] != "second" {
-		t.Fatalf("位置参数 = %v", p.pos)
+		t.Fatalf("positional args = %v", p.pos)
 	}
 	if p.opt("name", "") != "x" || p.opt("output", "") != "json" || !p.bool("force") {
-		t.Fatalf("标志解析错误: %+v", p)
+		t.Fatalf("flag parsing error: %+v", p)
 	}
 	if !p.has("force") || !p.has("output") || p.has("missing") {
-		t.Fatalf("has() 语义错误: %+v", p.set)
+		t.Fatalf("has() semantics mismatch: %+v", p.set)
 	}
 }
 
@@ -80,7 +81,7 @@ func TestParseCommandBoolFalse(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !p.has("force") || p.bool("force") {
-		t.Fatalf("--force=false 应显式关闭: set=%v value=%v", p.has("force"), p.bool("force"))
+		t.Fatalf("--force=false should explicitly disable: set=%v value=%v", p.has("force"), p.bool("force"))
 	}
 }
 
@@ -90,46 +91,46 @@ func TestParseCommandTerminator(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(p.pos) != 2 || p.pos[0] != "--not-a-flag" || p.pos[1] != "-x" {
-		t.Fatalf("-- 之后应全部按位置参数处理: %v", p.pos)
+		t.Fatalf("args after -- must all be positional: %v", p.pos)
 	}
 }
 
 func TestOutputFormat(t *testing.T) {
 	p := parsedArgs{opts: map[string]string{}}
 	if got, err := p.outputFormat(); err != nil || got != "table" {
-		t.Fatalf("默认输出 = %q, %v", got, err)
+		t.Fatalf("default output = %q, %v", got, err)
 	}
 	p.opts["output"] = "json"
 	if got, err := p.outputFormat(); err != nil || got != "json" {
-		t.Fatalf("json 输出 = %q, %v", got, err)
+		t.Fatalf("json output = %q, %v", got, err)
 	}
 	p.opts["output"] = "yaml"
 	if _, err := p.outputFormat(); err == nil {
-		t.Fatal("未知输出格式应报错")
+		t.Fatal("unknown output formats must be rejected")
 	}
 }
 
 func TestParseGlobalFlags(t *testing.T) {
-	oldServer, oldToken, oldCred := flagServer, flagToken, flagCredentials
-	t.Cleanup(func() { flagServer, flagToken, flagCredentials = oldServer, oldToken, oldCred })
-	flagServer, flagToken, flagCredentials = "", "", ""
+	oldServer, oldToken, oldCred := cli.Server, cli.Token, cli.Credentials
+	t.Cleanup(func() { cli.Server, cli.Token, cli.Credentials = oldServer, oldToken, oldCred })
+	cli.Server, cli.Token, cli.Credentials = "", "", ""
 
 	args, err := parseGlobalFlags([]string{"--server", "https://cp.example.com/", "--token", " tok ", "agents", "list"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(args) != 2 || args[0] != "agents" || args[1] != "list" {
-		t.Fatalf("位置参数 = %v", args)
+		t.Fatalf("positional args = %v", args)
 	}
-	if flagServer != "https://cp.example.com" || flagToken != "tok" {
-		t.Fatalf("全局标志 = server=%q token=%q", flagServer, flagToken)
+	if cli.Server != "https://cp.example.com" || cli.Token != "tok" {
+		t.Fatalf("global flags = server=%q token=%q", cli.Server, cli.Token)
 	}
 }
 
 func TestParseGlobalFlagsErrors(t *testing.T) {
-	oldServer, oldToken, oldCred := flagServer, flagToken, flagCredentials
-	t.Cleanup(func() { flagServer, flagToken, flagCredentials = oldServer, oldToken, oldCred })
-	flagServer, flagToken, flagCredentials = "", "", ""
+	oldServer, oldToken, oldCred := cli.Server, cli.Token, cli.Credentials
+	t.Cleanup(func() { cli.Server, cli.Token, cli.Credentials = oldServer, oldToken, oldCred })
+	cli.Server, cli.Token, cli.Credentials = "", "", ""
 
 	cases := []struct {
 		name string

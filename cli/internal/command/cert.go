@@ -7,7 +7,7 @@
 // 不能吊销当前凭据自身。
 // components / revoke-component：agent 与 nvmet-host 的 nodes 域证书台账与吊销
 // （吊销写 nodes CRL，并删除该节点的 bootstrap token）。
-package main
+package command
 
 import (
 	"crypto/rand"
@@ -17,6 +17,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
+	"kurrent/cli/internal/fsx"
+	"kurrent/cli/internal/validate"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -141,7 +145,7 @@ func cmdCert(args []string) {
 	case "revoke-component":
 		certRevokeComponent(args[1:])
 	default:
-		usageError(certGroupUsage, fmt.Errorf("unknown cert subcommand: %s", args[0]))
+		cli.UsageError(certGroupUsage, fmt.Errorf("unknown cert subcommand: %s", args[0]))
 	}
 }
 
@@ -152,41 +156,41 @@ func certKeygen(args []string) {
 	}
 	cn := strings.TrimSpace(p.pos[0])
 	if !userCNPattern.MatchString(cn) {
-		usageError(certKeygenUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
+		cli.UsageError(certKeygenUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
 	}
 	dir := strings.TrimSpace(p.opt("out", "."))
 	if dir == "" {
-		usageError(certKeygenUsage, fmt.Errorf("--out must not be empty"))
+		cli.UsageError(certKeygenUsage, fmt.Errorf("--out must not be empty"))
 	}
 	keyPath := filepath.Join(dir, cn+".key")
 	csrPath := filepath.Join(dir, cn+".csr")
 	if !p.bool("force") {
 		for _, path := range []string{keyPath, csrPath} {
 			if _, err := os.Stat(path); err == nil {
-				fatal("%s already exists; choose another --out or add --force (the old private key cannot be recovered)", path)
+				cli.Fatal("%s already exists; choose another --out or add --force (the old private key cannot be recovered)", path)
 			}
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fatal("create output directory: %v", err)
+		cli.Fatal("create output directory: %v", err)
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		fatal("generate private key: %v", err)
+		cli.Fatal("generate private key: %v", err)
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader,
 		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
 	if err != nil {
-		fatal("generate CSR: %v", err)
+		cli.Fatal("generate CSR: %v", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	if err := writeFileAtomic(keyPath, keyPEM, 0o600); err != nil {
-		fatal("write private key: %v", err)
+	if err := fsx.WriteFileAtomic(keyPath, keyPEM, 0o600); err != nil {
+		cli.Fatal("write private key: %v", err)
 	}
-	if err := writeFileAtomic(csrPath, csrPEM, 0o644); err != nil {
-		fatal("write CSR: %v", err)
+	if err := fsx.WriteFileAtomic(csrPath, csrPEM, 0o644); err != nil {
+		cli.Fatal("write CSR: %v", err)
 	}
 	fmt.Printf("private key and CSR generated: cn=%s\n", cn)
 	fmt.Printf("  private key: %s (0600)\n", keyPath)
@@ -201,33 +205,33 @@ func certIssue(args []string) {
 	}
 	cn := strings.TrimSpace(p.pos[0])
 	if !userCNPattern.MatchString(cn) {
-		usageError(certIssueUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
+		cli.UsageError(certIssueUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
 	}
 	csrPath := p.opt("csr", "")
 	csrPEM, err := os.ReadFile(csrPath)
 	if err != nil {
-		fatal("read CSR: %v", err)
+		cli.Fatal("read CSR: %v", err)
 	}
 	days := 0
 	if p.has("days") {
 		raw := strings.TrimSpace(p.opt("days", ""))
 		days, err = strconv.Atoi(raw)
 		if err != nil || days <= 0 {
-			usageError(certIssueUsage, fmt.Errorf("--days must be a positive integer (got %q)", raw))
+			cli.UsageError(certIssueUsage, fmt.Errorf("--days must be a positive integer (got %q)", raw))
 		}
 	}
 	outDir := strings.TrimSpace(p.opt("out", "."))
 	if outDir == "" {
-		usageError(certIssueUsage, fmt.Errorf("--out must not be empty"))
+		cli.UsageError(certIssueUsage, fmt.Errorf("--out must not be empty"))
 	}
 	certPath := filepath.Join(outDir, cn+".crt")
 	if !p.bool("force") {
 		if _, err := os.Stat(certPath); err == nil {
-			fatal("%s already exists; choose another --out or add --force", certPath)
+			cli.Fatal("%s already exists; choose another --out or add --force", certPath)
 		}
 	}
 	if err := os.MkdirAll(outDir, 0o700); err != nil {
-		fatal("create output directory: %v", err)
+		cli.Fatal("create output directory: %v", err)
 	}
 
 	body := map[string]any{"csr": string(csrPEM)}
@@ -235,17 +239,17 @@ func certIssue(args []string) {
 		body["days"] = days
 	}
 	var out certIssueResp
-	if err := json.Unmarshal(api("POST", "/pki/users/"+url.PathEscape(cn), body), &out); err != nil {
-		fatal("parse issuance response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("POST", "/pki/users/"+url.PathEscape(cn), body), &out); err != nil {
+		cli.Fatal("parse issuance response: %v", err)
 	}
 	if out.CN != cn || !userCNPattern.MatchString(out.CN) {
-		fatal("server returned cn %q, request was %q", out.CN, cn)
+		cli.Fatal("server returned cn %q, request was %q", out.CN, cn)
 	}
 	if block, _ := pem.Decode([]byte(out.Certificate)); block == nil || block.Type != "CERTIFICATE" {
-		fatal("server returned a certificate that is not PEM CERTIFICATE")
+		cli.Fatal("server returned a certificate that is not PEM CERTIFICATE")
 	}
-	if err := writeFileAtomic(certPath, []byte(out.Certificate), 0o644); err != nil {
-		fatal("write certificate: %v", err)
+	if err := fsx.WriteFileAtomic(certPath, []byte(out.Certificate), 0o644); err != nil {
+		cli.Fatal("write certificate: %v", err)
 	}
 	fmt.Printf("certificate issued: cn=%s, serial=%s, expires %s\n", out.CN, out.Serial, shortTS(out.ExpiresAt))
 	fmt.Printf("  certificate: %s\n", certPath)
@@ -260,14 +264,14 @@ func certList(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(certListUsage, err)
+		cli.UsageError(certListUsage, err)
 	}
 	var items []certInfo
-	if err := json.Unmarshal(api("GET", "/pki/users", nil), &items); err != nil {
-		fatal("parse certificate list: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/pki/users", nil), &items); err != nil {
+		cli.Fatal("parse certificate list: %v", err)
 	}
 	if format == "json" {
-		printJSON(items)
+		cli.PrintJSON(items)
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -304,11 +308,11 @@ func shortFingerprint(s string) string {
 func serialFlag(p parsedArgs, usage string) string {
 	raw := p.opt("serial", "")
 	if p.has("serial") && strings.TrimSpace(raw) == "" {
-		usageError(usage, fmt.Errorf("--serial must not be empty (omit the flag to target every unrevoked certificate)"))
+		cli.UsageError(usage, fmt.Errorf("--serial must not be empty (omit the flag to target every unrevoked certificate)"))
 	}
-	serial, err := validateSerial(raw)
+	serial, err := validate.ValidateSerial(raw)
 	if err != nil {
-		usageError(usage, err)
+		cli.UsageError(usage, err)
 	}
 	return serial
 }
@@ -320,11 +324,11 @@ func certRevoke(args []string) {
 	}
 	cn := strings.TrimSpace(p.pos[0])
 	if !userCNPattern.MatchString(cn) {
-		usageError(certRevokeUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
+		cli.UsageError(certRevokeUsage, fmt.Errorf("invalid cn: only letters, digits, dots, underscores, hyphens and @ are allowed (max 64)"))
 	}
-	reason, err := validateRevocationReason(p.opt("reason", "unspecified"))
+	reason, err := validate.ValidateRevocationReason(p.opt("reason", "unspecified"))
 	if err != nil {
-		usageError(certRevokeUsage, err)
+		cli.UsageError(certRevokeUsage, err)
 	}
 	serial := serialFlag(p, certRevokeUsage)
 	path := "/pki/users/" + url.PathEscape(cn) + "?reason=" + url.QueryEscape(reason)
@@ -332,8 +336,8 @@ func certRevoke(args []string) {
 		path += "&serial=" + url.QueryEscape(serial)
 	}
 	var out certRevokeResp
-	if err := json.Unmarshal(api("DELETE", path, nil), &out); err != nil {
-		fatal("parse revocation response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("DELETE", path, nil), &out); err != nil {
+		cli.Fatal("parse revocation response: %v", err)
 	}
 	fmt.Printf("certificate(s) revoked: %s (serial %s, reason %s)\n",
 		out.Revoked, strings.Join(out.Serials, ","), out.Reason)
@@ -347,14 +351,14 @@ func certComponents(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(certComponentsUsage, err)
+		cli.UsageError(certComponentsUsage, err)
 	}
 	var items []componentCertInfo
-	if err := json.Unmarshal(api("GET", "/pki/components", nil), &items); err != nil {
-		fatal("parse component certificate list: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/pki/components", nil), &items); err != nil {
+		cli.Fatal("parse component certificate list: %v", err)
 	}
 	if format == "json" {
-		printJSON(items)
+		cli.PrintJSON(items)
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -377,13 +381,13 @@ func certRevokeComponent(args []string) {
 	if help {
 		return
 	}
-	agentID, err := validateAgentID(p.pos[0])
+	agentID, err := validate.ValidateAgentID(p.pos[0])
 	if err != nil {
-		usageError(certRevokeComponentUsage, err)
+		cli.UsageError(certRevokeComponentUsage, err)
 	}
-	reason, err := validateRevocationReason(p.opt("reason", "unspecified"))
+	reason, err := validate.ValidateRevocationReason(p.opt("reason", "unspecified"))
 	if err != nil {
-		usageError(certRevokeComponentUsage, err)
+		cli.UsageError(certRevokeComponentUsage, err)
 	}
 	serial := serialFlag(p, certRevokeComponentUsage)
 	path := "/pki/components/" + url.PathEscape(agentID) + "?reason=" + url.QueryEscape(reason)
@@ -391,8 +395,8 @@ func certRevokeComponent(args []string) {
 		path += "&serial=" + url.QueryEscape(serial)
 	}
 	var out componentRevokeResp
-	if err := json.Unmarshal(api("DELETE", path, nil), &out); err != nil {
-		fatal("parse revocation response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("DELETE", path, nil), &out); err != nil {
+		cli.Fatal("parse revocation response: %v", err)
 	}
 	fmt.Printf("component certificate(s) revoked: %s (serial %s, reason %s)\n",
 		out.Revoked, strings.Join(out.Serials, ","), out.Reason)

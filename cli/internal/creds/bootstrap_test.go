@@ -1,7 +1,7 @@
 // 引导交换的真实机制测试：就绪清单/哈希、路径逃逸、消费清理与 mTLS 自检。
 // 编排类测试（init/join）通过 stubBootstrapExchange 注入固定交换包，避免每个用例
 // 都生成证书；这里直接调用真实函数，覆盖交换包的可信性边界。
-package main
+package creds
 
 import (
 	"crypto/ecdsa"
@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"kurrent/cli/internal/fsx"
 	"math/big"
 	"net"
 	"net/http"
@@ -124,13 +125,13 @@ func writeTestBundle(t *testing.T, dir string) error {
 	if err := os.WriteFile(filepath.Join(dir, exchangeAdmin), []byte(admin), 0o600); err != nil {
 		return err
 	}
-	ready := exchangeReadyFile{
+	ready := ExchangeReadyFile{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Files:     []string{exchangeAdmin, "pki/server.crt", "pki/client.crt", "pki/client.key"},
 		SHA256:    map[string]string{},
 	}
 	for _, name := range ready.Files {
-		sum, err := hashFile(filepath.Join(dir, name))
+		sum, err := fsx.HashFile(filepath.Join(dir, name))
 		if err != nil {
 			return err
 		}
@@ -143,22 +144,12 @@ func writeTestBundle(t *testing.T, dir string) error {
 	return os.WriteFile(filepath.Join(dir, exchangeReady), append(body, '\n'), 0o600)
 }
 
-// stubBootstrapExchange 让 init 编排测试走固定交换包：wait 生成包，自检视为通过。
-// 真实校验/自检由本文件的独立用例覆盖。
-func stubBootstrapExchange(t *testing.T) {
-	t.Helper()
-	oldWait, oldVerify := waitExchange, verifyCredentials
-	waitExchange = func(dir string, _ time.Duration) error { return writeTestBundle(t, dir) }
-	verifyCredentials = func(string, string, string, string, time.Duration) error { return nil }
-	t.Cleanup(func() { waitExchange, verifyCredentials = oldWait, oldVerify })
-}
-
 func TestValidateExchangeBundle(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeTestBundle(t, dir); err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := validateExchangeBundle(dir)
+	bundle, err := ValidateExchangeBundle(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +161,7 @@ func TestValidateExchangeBundle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, exchangeAdmin), []byte("server: https://evil/api/cp\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := validateExchangeBundle(dir); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+	if _, err := ValidateExchangeBundle(dir); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("err = %v, want hash mismatch", err)
 	}
 }
@@ -184,7 +175,7 @@ func TestValidateExchangeBundleRejectsPathEscape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ready exchangeReadyFile
+	var ready ExchangeReadyFile
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatal(err)
 	}
@@ -193,13 +184,13 @@ func TestValidateExchangeBundleRejectsPathEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, exchangeReady), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := validateExchangeBundle(dir); err == nil || !strings.Contains(err.Error(), "escapes") {
+	if _, err := ValidateExchangeBundle(dir); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("err = %v, want path escape rejection", err)
 	}
 }
 
 func TestWaitBootstrapExchangeTimeout(t *testing.T) {
-	err := waitBootstrapExchange(t.TempDir(), 50*time.Millisecond)
+	err := WaitBootstrapExchange(t.TempDir(), 50*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "did not publish") {
 		t.Fatalf("err = %v, want timeout", err)
 	}
@@ -210,10 +201,10 @@ func TestFinishBootstrapExchange(t *testing.T) {
 	if err := writeTestBundle(t, dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := requestBootstrapExchange(dir); err != nil {
+	if err := RequestBootstrapExchange(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := finishBootstrapExchange(dir); err != nil {
+	if err := FinishBootstrapExchange(dir); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{exchangeRequest, exchangeReady, exchangeAdmin, exchangePKI} {
@@ -231,7 +222,7 @@ func TestRequestBootstrapExchangeClearsStale(t *testing.T) {
 	if err := writeTestBundle(t, dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := requestBootstrapExchange(dir); err != nil {
+	if err := RequestBootstrapExchange(dir); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{exchangeReady, exchangeAdmin, exchangePKI} {
@@ -276,14 +267,14 @@ func TestManagementSelfTest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := managementSelfTest(server.URL, caPath, certPath, keyPath, 2*time.Second); err != nil {
+	if err := ManagementSelfTest(server.URL, caPath, certPath, keyPath, 2*time.Second); err != nil {
 		t.Fatalf("self-test should pass: %v", err)
 	}
 
 	// 错误信任锚 → 失败（证明自检真的校验服务端证书）
 	otherCA := filepath.Join(dir, "other-ca.crt")
 	writeSelfSignedPEM(t, otherCA, "other-ca")
-	if err := managementSelfTest(server.URL, otherCA, certPath, keyPath, 200*time.Millisecond); err == nil {
+	if err := ManagementSelfTest(server.URL, otherCA, certPath, keyPath, 200*time.Millisecond); err == nil {
 		t.Fatal("self-test should fail with the wrong CA")
 	}
 }

@@ -2,10 +2,11 @@
 // 每个叶子命令都有自己的 usage（由 mustParse 在 --help/用法错误时输出）；
 // 命令组输出简短索引；kurrent help <group> [verb] 打印同一份文本。
 // 帮助文本统一用英文；运行时错误与业务输出仍按项目语言约定。
-package main
+package command
 
 import (
 	"fmt"
+	"kurrent/cli/internal/cli"
 	"strings"
 )
 
@@ -510,7 +511,7 @@ func helpCommand(args []string) {
 		fmt.Print(text)
 		return
 	}
-	usageError(usageText, fmt.Errorf("unknown help topic: %s", topic))
+	cli.UsageError(usageText, fmt.Errorf("unknown help topic: %s", topic))
 }
 
 func isHelpArg(a string) bool {
@@ -528,9 +529,9 @@ func groupHelp(group string, args []string, usage string) bool {
 		raw := strings.TrimLeft(args[0], "-")
 		name, _, _ := strings.Cut(raw, "=")
 		if global, ok := globalFlagNames[name]; ok {
-			usageError(usage, fmt.Errorf("global flag %s must precede the command group", global))
+			cli.UsageError(usage, fmt.Errorf("global flag %s must precede the command group", global))
 		}
-		usageError(usage, fmt.Errorf("unknown flag %s (%s accepts only subcommands)", args[0], group))
+		cli.UsageError(usage, fmt.Errorf("unknown flag %s (%s accepts only subcommands)", args[0], group))
 	}
 	if !isHelpArg(args[0]) {
 		return false

@@ -11,16 +11,20 @@
 // → 收敛启动 agent（docker compose 为内部编排细节，重跑幂等）。nvmet 后端先预检宿主前置
 // （内核模块 nvmet/nvmet-tcp + configfs 挂载 + tlshd 版本），未就绪指路
 // nvmeof/host-prepare.sh。
-package main
+package command
 
 import (
 	"crypto/x509"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/deploy"
+	"kurrent/cli/internal/fsx"
+	"kurrent/cli/internal/hostcheck"
+	"kurrent/cli/internal/validate"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -46,27 +50,27 @@ func cmdJoin(args []string) {
 	if help {
 		return
 	}
-	cpURL, err := normalizeCpURL("<cp-url>", p.pos[0])
+	cpURL, err := validate.NormalizeCPURL("<cp-url>", p.pos[0])
 	if err != nil {
-		usageError(joinUsage, err)
+		cli.UsageError(joinUsage, err)
 	}
 	for _, flag := range []string{"agent-id", "config", "token", "dir", "state-dir", "cp-ca"} {
 		if p.has(flag) && strings.TrimSpace(p.opt(flag, "")) == "" {
-			usageError(joinUsage, fmt.Errorf("--%s must not be empty", flag))
+			cli.UsageError(joinUsage, fmt.Errorf("--%s must not be empty", flag))
 		}
 	}
 	agentID := strings.TrimSpace(p.opt("agent-id", ""))
-	if agentID != "" && !validAgentID(agentID) {
-		usageError(joinUsage, fmt.Errorf("--agent-id must be 12 lowercase hex characters (printed by `kurrent token create`): %q", agentID))
+	if agentID != "" && !validate.ValidAgentID(agentID) {
+		cli.UsageError(joinUsage, fmt.Errorf("--agent-id must be 12 lowercase hex characters (printed by `kurrent token create`): %q", agentID))
 	}
 	dir, err := resolveStoragerDir(p.opt("dir", ""))
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	configFile := p.opt("config", filepath.Join(dir, "kurrent.yaml"))
 	if !filepath.IsAbs(configFile) {
 		if configFile, err = filepath.Abs(configFile); err != nil {
-			fatal("resolve --config: %v", err)
+			cli.Fatal("resolve --config: %v", err)
 		}
 	}
 	if err := joinRun(joinOpts{
@@ -75,7 +79,7 @@ func cmdJoin(args []string) {
 		stateDir: p.opt("state-dir", ""), cpCA: p.opt("cp-ca", ""),
 		adoptState: p.bool("adopt-state"),
 	}); err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 }
 
@@ -120,7 +124,7 @@ func resolveStoragerDir(explicit string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve --dir: %w", err)
 		}
-		if isDir(filepath.Join(abs, "storager")) {
+		if fsx.IsDir(filepath.Join(abs, "storager")) {
 			return filepath.Join(abs, "storager"), nil
 		}
 		return abs, nil
@@ -135,8 +139,8 @@ func resolveStoragerDir(explicit string) (string, error) {
 	if _, err := os.Stat(filepath.Join(cwd, "nvmeof")); err == nil {
 		return cwd, nil // 已位于 storager 内
 	}
-	if rec, err := readDeploymentRecord(); err == nil && rec != nil {
-		if isDir(filepath.Join(rec.RepoRoot, "storager")) {
+	if rec, err := deploy.ReadDeploymentRecord(); err == nil && rec != nil {
+		if fsx.IsDir(filepath.Join(rec.RepoRoot, "storager")) {
 			return filepath.Join(rec.RepoRoot, "storager"), nil
 		}
 	}
@@ -146,14 +150,6 @@ func resolveStoragerDir(explicit string) (string, error) {
 var errAgentIDRequired = fmt.Errorf("missing node identity: pass --agent-id <id> from the command printed by " +
 	"`kurrent token create` (the control plane allocates it; join never generates one); " +
 	"on reruns it is read from <state>/storager/state/agent.id")
-
-var agentIDRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
-
-// validAgentID 节点身份（agent_id）只接受 12 位小写 hex：证书 CN、控制面登记键与
-// 数据面随机标识同构；描述性名称是控制面台账里的昵称，不进入节点文件。
-func validAgentID(id string) bool {
-	return agentIDRe.MatchString(id)
-}
 
 // readNodeID 读取已有身份状态文件：缺失返回 ("", false, nil)；内容非法直接报错。
 func readNodeID(path string) (string, bool, error) {
@@ -168,7 +164,7 @@ func readNodeID(path string) (string, bool, error) {
 	if id == "" {
 		return "", false, fmt.Errorf("%s is empty; delete it and pass --agent-id from `kurrent token create`", path)
 	}
-	if !validAgentID(id) {
+	if !validate.ValidAgentID(id) {
 		return "", false, fmt.Errorf("%s: invalid node identity %q (expected 12 lowercase hex characters)", path, id)
 	}
 	return id, true, nil
@@ -182,7 +178,7 @@ func joinRun(o joinOpts) error {
 	if strings.TrimSpace(o.cpURL) == "" {
 		return fmt.Errorf("cp-url is required (kurrent join <cp-url> [--token T])")
 	}
-	cpURL, err := normalizeCpURL("cp-url", o.cpURL)
+	cpURL, err := validate.NormalizeCPURL("cp-url", o.cpURL)
 	if err != nil {
 		return err
 	}
@@ -190,14 +186,14 @@ func joinRun(o joinOpts) error {
 	if err != nil || cpParsed.Hostname() == "" {
 		return fmt.Errorf("cannot parse the control-plane address from cp-url: %s", o.cpURL)
 	}
-	q, err := resolveDeployment(o.dir, o.stateDir)
+	q, err := deploy.ResolveDeployment(o.dir, o.stateDir)
 	if err != nil {
 		return err
 	}
-	if o.agentID != "" && !validAgentID(o.agentID) {
+	if o.agentID != "" && !validate.ValidAgentID(o.agentID) {
 		return fmt.Errorf("--agent-id must be 12 lowercase hex characters (printed by `kurrent token create`): %s", o.agentID)
 	}
-	repoRoot := q.repoRoot
+	repoRoot := q.RepoRoot
 
 	// 节点声明：kurrent.yaml 缺失时按模板自动生成（无预置文件时用缺省模板：
 	// 生成后即权威声明，可后续手工编辑；--config 指向其他路径 = 应用为节点配置）
@@ -227,22 +223,22 @@ func joinRun(o joinOpts) error {
 
 	// 旧布局（仓库内 state/bootstrap/agent/logs）先迁移：--adopt-state 显式启停旧栈、
 	// 复制并校验后再继续；否则拒绝，避免节点带着两套状态各走各路。
-	legacy := detectLegacyStorageState(o.dir)
-	if legacy.present() && !o.adoptState {
+	legacy := deploy.DetectLegacyStorageState(o.dir)
+	if legacy.Present() && !o.adoptState {
 		return fmt.Errorf("node state from the old layout is present in the checkout:\n  %s\n"+
 			"rerun with --adopt-state to migrate it into %s (the old stack is stopped and the copies removed after verification)",
-			strings.Join(legacy.paths, "\n  "), q.stateDir)
+			strings.Join(legacy.Paths(), "\n  "), q.StateDir)
 	}
-	if o.adoptState && legacy.present() {
-		if err := assertLegacyOwnership(legacy.paths); err != nil {
+	if o.adoptState && legacy.Present() {
+		if err := deploy.AssertLegacyOwnership(legacy.Paths()); err != nil {
 			return err
 		}
-		if err := assertStateTargetEmpty(q.stateDir); err != nil {
+		if err := deploy.AssertStateTargetEmpty(q.StateDir); err != nil {
 			return err
 		}
 		fmt.Println("==> kurrent join: stopping the legacy storage stack (state migration)")
 		stopLegacyStorage(q, o.dir)
-		if err := adoptStorageState(o.dir, q); err != nil {
+		if err := deploy.AdoptStorageState(o.dir, q); err != nil {
 			return fmt.Errorf("migrate legacy node state: %w", err)
 		}
 	}
@@ -270,7 +266,7 @@ func joinRun(o joinOpts) error {
 	// nvmet 后端：宿主前置预检（内核模块 + configfs；内核 nvmet target 无法容器化，
 	// 未就绪则节点起服后数据面不可用）——fail fast 并给出一键修复命令。
 	if backend == "nvmet" {
-		if err := hostPreflightNvmet(o.dir); err != nil {
+		if err := hostcheck.HostPreflightNvmet(o.dir); err != nil {
 			return err
 		}
 	}
@@ -290,13 +286,13 @@ func joinRun(o joinOpts) error {
 	}
 
 	// 节点状态根准备：身份、引导凭据、组件 PKI、日志与 CP 信任锚都在仓库之外。
-	if err := prepareStoragerState(q.storager("")); err != nil {
+	if err := deploy.PrepareStoragerState(q.Storager("")); err != nil {
 		return fmt.Errorf("prepare the node state root: %w", err)
 	}
 
 	// 节点身份：只来自 --agent-id 或既有状态文件，join 不生成。首跑缺身份直接失败；
 	// 重跑以状态文件为准，--agent-id 只做一致性校验（身份必须稳定）。
-	stateFile := filepath.Join(q.storager("").state, "agent.id")
+	stateFile := filepath.Join(q.Storager("").State, "agent.id")
 	existingID, hasState, err := readNodeID(stateFile)
 	if err != nil {
 		return err
@@ -311,13 +307,13 @@ func joinRun(o joinOpts) error {
 	} else if !hasState {
 		return errAgentIDRequired
 	}
-	nodePaths := q.storager(agentID)
-	if err := prepareStoragerState(nodePaths); err != nil {
+	nodePaths := q.Storager(agentID)
+	if err := deploy.PrepareStoragerState(nodePaths); err != nil {
 		return fmt.Errorf("prepare the node state root: %w", err)
 	}
 
 	// 引导凭据先确认可用再改任何文件（不给 --token 时要求文件已就位）。
-	tokenFile := filepath.Join(nodePaths.bootstrap, "agent.token")
+	tokenFile := filepath.Join(nodePaths.Bootstrap, "agent.token")
 	tokenProvided := strings.TrimSpace(o.token) != ""
 	if !tokenProvided {
 		if data, err := os.ReadFile(tokenFile); err != nil || strings.TrimSpace(string(data)) == "" {
@@ -332,7 +328,7 @@ func joinRun(o joinOpts) error {
 		return err
 	}
 
-	// 盘目录是 compose 的 bind 挂载源：存在性兜底创建（非致命——docker 起服时也会建，
+	// 盘目录是 compose 的 bind 挂载源：存在性回退创建（非致命——docker 起服时也会建，
 	// 但可能归 root 所有；无权限时告警，提示先手工建好）
 	diskDir := nodeValue(&root, "spec", "agent", "diskDir")
 	if diskDir != "" {
@@ -352,17 +348,17 @@ func joinRun(o joinOpts) error {
 	// 写盘前用 agent 镜像内同一份 schema 全量校验：未知字段/非法值当场失败，
 	// 不会等容器启动才崩溃（合并保留的未知字段按 extra="forbid" 拒绝）。
 	// compose 插值变量只作用于本次子进程：部署目录不再保留派生的 .env；build 同样需要。
-	composeEnv := q.nodeComposeEnv(agentID, diskDir, cpCA)
+	composeEnv := q.NodeComposeEnv(agentID, diskDir, cpCA)
 	fmt.Println("==> kurrent join: building the validation image (storager-agent)")
-	if err := composeExec(composeDir, q.storageProject(), composeEnv, "build", "storager-agent"); err != nil {
+	if err := composeExec(composeDir, q.StorageProject(), composeEnv, "build", "storager-agent"); err != nil {
 		return fmt.Errorf("build storager-agent image failed: %w", err)
 	}
-	summary, err := runConfigTool("storager-agent", "validate", out)
+	summary, err := runConfigTool("storager-agent", "app.config_tool", "validate", out)
 	if err != nil {
 		return fmt.Errorf("%s declaration validation failed (not written):\n%s", target, err)
 	}
 	fmt.Printf("==> kurrent join: %s\n", strings.TrimSpace(summary))
-	if err := writeFileAtomic(target, out, 0o644); err != nil {
+	if err := fsx.WriteFileAtomic(target, out, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
 	if o.configFile != target {
@@ -370,7 +366,7 @@ func joinRun(o joinOpts) error {
 	}
 
 	// 节点身份落盘：首跑从 --agent-id 写入，重跑保持原值（已在前面校验一致）。
-	if err := writeFileAtomic(stateFile, []byte(agentID+"\n"), 0o600); err != nil {
+	if err := fsx.WriteFileAtomic(stateFile, []byte(agentID+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", stateFile, err)
 	}
 
@@ -380,38 +376,38 @@ func joinRun(o joinOpts) error {
 	// （迁移清理，将由 agent 引导时重新派生；stgt/lio 后端不产生该文件）
 	if tokenProvided {
 		// 原子写 + 恒 0600：已有 token 文件权限过宽时也会被收敛
-		if err := writeFileAtomic(tokenFile, []byte(strings.TrimSpace(o.token)+"\n"), 0o600); err != nil {
+		if err := fsx.WriteFileAtomic(tokenFile, []byte(strings.TrimSpace(o.token)+"\n"), 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", tokenFile, err)
 		}
 	}
 	if backend == "nvmet" {
-		if err := os.Remove(filepath.Join(nodePaths.bootstrap, "nvmet-host.token")); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove old %s: %w", filepath.Join(nodePaths.bootstrap, "nvmet-host.token"), err)
+		if err := os.Remove(filepath.Join(nodePaths.Bootstrap, "nvmet-host.token")); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove old %s: %w", filepath.Join(nodePaths.Bootstrap, "nvmet-host.token"), err)
 		}
 	}
-	if err := writeJoinRecord(q, deployStatusBootstrapping); err != nil {
+	if err := writeJoinRecord(q, deploy.StatusBootstrapping); err != nil {
 		return err
 	}
 
 	fmt.Printf("==> kurrent join: agent=%s backend=%s cp=%s\n", agentID, backend, cpURL)
-	fmt.Printf("==> kurrent join: state root -> %s\n", q.stateDir)
+	fmt.Printf("==> kurrent join: state root -> %s\n", q.StateDir)
 	fmt.Printf("==> kurrent join: node configuration -> %s\n", target)
 	fmt.Printf("==> kurrent join: node identity -> %s\n", stateFile)
 	fmt.Printf("==> kurrent join: bootstrap token -> %s (nvmet-host.token is derived automatically from agent enroll)\n", tokenFile)
 	fmt.Printf("==> kurrent join: control-plane trust anchor -> %s\n", cpCA)
-	fmt.Printf("==> kurrent join: starting %s (compose -p %s)\n", composeDir, q.storageProject())
-	if err := composeExec(composeDir, q.storageProject(), composeEnv, "up", "-d"); err != nil {
+	fmt.Printf("==> kurrent join: starting %s (compose -p %s)\n", composeDir, q.StorageProject())
+	if err := composeExec(composeDir, q.StorageProject(), composeEnv, "up", "-d"); err != nil {
 		return err
 	}
 	fmt.Println("==> kurrent join: restarting storager-agent (applying the declaration and token)")
-	if err := composeExec(composeDir, q.storageProject(), composeEnv, "restart", "storager-agent"); err != nil {
+	if err := composeExec(composeDir, q.StorageProject(), composeEnv, "restart", "storager-agent"); err != nil {
 		return err
 	}
 	if !waitContainerRunning("storager-agent", agentStartupWatch) {
 		return fmt.Errorf("storager-agent did not stay running after start; check docker logs storager-agent")
 	}
 	if backend == "nvmet" {
-		nvmetTokenPath := filepath.Join(nodePaths.bootstrap, "nvmet-host.token")
+		nvmetTokenPath := filepath.Join(nodePaths.Bootstrap, "nvmet-host.token")
 		fmt.Println("==> kurrent join: waiting for agent enroll -> nvmet-host bootstrap token")
 		if err := nvmetTokenWaiter(nvmetTokenPath, nvmetTokenWaitTimeout, nvmetTokenPollInterval); err != nil {
 			return fmt.Errorf(
@@ -419,15 +415,15 @@ func joinRun(o joinOpts) error {
 					"`kurrent join` to restart nvmet-host", err, nvmetTokenPath)
 		}
 		fmt.Println("==> kurrent join: restarting nvmet-host (consuming the derived token)")
-		if err := composeExec(composeDir, q.storageProject(), composeEnv, "restart", "nvmet-host"); err != nil {
+		if err := composeExec(composeDir, q.StorageProject(), composeEnv, "restart", "nvmet-host"); err != nil {
 			return err
 		}
 	}
-	if err := writeJoinRecord(q, deployStatusReady); err != nil {
+	if err := writeJoinRecord(q, deploy.StatusReady); err != nil {
 		return err
 	}
-	if o.adoptState && legacy.present() {
-		if err := removeLegacyStorageState(o.dir); err != nil {
+	if o.adoptState && legacy.Present() {
+		if err := deploy.RemoveLegacyStorageState(o.dir); err != nil {
 			return fmt.Errorf("node joined, but removing the legacy state failed: %w", err)
 		}
 		fmt.Println("==> kurrent join: legacy in-repository node state removed")
@@ -441,14 +437,14 @@ func joinRun(o joinOpts) error {
 // resolveNodeCPCA 解析控制面信任锚并原子复制到节点状态根：
 // --cp-ca ＞ 同机控制面 <state>/control-plane/state/certs/server.crt ＞ 已有节点副本。
 // 分机部署且两者都不在时给出可执行的复制指令，而不是让 enroll 在 TLS 阶段静默失败。
-func resolveNodeCPCA(explicit string, q deployQuery, paths storagerPaths) (string, error) {
+func resolveNodeCPCA(explicit string, q deploy.DeployQuery, paths deploy.StoragerPaths) (string, error) {
 	copyIn := func(src string) (string, error) {
 		abs, err := filepath.Abs(src)
 		if err != nil {
 			return "", fmt.Errorf("resolve control-plane trust anchor: %w", err)
 		}
-		if abs == paths.cpCA {
-			return paths.cpCA, nil
+		if abs == paths.CPCA {
+			return paths.CPCA, nil
 		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
@@ -458,57 +454,57 @@ func resolveNodeCPCA(explicit string, q deployQuery, paths storagerPaths) (strin
 		if !pool.AppendCertsFromPEM(data) {
 			return "", fmt.Errorf("%s contains no valid certificate", abs)
 		}
-		if err := os.MkdirAll(paths.certs, 0o700); err != nil {
-			return "", fmt.Errorf("create %s: %w", paths.certs, err)
+		if err := os.MkdirAll(paths.Certs, 0o700); err != nil {
+			return "", fmt.Errorf("create %s: %w", paths.Certs, err)
 		}
-		if err := writeFileAtomic(paths.cpCA, data, 0o644); err != nil {
-			return "", fmt.Errorf("write %s: %w", paths.cpCA, err)
+		if err := fsx.WriteFileAtomic(paths.CPCA, data, 0o644); err != nil {
+			return "", fmt.Errorf("write %s: %w", paths.CPCA, err)
 		}
-		return paths.cpCA, nil
+		return paths.CPCA, nil
 	}
 	if explicit != "" {
 		return copyIn(explicit)
 	}
-	coLocated := q.controlPlane().serverCert
-	if fileExists(coLocated) {
+	coLocated := q.ControlPlane().ServerCert
+	if fsx.FileExists(coLocated) {
 		return copyIn(coLocated)
 	}
-	if fileExists(paths.cpCA) {
-		return paths.cpCA, nil
+	if fsx.FileExists(paths.CPCA) {
+		return paths.CPCA, nil
 	}
 	return "", fmt.Errorf("control-plane trust anchor not found (%s); on a split-node deployment copy it from the control plane:\n"+
 		"  scp <cp-host>:%s %s\n  kurrent join <cp-url> --cp-ca %s --token <token>",
-		paths.cpCA, coLocated, paths.cpCA, paths.cpCA)
+		paths.CPCA, coLocated, paths.CPCA, paths.CPCA)
 }
 
 // writeJoinRecord 更新部署记录的 storage 角色与状态（同机控制面记录保留 CP 角色）。
-func writeJoinRecord(q deployQuery, status string) error {
-	rec := deploymentRecord{
-		Project:        q.project(),
-		StorageProject: q.storageProject(),
-		RepoRoot:       q.repoRoot,
-		StateDir:       q.stateDir,
-		Roles:          deploymentRoles{Storage: true},
+func writeJoinRecord(q deploy.DeployQuery, status string) error {
+	rec := deploy.DeploymentRecord{
+		Project:        q.Project(),
+		StorageProject: q.StorageProject(),
+		RepoRoot:       q.RepoRoot,
+		StateDir:       q.StateDir,
+		Roles:          deploy.DeploymentRoles{Storage: true},
 		Status:         status,
 	}
-	if q.record != nil {
-		rec.Roles.ControlPlane = q.record.Roles.ControlPlane
+	if q.Record != nil {
+		rec.Roles.ControlPlane = q.Record.Roles.ControlPlane
 		// 同机部署时 join 只更新 storage 角色，控制面的部署状态由 init 维护。
-		if rec.Roles.ControlPlane && q.record.Status != "" {
-			rec.Status = q.record.Status
+		if rec.Roles.ControlPlane && q.Record.Status != "" {
+			rec.Status = q.Record.Status
 		}
 	}
-	return writeDeploymentRecord(&rec)
+	return deploy.WriteDeploymentRecord(&rec)
 }
 
 // stopLegacyStorage 尽力停止旧存储项目（nvmeof / iscsi / 固定存储项目）。
-func stopLegacyStorage(q deployQuery, storagerDir string) {
-	nodeEnv := q.nodeComposeEnv("unknown", q.repoRoot, q.storager("unknown").cpCA)
+func stopLegacyStorage(q deploy.DeployQuery, storagerDir string) {
+	nodeEnv := q.NodeComposeEnv("unknown", q.RepoRoot, q.Storager("unknown").CPCA)
 	for _, item := range []struct{ dir, project string }{
 		{filepath.Join(storagerDir, "nvmeof"), "nvmeof"},
 		{filepath.Join(storagerDir, "iscsi"), "iscsi"},
-		{filepath.Join(storagerDir, "nvmeof"), q.storageProject()},
-		{filepath.Join(storagerDir, "iscsi"), q.storageProject()},
+		{filepath.Join(storagerDir, "nvmeof"), q.StorageProject()},
+		{filepath.Join(storagerDir, "iscsi"), q.StorageProject()},
 	} {
 		composeBestEffort(item.dir, item.project, nodeEnv, "down", "--remove-orphans")
 	}
@@ -518,29 +514,6 @@ func stopLegacyStorage(q deployQuery, storagerDir string) {
 
 // hostPreflightNvmet 复用 kurrent host check 的存储节点判定：任一 FAIL 即 fail fast
 // 并指路 host-prepare.sh（同一套检查，避免两处判定漂移）。
-func hostPreflightNvmet(storagerDir string) error {
-	var missing []string
-	tlshdBad := false
-	for _, c := range storageHostChecks(hostEnvPaths, filepath.Dir(storagerDir)) {
-		if c.Status != checkFail {
-			continue
-		}
-		missing = append(missing, c.Detail)
-		if c.ID == "storage.tlshd" {
-			tlshdBad = true
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	hint := fmt.Sprintf("fix (root required, idempotent): sudo bash %s", filepath.Join(storagerDir, "nvmeof", "host-prepare.sh"))
-	if tlshdBad {
-		hint += fmt.Sprintf("\n  tlshd: install/upgrade ktls-utils >= %s and run sudo systemctl enable --now tlshd (build steps: %s)",
-			tlshdMinVersion, filepath.Join(storagerDir, "nvmeof", "nvmet-host", "README.md"))
-	}
-	return fmt.Errorf("host nvmet prerequisites are not ready (the storage data plane cannot start):\n  %s\n  %s",
-		strings.Join(missing, "\n  "), hint)
-}
 
 // newNodeDeclaration 缺省节点声明（kurrent.yaml 缺失时 join 自动生成，权威声明——
 // 后续可手工编辑或 kurrent config print node-defaults 预置模板）。

@@ -1,9 +1,11 @@
 // workers 子命令（workers 凭据动词见 workers_credential.go）。
-package main
+package command
 
 import (
 	"encoding/json"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
 	"net/url"
 	"os"
 	"strings"
@@ -33,7 +35,7 @@ func cmdWorkers(args []string) {
 	case "credential":
 		workersCredential(args[1:])
 	default:
-		usageError(workersGroupUsage, fmt.Errorf("unknown workers subcommand: %s", args[0]))
+		cli.UsageError(workersGroupUsage, fmt.Errorf("unknown workers subcommand: %s", args[0]))
 	}
 }
 
@@ -44,14 +46,14 @@ func workersList(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(workersListUsage, err)
+		cli.UsageError(workersListUsage, err)
 	}
 	var items []map[string]any
-	if err := json.Unmarshal(api("GET", "/workers", nil), &items); err != nil {
-		fatal("parse workers response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/workers", nil), &items); err != nil {
+		cli.Fatal("parse workers response: %v", err)
 	}
 	if format == "json" {
-		printJSON(items)
+		cli.PrintJSON(items)
 		return
 	}
 	if len(items) == 0 {
@@ -62,8 +64,8 @@ func workersList(args []string) {
 	fmt.Fprintln(w, "ID\tHOSTNAME\tMAC\tOS\tSTATE")
 	for _, wk := range items {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			dash(strOf(wk["worker_id"])), dash(strOf(wk["hostname"])),
-			dash(strOf(wk["mac"])), dash(strOf(wk["os"])), dash(strOf(wk["state"])))
+			cli.Dash(cli.StrOf(wk["worker_id"])), cli.Dash(cli.StrOf(wk["hostname"])),
+			cli.Dash(cli.StrOf(wk["mac"])), cli.Dash(cli.StrOf(wk["os"])), cli.Dash(cli.StrOf(wk["state"])))
 	}
 	w.Flush()
 }
@@ -75,11 +77,11 @@ func workersGet(args []string) {
 	}
 	workerID := strings.TrimSpace(p.pos[0])
 	if workerID == "" {
-		usageError(workersGetUsage, fmt.Errorf("worker id must not be empty"))
+		cli.UsageError(workersGetUsage, fmt.Errorf("worker id must not be empty"))
 	}
 	var out map[string]any
-	if err := json.Unmarshal(api("GET", "/workers/"+url.PathEscape(workerID), nil), &out); err != nil {
-		fatal("parse worker response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/workers/"+url.PathEscape(workerID), nil), &out); err != nil {
+		cli.Fatal("parse worker response: %v", err)
 	}
-	printJSON(out)
+	cli.PrintJSON(out)
 }

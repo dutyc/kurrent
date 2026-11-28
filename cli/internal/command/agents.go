@@ -1,9 +1,12 @@
 // agents 子命令：list/get/add/edit/remove/probe（对齐控制面 Agent 管理端点）。
-package main
+package command
 
 import (
 	"encoding/json"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
+	"kurrent/cli/internal/validate"
 	"net/url"
 	"os"
 	"sort"
@@ -90,7 +93,7 @@ func cmdAgents(args []string) {
 	case "probe":
 		agentsProbe(args[1:])
 	default:
-		usageError(agentsGroupUsage, fmt.Errorf("unknown agents subcommand: %s", args[0]))
+		cli.UsageError(agentsGroupUsage, fmt.Errorf("unknown agents subcommand: %s", args[0]))
 	}
 }
 
@@ -101,16 +104,16 @@ func agentsList(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(agentsListUsage, err)
+		cli.UsageError(agentsListUsage, err)
 	}
 	live := !p.bool("no-live")
 
 	var items []map[string]any
-	if err := json.Unmarshal(api("GET", agentsPath(live), nil), &items); err != nil {
-		fatal("parse agents response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", agentsPath(live), nil), &items); err != nil {
+		cli.Fatal("parse agents response: %v", err)
 	}
 	if format == "json" {
-		printJSON(items)
+		cli.PrintJSON(items)
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -147,25 +150,25 @@ func agentsGet(args []string) {
 	if help {
 		return
 	}
-	agentID, err := validateAgentID(p.pos[0])
+	agentID, err := validate.ValidateAgentID(p.pos[0])
 	if err != nil {
-		usageError(agentsGetUsage, err)
+		cli.UsageError(agentsGetUsage, err)
 	}
 	agentsGetByID(agentID)
 }
 
 func agentsGetByID(agentID string) {
 	var items []map[string]any
-	if err := json.Unmarshal(api("GET", agentsPath(true), nil), &items); err != nil {
-		fatal("parse agents response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", agentsPath(true), nil), &items); err != nil {
+		cli.Fatal("parse agents response: %v", err)
 	}
 	for _, a := range items {
 		if a["id"] == agentID {
-			printJSON(a)
+			cli.PrintJSON(a)
 			return
 		}
 	}
-	fatal("agent not found: %s", agentID)
+	cli.Fatal("agent not found: %s", agentID)
 }
 
 func agentsAdd(args []string) {
@@ -173,16 +176,16 @@ func agentsAdd(args []string) {
 	if help {
 		return
 	}
-	agentID, err := validateAgentID(p.pos[0])
+	agentID, err := validate.ValidateAgentID(p.pos[0])
 	if err != nil {
-		usageError(agentsAddUsage, err)
+		cli.UsageError(agentsAddUsage, err)
 	}
 	body, err := buildAgentBody(p)
 	if err != nil {
-		usageError(agentsAddUsage, err)
+		cli.UsageError(agentsAddUsage, err)
 	}
 	body.ID = agentID
-	api("POST", "/agents", body)
+	cpapi.Do("POST", "/agents", body)
 	fmt.Printf("agent %s registered\n", agentID)
 }
 
@@ -191,15 +194,15 @@ func agentsEdit(args []string) {
 	if help {
 		return
 	}
-	agentID, err := validateAgentID(p.pos[0])
+	agentID, err := validate.ValidateAgentID(p.pos[0])
 	if err != nil {
-		usageError(agentsEditUsage, err)
+		cli.UsageError(agentsEditUsage, err)
 	}
 	body, err := buildAgentBody(p)
 	if err != nil {
-		usageError(agentsEditUsage, err)
+		cli.UsageError(agentsEditUsage, err)
 	}
-	api("PUT", "/agents/"+url.PathEscape(agentID), body)
+	cpapi.Do("PUT", "/agents/"+url.PathEscape(agentID), body)
 	fmt.Printf("agent %s updated\n", agentID)
 }
 
@@ -208,13 +211,13 @@ func agentsRemove(args []string) {
 	if help {
 		return
 	}
-	agentID, err := validateAgentID(p.pos[0])
+	agentID, err := validate.ValidateAgentID(p.pos[0])
 	if err != nil {
-		usageError(agentsRemoveUsage, err)
+		cli.UsageError(agentsRemoveUsage, err)
 	}
 	var out map[string]any
-	if err := json.Unmarshal(api("DELETE", "/agents/"+url.PathEscape(agentID), nil), &out); err != nil {
-		fatal("parse delete response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("DELETE", "/agents/"+url.PathEscape(agentID), nil), &out); err != nil {
+		cli.Fatal("parse delete response: %v", err)
 	}
 	fmt.Printf("agent %s deleted (master_tags_removed=%v)\n", agentID, out["master_tags_removed"])
 }
@@ -224,20 +227,20 @@ func agentsProbe(args []string) {
 	if help {
 		return
 	}
-	baseURL, err := validateHTTPURL("--base-url", p.opt("base-url", ""))
+	baseURL, err := validate.ValidateHTTPURL("--base-url", p.opt("base-url", ""))
 	if err != nil {
-		usageError(agentsProbeUsage, err)
+		cli.UsageError(agentsProbeUsage, err)
 	}
 	agentID := ""
 	if p.has("agent-id") {
-		if agentID, err = validateAgentID(p.opt("agent-id", "")); err != nil {
-			usageError(agentsProbeUsage, err)
+		if agentID, err = validate.ValidateAgentID(p.opt("agent-id", "")); err != nil {
+			cli.UsageError(agentsProbeUsage, err)
 		}
 	}
 	body := map[string]any{"base_url": baseURL, "agent_id": agentID}
 	var out map[string]any
-	if err := json.Unmarshal(api("POST", "/agents/probe", body), &out); err != nil {
-		fatal("parse probe response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("POST", "/agents/probe", body), &out); err != nil {
+		cli.Fatal("parse probe response: %v", err)
 	}
 	fmt.Printf("agent reachable: backend=%v fs_type=%v base_nqn=%v\n",
 		out["backend"], out["fs_type"], out["base_nqn"])
@@ -246,7 +249,7 @@ func agentsProbe(args []string) {
 }
 
 func buildAgentBody(p parsedArgs) (agentBody, error) {
-	baseURL, err := validateHTTPURL("--base-url", p.opt("base-url", ""))
+	baseURL, err := validate.ValidateHTTPURL("--base-url", p.opt("base-url", ""))
 	if err != nil {
 		return agentBody{}, err
 	}
@@ -258,7 +261,7 @@ func buildAgentBody(p parsedArgs) (agentBody, error) {
 	if err != nil {
 		return agentBody{}, err
 	}
-	storagerIP, err := validateIP("--storager-ip", p.opt("storager-ip", ""))
+	storagerIP, err := validate.ValidateIP("--storager-ip", p.opt("storager-ip", ""))
 	if err != nil {
 		return agentBody{}, err
 	}
@@ -347,12 +350,4 @@ func joinStrings(v any) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
-}
-
-func printJSON(v any) {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		fatal("encode output: %v", err)
-	}
-	fmt.Println(string(data))
 }

@@ -6,7 +6,7 @@
 // 三个动词的响应都带逐 Agent 推送状态（ok=已送达 / degraded=密钥已送达但节点 TLS 数据面
 // 未就绪、PSK 未生效 / failed=未送达，对账自动重试 / pending=待对账重放 /
 // n/a=目标非 nvmet 后端 / none=无同步目标（无盘 / 未设凭据 / Agent 未登记）。
-package main
+package command
 
 import (
 	"crypto/rand"
@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/cpapi"
 	"net/url"
 	"os"
 	"strings"
@@ -54,7 +56,7 @@ func workersCredential(args []string) {
 	case "revoke":
 		workersCredentialRevoke(args[1:])
 	default:
-		usageError(workersCredentialGroupUsage, fmt.Errorf("unknown workers credential subcommand: %s", args[0]))
+		cli.UsageError(workersCredentialGroupUsage, fmt.Errorf("unknown workers credential subcommand: %s", args[0]))
 	}
 }
 
@@ -65,25 +67,25 @@ func workersCredentialShow(args []string) {
 	}
 	format, err := p.outputFormat()
 	if err != nil {
-		usageError(workersCredentialShowUsage, err)
+		cli.UsageError(workersCredentialShowUsage, err)
 	}
 	workerID := strings.TrimSpace(p.pos[0])
 	if workerID == "" {
-		usageError(workersCredentialShowUsage, fmt.Errorf("worker id must not be empty"))
+		cli.UsageError(workersCredentialShowUsage, fmt.Errorf("worker id must not be empty"))
 	}
 	var out map[string]any
-	if err := json.Unmarshal(api("GET", "/workers/"+url.PathEscape(workerID)+"/credential", nil), &out); err != nil {
-		fatal("parse credential response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("GET", "/workers/"+url.PathEscape(workerID)+"/credential", nil), &out); err != nil {
+		cli.Fatal("parse credential response: %v", err)
 	}
 	if format == "json" {
-		printJSON(out)
+		cli.PrintJSON(out)
 		return
 	}
 	if exists, _ := out["exists"].(bool); !exists {
 		fmt.Printf("%s: no authentication key configured\n", workerID)
 	} else {
 		fmt.Printf("%s: configured (%s, updated %s)\n",
-			workerID, strOf(out["secret_hash"]), shortTS(strOf(out["updated_at"])))
+			workerID, cli.StrOf(out["secret_hash"]), shortTS(cli.StrOf(out["updated_at"])))
 	}
 	printCredentialPush(out["push"])
 }
@@ -95,7 +97,7 @@ func workersCredentialSet(args []string) {
 	}
 	workerID := strings.TrimSpace(p.pos[0])
 	if workerID == "" {
-		usageError(workersCredentialSetUsage, fmt.Errorf("worker id must not be empty"))
+		cli.UsageError(workersCredentialSetUsage, fmt.Errorf("worker id must not be empty"))
 	}
 	sources := 0
 	if p.has("secret-file") {
@@ -108,7 +110,7 @@ func workersCredentialSet(args []string) {
 		sources++
 	}
 	if sources != 1 {
-		usageError(workersCredentialSetUsage, fmt.Errorf("exactly one of --secret-file, --secret-stdin or --generate is required"))
+		cli.UsageError(workersCredentialSetUsage, fmt.Errorf("exactly one of --secret-file, --secret-stdin or --generate is required"))
 	}
 
 	var secret string
@@ -116,7 +118,7 @@ func workersCredentialSet(args []string) {
 	switch {
 	case p.has("secret-file"):
 		if strings.TrimSpace(p.opt("secret-file", "")) == "" {
-			usageError(workersCredentialSetUsage, fmt.Errorf("--secret-file must not be empty"))
+			cli.UsageError(workersCredentialSetUsage, fmt.Errorf("--secret-file must not be empty"))
 		}
 		secret, err = readSecretFile(p.opt("secret-file", ""))
 	case p.bool("secret-stdin"):
@@ -125,14 +127,14 @@ func workersCredentialSet(args []string) {
 		secret, err = generateDHHC1()
 	}
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	var out map[string]any
-	if err := json.Unmarshal(api("PUT", "/workers/"+url.PathEscape(workerID)+"/credential",
+	if err := json.Unmarshal(cpapi.Do("PUT", "/workers/"+url.PathEscape(workerID)+"/credential",
 		map[string]string{"secret": secret}), &out); err != nil {
-		fatal("parse credential response: %v", err)
+		cli.Fatal("parse credential response: %v", err)
 	}
-	fmt.Printf("%s: credential set (%s)\n", workerID, strOf(out["secret_hash"]))
+	fmt.Printf("%s: credential set (%s)\n", workerID, cli.StrOf(out["secret_hash"]))
 	printCredentialPush(out["push"])
 }
 
@@ -143,11 +145,11 @@ func workersCredentialRevoke(args []string) {
 	}
 	workerID := strings.TrimSpace(p.pos[0])
 	if workerID == "" {
-		usageError(workersCredentialRevokeUsage, fmt.Errorf("worker id must not be empty"))
+		cli.UsageError(workersCredentialRevokeUsage, fmt.Errorf("worker id must not be empty"))
 	}
 	var out map[string]any
-	if err := json.Unmarshal(api("DELETE", "/workers/"+url.PathEscape(workerID)+"/credential", nil), &out); err != nil {
-		fatal("parse credential response: %v", err)
+	if err := json.Unmarshal(cpapi.Do("DELETE", "/workers/"+url.PathEscape(workerID)+"/credential", nil), &out); err != nil {
+		cli.Fatal("parse credential response: %v", err)
 	}
 	fmt.Printf("%s: credential revoked (the next boot is refused)\n", workerID)
 	printCredentialPush(out["push"])
@@ -215,7 +217,7 @@ func printCredentialPush(pushAny any) {
 	if push == nil {
 		return
 	}
-	result := strOf(push["result"])
+	result := cli.StrOf(push["result"])
 	label, ok := map[string]string{
 		"ok":       "delivered",
 		"degraded": "partially applied (node TLS data plane not ready; reconciliation will retry)",
@@ -227,7 +229,7 @@ func printCredentialPush(pushAny any) {
 	if !ok {
 		label = result
 	}
-	if ts := strOf(push["updated_at"]); ts != "" {
+	if ts := cli.StrOf(push["updated_at"]); ts != "" {
 		label += " (" + shortTS(ts) + ")"
 	}
 	fmt.Printf("push status: %s\n", label)
@@ -237,8 +239,8 @@ func printCredentialPush(pushAny any) {
 	}
 	for _, a := range agentsAny {
 		m, _ := a.(map[string]any)
-		line := "  " + strOf(m["agent_id"]) + ": " + strOf(m["result"])
-		if e := strOf(m["error"]); e != "" {
+		line := "  " + cli.StrOf(m["agent_id"]) + ": " + cli.StrOf(m["result"])
+		if e := cli.StrOf(m["error"]); e != "" {
 			line += " -- " + e
 		}
 		fmt.Println(line)

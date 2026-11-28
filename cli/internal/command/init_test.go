@@ -1,7 +1,7 @@
 // kurrent init / config print 沙盒测试：临时仓库 + fake docker，验证声明校验、
 // 应用（--config 其他路径 → control_plane/kurrent.yaml）、收敛启动调用序列、
 // 模板输出与 example 同源。
-package main
+package command
 
 import (
 	"io"
@@ -47,7 +47,7 @@ func TestInitBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "192.168.80.0/24") {
-		t.Error("kurrent.yaml 被 init 改写")
+		t.Error("kurrent.yaml was overwritten by init")
 	}
 	// 收敛序列：compose up -d（仓库根）→ restart 控制面 → restart dnsmasq
 	logData, err := os.ReadFile(logFile)
@@ -61,7 +61,7 @@ func TestInitBasic(t *testing.T) {
 		"FAKE-DOCKER " + repo + " compose --project-name kurrent restart kurrent-dnsmasq",
 	} {
 		if !strings.Contains(log, want) {
-			t.Errorf("docker 调用缺 %s\n%s", want, log)
+			t.Errorf("docker call is missing %s\n%s", want, log)
 		}
 	}
 }
@@ -72,7 +72,7 @@ func TestInitIdempotentRerun(t *testing.T) {
 	writeControlPlaneConfig(t, cp, cpYAML)
 	for i := 0; i < 2; i++ {
 		if err := initRun(initOpts{dir: cp, configFile: filepath.Join(cp, "kurrent.yaml"), healthWait: 500 * time.Millisecond}); err != nil {
-			t.Fatalf("第 %d 次重跑失败: %v", i+1, err)
+			t.Fatalf("rerun #%d failed: %v", i+1, err)
 		}
 	}
 }
@@ -81,7 +81,7 @@ func TestInitMissingConfig(t *testing.T) {
 	_, cp, _, _ := newFakeRepo(t)
 	err := initRun(initOpts{dir: cp, configFile: filepath.Join(cp, "kurrent.yaml")})
 	if err == nil || !strings.Contains(err.Error(), "print init-defaults") {
-		t.Fatalf("err = %v, want print init-defaults 指引", err)
+		t.Fatalf("err = %v, want print init-defaults guidance", err)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestInitAppliesExternalConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "192.168.80.0/24") {
-		t.Error("外部声明未应用到 control_plane/kurrent.yaml")
+		t.Error("the external declaration was not applied to control_plane/kurrent.yaml")
 	}
 }
 
@@ -136,7 +136,7 @@ func TestInitMissingNetworkingKeys(t *testing.T) {
 	writeControlPlaneConfig(t, cp, strings.Replace(cpYAML, "    interface: enp3s0\n", "", 1))
 	err := initRun(initOpts{dir: cp, configFile: filepath.Join(cp, "kurrent.yaml")})
 	if err == nil || !strings.Contains(err.Error(), "spec.networking.interface") {
-		t.Fatalf("err = %v, want networking.interface 缺失报错", err)
+		t.Fatalf("err = %v, want a missing networking.interface error", err)
 	}
 }
 
@@ -149,17 +149,17 @@ func TestResolveControlPlaneDir(t *testing.T) {
 	// 仓库根（cwd 下存在 control_plane/）
 	t.Chdir(repo)
 	if got, err := resolveControlPlaneDir(""); err != nil || got != cp {
-		t.Fatalf("仓库根解析 = %q, %v, want %q", got, err, cp)
+		t.Fatalf("repo root resolution = %q, %v, want %q", got, err, cp)
 	}
 	// 已位于 control_plane 内（cwd 下存在 config/）
 	t.Chdir(cp)
 	if got, err := resolveControlPlaneDir(""); err != nil || got != cp {
-		t.Fatalf("control_plane 内解析 = %q, %v, want %q", got, err, cp)
+		t.Fatalf("resolution inside control_plane = %q, %v, want %q", got, err, cp)
 	}
 	// 找不到
 	t.Chdir(t.TempDir())
 	if _, err := resolveControlPlaneDir(""); err == nil {
-		t.Fatal("期望找不到 control_plane 目录报错")
+		t.Fatal("expected an error for the missing control_plane directory")
 	}
 }
 
@@ -184,36 +184,36 @@ func captureStdout(t *testing.T, fn func()) string {
 
 func TestPrintInitDefaults(t *testing.T) {
 	got := captureStdout(t, func() { cmdConfig([]string{"print", "init-defaults"}) })
-	example, err := os.ReadFile(filepath.Join("..", "control_plane", "kurrent.yaml.example"))
+	example, err := os.ReadFile(filepath.Join("..", "..", "..", "control_plane", "kurrent.yaml.example"))
 	if err != nil {
-		t.Fatalf("读取 example: %v", err)
+		t.Fatalf("read example: %v", err)
 	}
 	if got != string(example) {
-		t.Errorf("print init-defaults 输出与 kurrent.yaml.example 不同源（改注释先改 example）")
+		t.Errorf("print init-defaults output differs from kurrent.yaml.example (edit the example first)")
 	}
 	for _, want := range []string{
 		"kind: ControlPlaneConfiguration", "interface:", "dhcpRange:", "bootstrapTokenTtlMinutes:",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("print init-defaults 缺 %q", want)
+			t.Errorf("print init-defaults is missing %q", want)
 		}
 	}
 }
 
 func TestPrintNodeDefaults(t *testing.T) {
 	got := captureStdout(t, func() { cmdConfig([]string{"print", "node-defaults"}) })
-	example, err := os.ReadFile(filepath.Join("..", "storager", "kurrent.yaml.example"))
+	example, err := os.ReadFile(filepath.Join("..", "..", "..", "storager", "kurrent.yaml.example"))
 	if err != nil {
-		t.Fatalf("读取 example: %v", err)
+		t.Fatalf("read example: %v", err)
 	}
 	if got != string(example) {
-		t.Errorf("print node-defaults 输出与 kurrent.yaml.example 不同源（改注释先改 example）")
+		t.Errorf("print node-defaults output differs from kurrent.yaml.example (edit the example first)")
 	}
 	for _, want := range []string{
 		"kind: NodeConfiguration", "backend:", "diskDir:", "nqnBase:", "controlPlane:",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("print node-defaults 缺 %q", want)
+			t.Errorf("print node-defaults is missing %q", want)
 		}
 	}
 }
@@ -232,15 +232,15 @@ func TestInitFullSchemaValidationFailureDoesNotApply(t *testing.T) {
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "declaration validation failed") ||
 		!strings.Contains(err.Error(), "unknownField") {
-		t.Fatalf("err = %v, want 全量校验失败（含字段错误）", err)
+		t.Fatalf("err = %v, want full validation failure with field errors", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
 	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
-		t.Error("校验失败却改写了 control_plane/kurrent.yaml")
+		t.Error("validation failed but control_plane/kurrent.yaml was overwritten")
 	}
 	log := readLog(t, logFile)
 	if strings.Contains(log, "up -d") || strings.Contains(log, "compose --project-name kurrent restart") {
-		t.Errorf("校验失败后仍启动了控制面:\n%s", log)
+		t.Errorf("the control plane was started despite the validation failure:\n%s", log)
 	}
 }
 
@@ -255,18 +255,18 @@ func TestInitRollsBackOnHealthFailure(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_HEALTH", "unhealthy")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "rolled back to the previous declaration") {
-		t.Fatalf("err = %v, want 回滚提示", err)
+		t.Fatalf("err = %v, want rollback guidance", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
 	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
-		t.Error("健康检查失败后未恢复上一份声明")
+		t.Error("the previous declaration was not restored after the health check failure")
 	}
 	log := readLog(t, logFile)
 	if n := strings.Count(log, "compose --project-name kurrent restart kurrent-control-plane"); n < 2 {
-		t.Errorf("期望应用重启 + 回滚重启两次控制面，实际 %d:\n%s", n, log)
+		t.Errorf("expected restart on apply plus restart on rollback, got %d:\n%s", n, log)
 	}
 	if !strings.Contains(log, "compose --project-name kurrent restart kurrent-dnsmasq") {
-		t.Errorf("回滚后应重启 dnsmasq 加载旧 conf:\n%s", log)
+		t.Errorf("dnsmasq must be restarted to load the old conf after rollback:\n%s", log)
 	}
 }
 
@@ -281,11 +281,11 @@ func TestInitFailsWhenDnsmasqDoesNotStayRunning(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_RUNNING", "false")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "dnsmasq did not stay running") {
-		t.Fatalf("err = %v, want dnsmasq 起服失败", err)
+		t.Fatalf("err = %v, want a dnsmasq startup failure", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(cp, "kurrent.yaml"))
 	if !strings.Contains(string(data), "192.168.80.50,192.168.80.100") {
-		t.Error("dnsmasq 起服失败后未恢复上一份声明")
+		t.Error("the previous declaration was not restored after the dnsmasq startup failure")
 	}
 }
 
@@ -299,7 +299,7 @@ func TestInitBuildFailureBeforeApply(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_FAIL", "build")
 	err := initRun(initOpts{dir: cp, configFile: external, healthWait: 100 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "build control-plane image failed") {
-		t.Fatalf("err = %v, want 构建失败", err)
+		t.Fatalf("err = %v, want a build failure", err)
 	}
 }
 

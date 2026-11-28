@@ -5,14 +5,13 @@
 // 再创建目录并种下容器启动前必须存在的文件（否则 Docker 以 root 建目录）。
 // --adopt-state 把旧布局（仓库内 control_plane/state、storager/state 等）
 // 停栈、复制并校验到新布局，验证成功后删除旧副本。
-package main
+package deploy
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
+	"kurrent/cli/internal/fsx"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,17 +26,6 @@ var (
 )
 
 const chownRemediation = `sudo chown -R "$(id -u):$(id -g)" %s`
-
-// ensurePrivateDir 创建/收敛私有目录（0700；状态与凭据不含 group/other 权限）。
-func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
-	}
-	return nil
-}
 
 // ensureDir 创建目录并收敛到指定权限（公共派生件用 0755）。
 func ensureDir(path string, perm os.FileMode) error {
@@ -58,15 +46,15 @@ func seedFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
-	if err := writeFileAtomic(path, data, perm); err != nil {
+	if err := fsx.WriteFileAtomic(path, data, perm); err != nil {
 		return fmt.Errorf("seed %s: %w", path, err)
 	}
 	return nil
 }
 
-// assertOwnedAndWritable 校验路径属于当前用户且可写；不存在视为通过（准备阶段会创建）。
+// AssertOwnedAndWritable 校验路径属于当前用户且可写；不存在视为通过（准备阶段会创建）。
 // 属主不符时给出可直接执行的 chown 修复命令。
-func assertOwnedAndWritable(path string) error {
+func AssertOwnedAndWritable(path string) error {
 	fi, err := statPath(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -112,18 +100,18 @@ func shellQuotePath(path string) string {
 	return `'` + strings.ReplaceAll(path, `'`, `'\''`) + `'`
 }
 
-// legacyPreflightPaths 迁移预检覆盖的旧状态根：控制面旧布局 + 同机存储节点旧状态。
-func legacyPreflightPaths(q deployQuery, legacy legacyLayout) []string {
+// LegacyPreflightPaths 迁移预检覆盖的旧状态根：控制面旧布局 + 同机存储节点旧状态。
+func LegacyPreflightPaths(q DeployQuery, legacy legacyLayout) []string {
 	paths := append([]string{}, legacy.paths...)
-	if storage := detectLegacyStorageState(filepath.Join(q.repoRoot, "storager")); storage.present() {
+	if storage := DetectLegacyStorageState(filepath.Join(q.RepoRoot, "storager")); storage.Present() {
 		paths = append(paths, storage.paths...)
 	}
 	return paths
 }
 
-// assertLegacyOwnership 校验旧状态树属主；任一文件不属于当前用户时，
+// AssertLegacyOwnership 校验旧状态树属主；任一文件不属于当前用户时，
 // 用一条 chown 命令列出全部需修复的根——逐条报会让用户反复重跑才发现下一个。
-func assertLegacyOwnership(paths []string) error {
+func AssertLegacyOwnership(paths []string) error {
 	var roots, offenders []string
 	for _, p := range paths {
 		foreign, err := firstForeignOwner(p)
@@ -158,9 +146,9 @@ func dockerComposeReady() error {
 	return nil
 }
 
-// controlPlaneBuildReady 校验 WebUI 构建产物存在且属于当前用户。
+// ControlPlaneBuildReady 校验 WebUI 构建产物存在且属于当前用户。
 // 让 compose 去创建 dist 会得到 root 所有的目录，后续构建再也写不进去。
-func controlPlaneBuildReady(repoRoot string) error {
+func ControlPlaneBuildReady(repoRoot string) error {
 	index := filepath.Join(repoRoot, "webui", "app", "dist", "index.html")
 	fi, err := statPath(index)
 	if err != nil {
@@ -181,48 +169,48 @@ func controlPlaneBuildReady(repoRoot string) error {
 	return nil
 }
 
-// preflightControlPlane 首次部署/重跑的只读预检；不修改任何文件。
-func preflightControlPlane(q deployQuery, legacy legacyLayout, adopt bool) error {
+// PreflightControlPlane 首次部署/重跑的只读预检；不修改任何文件。
+func PreflightControlPlane(q DeployQuery, legacy legacyLayout, adopt bool) error {
 	if err := dockerComposeReady(); err != nil {
 		return err
 	}
 	for _, dir := range []string{
-		filepath.Join(q.repoRoot, "control_plane"),
-		filepath.Join(q.repoRoot, "storager"),
+		filepath.Join(q.RepoRoot, "control_plane"),
+		filepath.Join(q.RepoRoot, "storager"),
 	} {
-		if !isDir(dir) {
+		if !fsx.IsDir(dir) {
 			return fmt.Errorf("repository layout is incomplete: %s is missing (pass --dir with the checkout root)", dir)
 		}
 	}
-	if err := controlPlaneBuildReady(q.repoRoot); err != nil {
+	if err := ControlPlaneBuildReady(q.RepoRoot); err != nil {
 		return err
 	}
-	if err := assertRecordedStatePresent(q); err != nil {
+	if err := AssertRecordedStatePresent(q); err != nil {
 		return err
 	}
-	if err := assertOwnedAndWritable(q.stateDir); err != nil {
+	if err := AssertOwnedAndWritable(q.StateDir); err != nil {
 		return err
 	}
-	if dir := userCredentialsDir(); dir != "" {
-		if err := assertOwnedAndWritable(dir); err != nil {
+	if dir := fsx.UserCredentialsDir(); dir != "" {
+		if err := AssertOwnedAndWritable(dir); err != nil {
 			return err
 		}
 	}
-	if legacy.present() {
+	if legacy.Present() {
 		if !adopt {
 			return fmt.Errorf("an existing deployment predates the state-root layout:\n  %s\n"+
 				"rerun with --adopt-state to migrate it into %s (the old stacks are stopped and the copies removed after verification)",
-				strings.Join(legacy.paths, "\n  "), q.stateDir)
+				strings.Join(legacy.paths, "\n  "), q.StateDir)
 		}
 		// init 在同一次迁移里也接管存储节点旧状态（agent 状态/PKI/日志），
 		// 属主检查必须一并前置：否则停栈并复制控制面状态后才失败，留下半迁移现场。
-		if err := assertLegacyOwnership(legacyPreflightPaths(q, legacy)); err != nil {
+		if err := AssertLegacyOwnership(LegacyPreflightPaths(q, legacy)); err != nil {
 			return err
 		}
 		// 迁移失败（凭据交换/自检）后状态根已有本机副本，记录仍为 bootstrapping：
 		// 这是同一次事务的续跑，不能按“目标非空”拒绝；其余情况仍须空目录。
 		if !resumableBootstrap(q) {
-			if err := assertStateTargetEmpty(q.stateDir); err != nil {
+			if err := AssertStateTargetEmpty(q.StateDir); err != nil {
 				return err
 			}
 		}
@@ -233,32 +221,32 @@ func preflightControlPlane(q deployQuery, legacy legacyLayout, adopt bool) error
 	return nil
 }
 
-// assertRecordedStatePresent 部署记录存在但状态根消失：不能悄悄新建一个空部署
+// AssertRecordedStatePresent 部署记录存在但状态根消失：不能悄悄新建一个空部署
 // （台账、PKI 与节点身份都在里面）。
-func assertRecordedStatePresent(q deployQuery) error {
-	if q.record == nil {
+func AssertRecordedStatePresent(q DeployQuery) error {
+	if q.Record == nil {
 		return nil
 	}
-	if _, err := statPath(q.stateDir); os.IsNotExist(err) {
+	if _, err := statPath(q.StateDir); os.IsNotExist(err) {
 		return fmt.Errorf("the deployment record %s points at the state root %s, which no longer exists;\n"+
 			"restore it from a backup, or remove the record to start a fresh deployment",
-			deploymentRecordPath(), q.stateDir)
+			DeploymentRecordPath(), q.StateDir)
 	}
 	return nil
 }
 
-// assertStateTargetEmpty 迁移前要求状态根不存在或为空：绝不往有数据的目录里合并旧状态。
+// AssertStateTargetEmpty 迁移前要求状态根不存在或为空：绝不往有数据的目录里合并旧状态。
 // resumableBootstrap 判断状态根是否属于一次中断的本机部署（记录匹配且仍在 bootstrapping）。
-func resumableBootstrap(q deployQuery) bool {
-	rec := q.record
+func resumableBootstrap(q DeployQuery) bool {
+	rec := q.Record
 	return rec != nil &&
-		rec.StateDir == q.stateDir &&
-		rec.RepoRoot == q.repoRoot &&
+		rec.StateDir == q.StateDir &&
+		rec.RepoRoot == q.RepoRoot &&
 		rec.Roles.ControlPlane &&
-		rec.Status == deployStatusBootstrapping
+		rec.Status == StatusBootstrapping
 }
 
-func assertStateTargetEmpty(stateDir string) error {
+func AssertStateTargetEmpty(stateDir string) error {
 	entries, err := os.ReadDir(stateDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -272,20 +260,20 @@ func assertStateTargetEmpty(stateDir string) error {
 	return nil
 }
 
-// prepareControlPlaneState 创建控制面状态布局并种下 compose 文件挂载点。
+// PrepareControlPlaneState 创建控制面状态布局并种下 compose 文件挂载点。
 // 容器启动前这些文件必须存在，否则 Docker 会以 root 创建同名目录。
-func prepareControlPlaneState(paths controlPlanePaths) error {
-	for _, dir := range []string{paths.root, paths.state, paths.config, paths.dnsmasq} {
-		if err := ensurePrivateDir(dir); err != nil {
+func PrepareControlPlaneState(paths ControlPlanePaths) error {
+	for _, dir := range []string{paths.Root, paths.State, paths.Config, paths.Dnsmasq} {
+		if err := fsx.EnsurePrivateDir(dir); err != nil {
 			return err
 		}
 	}
-	if err := ensurePrivateDir(paths.bootstrap); err != nil {
+	if err := fsx.EnsurePrivateDir(paths.Bootstrap); err != nil {
 		return err
 	}
 	for _, dir := range []string{
-		filepath.Join(paths.state, "certs"),
-		filepath.Join(paths.state, "pki", "nginx"),
+		filepath.Join(paths.State, "certs"),
+		filepath.Join(paths.State, "pki", "nginx"),
 	} {
 		if err := ensureDir(dir, 0o755); err != nil {
 			return err
@@ -296,10 +284,10 @@ func prepareControlPlaneState(paths controlPlanePaths) error {
 		data string
 		perm os.FileMode
 	}{
-		{paths.agentsFile, "agents: {}\n", 0o644},
-		{filepath.Join(paths.dnsmasq, "dnsmasq.conf"), "# rendered by the control plane from spec.networking at startup\n", 0o644},
-		{filepath.Join(paths.dnsmasq, "dhcp-hosts.conf"), "", 0o644},
-		{filepath.Join(paths.dnsmasq, "dnsmasq.leases"), "", 0o644},
+		{paths.AgentsFile, "agents: {}\n", 0o644},
+		{filepath.Join(paths.Dnsmasq, "dnsmasq.conf"), "# rendered by the control plane from spec.networking at startup\n", 0o644},
+		{filepath.Join(paths.Dnsmasq, "dhcp-hosts.conf"), "", 0o644},
+		{filepath.Join(paths.Dnsmasq, "dnsmasq.leases"), "", 0o644},
 	}
 	for _, f := range files {
 		if err := seedFile(f.path, []byte(f.data), f.perm); err != nil {
@@ -309,31 +297,31 @@ func prepareControlPlaneState(paths controlPlanePaths) error {
 	return nil
 }
 
-// prepareStoragerState 创建节点状态布局（身份、引导凭据、组件 PKI、日志、CP 信任锚目录）。
-func prepareStoragerState(paths storagerPaths) error {
+// PrepareStoragerState 创建节点状态布局（身份、引导凭据、组件 PKI、日志、CP 信任锚目录）。
+func PrepareStoragerState(paths StoragerPaths) error {
 	for _, dir := range []string{
-		paths.root, paths.state, paths.bootstrap, paths.pki, paths.logs, paths.certs,
+		paths.Root, paths.State, paths.Bootstrap, paths.PKI, paths.Logs, paths.Certs,
 	} {
-		if err := ensurePrivateDir(dir); err != nil {
+		if err := fsx.EnsurePrivateDir(dir); err != nil {
 			return err
 		}
 	}
-	if err := ensureDir(paths.root, 0o755); err != nil {
+	if err := ensureDir(paths.Root, 0o755); err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(paths.pki); err != nil {
+	if err := fsx.EnsurePrivateDir(paths.PKI); err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(paths.certs); err != nil {
+	if err := fsx.EnsurePrivateDir(paths.Certs); err != nil {
 		return err
 	}
-	if paths.agentPKI != "" {
-		if err := ensurePrivateDir(paths.agentPKI); err != nil {
+	if paths.AgentPKI != "" {
+		if err := fsx.EnsurePrivateDir(paths.AgentPKI); err != nil {
 			return err
 		}
 	}
-	if paths.nvmetPKI != "" {
-		if err := ensurePrivateDir(paths.nvmetPKI); err != nil {
+	if paths.NvmetPKI != "" {
+		if err := fsx.EnsurePrivateDir(paths.NvmetPKI); err != nil {
 			return err
 		}
 	}
@@ -345,32 +333,35 @@ type legacyLayout struct {
 	paths []string
 }
 
-func (l legacyLayout) present() bool { return len(l.paths) > 0 }
+func (l legacyLayout) Present() bool { return len(l.paths) > 0 }
 
-// legacyControlPlanePaths 仓库内旧控制面布局（control_plane/，与新状态根的
+// Paths 旧布局中实际存在的状态路径。
+func (l legacyLayout) Paths() []string { return l.paths }
+
+// LegacyControlPlanePaths 仓库内旧控制面布局（control_plane/，与新状态根的
 // control-plane/ 区分）。
-func legacyControlPlanePaths(repoRoot string) controlPlanePaths {
+func LegacyControlPlanePaths(repoRoot string) ControlPlanePaths {
 	root := filepath.Join(repoRoot, "control_plane")
 	state := filepath.Join(root, "state")
-	return controlPlanePaths{
-		root:       root,
-		state:      state,
-		config:     filepath.Join(root, "config"),
-		agentsFile: filepath.Join(root, "config", "agents.yml"),
-		dnsmasq:    filepath.Join(repoRoot, "dnsmasq"),
-		bootstrap:  filepath.Join(root, "bootstrap"),
-		adminConf:  filepath.Join(state, "admin.conf"),
-		serverCert: filepath.Join(state, "certs", "server.crt"),
+	return ControlPlanePaths{
+		Root:       root,
+		State:      state,
+		Config:     filepath.Join(root, "config"),
+		AgentsFile: filepath.Join(root, "config", "agents.yml"),
+		Dnsmasq:    filepath.Join(repoRoot, "dnsmasq"),
+		Bootstrap:  filepath.Join(root, "bootstrap"),
+		AdminConf:  filepath.Join(state, "admin.conf"),
+		ServerCert: filepath.Join(state, "certs", "server.crt"),
 	}
 }
 
-// detectLegacyControlPlaneState 返回仓库内旧控制面状态路径；空目录不算（失败重跑残留）。
-func detectLegacyControlPlaneState(repoRoot string) legacyLayout {
-	cp := legacyControlPlanePaths(repoRoot)
+// DetectLegacyControlPlaneState 返回仓库内旧控制面状态路径；空目录不算（失败重跑残留）。
+func DetectLegacyControlPlaneState(repoRoot string) legacyLayout {
+	cp := LegacyControlPlanePaths(repoRoot)
 	var paths []string
 	for _, p := range []string{
-		cp.state,
-		cp.agentsFile,
+		cp.State,
+		cp.AgentsFile,
 		filepath.Join(repoRoot, "dnsmasq", "dnsmasq.conf"),
 		filepath.Join(repoRoot, "dnsmasq", "dhcp-hosts.conf"),
 		filepath.Join(repoRoot, "dnsmasq", "dnsmasq.leases"),
@@ -382,8 +373,8 @@ func detectLegacyControlPlaneState(repoRoot string) legacyLayout {
 	return legacyLayout{paths: paths}
 }
 
-// detectLegacyStorageState 返回仓库内旧节点状态路径。
-func detectLegacyStorageState(storagerDir string) legacyLayout {
+// DetectLegacyStorageState 返回仓库内旧节点状态路径。
+func DetectLegacyStorageState(storagerDir string) legacyLayout {
 	var paths []string
 	for _, p := range []string{
 		filepath.Join(storagerDir, "state"),
@@ -410,46 +401,46 @@ func nonEmptyPath(path string) bool {
 	return fi.Size() > 0
 }
 
-// adoptControlPlaneState 把旧控制面状态复制到新状态根（含节点组件 PKI 迁移）。
+// AdoptControlPlaneState 把旧控制面状态复制到新状态根（含节点组件 PKI 迁移）。
 // 调用前栈已停止，且新状态根为空；复制逐文件做 SHA-256 校验。
-func adoptControlPlaneState(repoRoot string, q deployQuery) error {
-	legacy := legacyControlPlanePaths(repoRoot)
-	target := q.controlPlane()
-	if isDir(legacy.state) {
-		if err := copyTreeVerified(legacy.state, target.state); err != nil {
+func AdoptControlPlaneState(repoRoot string, q DeployQuery) error {
+	legacy := LegacyControlPlanePaths(repoRoot)
+	target := q.ControlPlane()
+	if fsx.IsDir(legacy.State) {
+		if err := copyTreeVerified(legacy.State, target.State); err != nil {
 			return fmt.Errorf("migrate control-plane state: %w", err)
 		}
 	}
-	if fileExists(legacy.agentsFile) {
-		data, err := os.ReadFile(legacy.agentsFile)
+	if fsx.FileExists(legacy.AgentsFile) {
+		data, err := os.ReadFile(legacy.AgentsFile)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", legacy.agentsFile, err)
+			return fmt.Errorf("read %s: %w", legacy.AgentsFile, err)
 		}
-		if err := seedFile(target.agentsFile, data, 0o644); err != nil {
+		if err := seedFile(target.AgentsFile, data, 0o644); err != nil {
 			return err
 		}
 	}
 	for _, name := range []string{"dnsmasq.conf", "dhcp-hosts.conf", "dnsmasq.leases"} {
 		src := filepath.Join(repoRoot, "dnsmasq", name)
-		if !fileExists(src) {
+		if !fsx.FileExists(src) {
 			continue
 		}
 		data, err := os.ReadFile(src)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", src, err)
 		}
-		if err := seedFile(filepath.Join(target.dnsmasq, name), data, 0o644); err != nil {
+		if err := seedFile(filepath.Join(target.Dnsmasq, name), data, 0o644); err != nil {
 			return err
 		}
 	}
-	return adoptNodePKI(legacy.state, q.stateDir)
+	return adoptNodePKI(legacy.State, q.StateDir)
 }
 
 // adoptNodePKI 把旧控制面 state 内的节点组件 PKI 复制到 <state>/storager/pki/。
 // issued.yml 仍是证书台账权威；这里只恢复节点运行所需的 cert/key 文件。
 func adoptNodePKI(legacyState, stateRoot string) error {
 	srcRoot := filepath.Join(legacyState, "pki", "components")
-	if !isDir(srcRoot) {
+	if !fsx.IsDir(srcRoot) {
 		return nil
 	}
 	entries, err := os.ReadDir(srcRoot)
@@ -470,47 +461,47 @@ func adoptNodePKI(legacyState, stateRoot string) error {
 	return nil
 }
 
-// adoptStorageState 把旧节点状态复制到新状态根。
-func adoptStorageState(storagerDir string, q deployQuery) error {
-	target := q.storager("")
+// AdoptStorageState 把旧节点状态复制到新状态根。
+func AdoptStorageState(storagerDir string, q DeployQuery) error {
+	target := q.Storager("")
 	for _, item := range []struct{ src, dst string }{
-		{filepath.Join(storagerDir, "state"), target.state},
-		{filepath.Join(storagerDir, "bootstrap"), target.bootstrap},
-		{filepath.Join(storagerDir, "agent", "logs"), target.logs},
+		{filepath.Join(storagerDir, "state"), target.State},
+		{filepath.Join(storagerDir, "bootstrap"), target.Bootstrap},
+		{filepath.Join(storagerDir, "agent", "logs"), target.Logs},
 	} {
-		if !isDir(item.src) {
+		if !fsx.IsDir(item.src) {
 			continue
 		}
 		if err := copyTreeVerified(item.src, item.dst); err != nil {
 			return fmt.Errorf("migrate %s: %w", item.src, err)
 		}
 	}
-	if err := adoptNodePKI(filepath.Join(filepath.Dir(storagerDir), "control_plane", "state"), q.stateDir); err != nil {
+	if err := adoptNodePKI(filepath.Join(filepath.Dir(storagerDir), "control_plane", "state"), q.StateDir); err != nil {
 		return err
 	}
 	// CP 信任锚：旧布局下 nginx 证书在控制面 state/certs；复制为节点副本（--cp-ca 仍可覆盖）。
 	legacyCA := filepath.Join(filepath.Dir(storagerDir), "control_plane", "state", "certs", "server.crt")
-	if fileExists(legacyCA) {
+	if fsx.FileExists(legacyCA) {
 		data, err := os.ReadFile(legacyCA)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", legacyCA, err)
 		}
-		if err := os.MkdirAll(target.certs, 0o700); err != nil {
+		if err := os.MkdirAll(target.Certs, 0o700); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(target.cpCA, data, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", target.cpCA, err)
+		if err := fsx.WriteFileAtomic(target.CPCA, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", target.CPCA, err)
 		}
 	}
 	return nil
 }
 
-// removeLegacyControlPlaneState 验证成功后删除旧控制面状态副本（保留代码与 .example）。
-func removeLegacyControlPlaneState(repoRoot string) error {
-	cp := legacyControlPlanePaths(repoRoot)
+// RemoveLegacyControlPlaneState 验证成功后删除旧控制面状态副本（保留代码与 .example）。
+func RemoveLegacyControlPlaneState(repoRoot string) error {
+	cp := LegacyControlPlanePaths(repoRoot)
 	for _, p := range []string{
-		cp.state,
-		cp.agentsFile,
+		cp.State,
+		cp.AgentsFile,
 		filepath.Join(repoRoot, "dnsmasq", "dnsmasq.conf"),
 		filepath.Join(repoRoot, "dnsmasq", "dhcp-hosts.conf"),
 		filepath.Join(repoRoot, "dnsmasq", "dnsmasq.leases"),
@@ -522,8 +513,8 @@ func removeLegacyControlPlaneState(repoRoot string) error {
 	return nil
 }
 
-// removeLegacyStorageState 删除旧节点状态副本。
-func removeLegacyStorageState(storagerDir string) error {
+// RemoveLegacyStorageState 删除旧节点状态副本。
+func RemoveLegacyStorageState(storagerDir string) error {
 	for _, p := range []string{
 		filepath.Join(storagerDir, "state"),
 		filepath.Join(storagerDir, "bootstrap"),
@@ -613,11 +604,11 @@ func verifyTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		want, err := hashFile(path)
+		want, err := fsx.HashFile(path)
 		if err != nil {
 			return err
 		}
-		got, err := hashFile(filepath.Join(dst, rel))
+		got, err := fsx.HashFile(filepath.Join(dst, rel))
 		if err != nil {
 			return err
 		}
@@ -626,17 +617,4 @@ func verifyTree(src, dst string) error {
 		}
 		return nil
 	})
-}
-
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

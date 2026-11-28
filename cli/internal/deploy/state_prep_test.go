@@ -1,8 +1,9 @@
 // 状态根准备：目录权限、种子文件、属主/可写性、WebUI 构建预检、旧状态检测与
 // 逐文件校验迁移。
-package main
+package deploy
 
 import (
+	"kurrent/cli/internal/fsx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,11 @@ import (
 
 func TestPrepareControlPlaneState(t *testing.T) {
 	stateRoot := t.TempDir()
-	paths := newControlPlanePaths(stateRoot)
-	if err := prepareControlPlaneState(paths); err != nil {
+	paths := NewControlPlanePaths(stateRoot)
+	if err := PrepareControlPlaneState(paths); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{paths.root, paths.state, paths.config, paths.bootstrap} {
+	for _, dir := range []string{paths.Root, paths.State, paths.Config, paths.Bootstrap} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
@@ -26,38 +27,38 @@ func TestPrepareControlPlaneState(t *testing.T) {
 		}
 	}
 	for _, file := range []string{
-		paths.agentsFile,
-		filepath.Join(paths.dnsmasq, "dnsmasq.conf"),
-		filepath.Join(paths.dnsmasq, "dhcp-hosts.conf"),
-		filepath.Join(paths.dnsmasq, "dnsmasq.leases"),
+		paths.AgentsFile,
+		filepath.Join(paths.Dnsmasq, "dnsmasq.conf"),
+		filepath.Join(paths.Dnsmasq, "dhcp-hosts.conf"),
+		filepath.Join(paths.Dnsmasq, "dnsmasq.leases"),
 	} {
-		if !fileExists(file) {
+		if !fsx.FileExists(file) {
 			t.Errorf("seed file missing: %s", file)
 		}
 	}
-	if !isDir(filepath.Join(paths.state, "certs")) || !isDir(filepath.Join(paths.state, "pki", "nginx")) {
+	if !fsx.IsDir(filepath.Join(paths.State, "certs")) || !fsx.IsDir(filepath.Join(paths.State, "pki", "nginx")) {
 		t.Error("nginx/control-plane derived directories should exist before compose up")
 	}
 
 	// 重跑不覆盖已有运行态台账
-	if err := os.WriteFile(paths.agentsFile, []byte("agents:\n  node-1:\n    base_url: https://x\n"), 0o644); err != nil {
+	if err := os.WriteFile(paths.AgentsFile, []byte("agents:\n  node-1:\n    base_url: https://x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareControlPlaneState(paths); err != nil {
+	if err := PrepareControlPlaneState(paths); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(paths.agentsFile)
+	data, _ := os.ReadFile(paths.AgentsFile)
 	if !strings.Contains(string(data), "node-1") {
 		t.Error("seedFile must not overwrite the existing ledger")
 	}
 }
 
 func TestPrepareStoragerState(t *testing.T) {
-	paths := newStoragerPaths(t.TempDir(), "aabbccddeeff")
-	if err := prepareStoragerState(paths); err != nil {
+	paths := NewStoragerPaths(t.TempDir(), "aabbccddeeff")
+	if err := PrepareStoragerState(paths); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{paths.state, paths.bootstrap, paths.agentPKI, paths.nvmetPKI, paths.certs} {
+	for _, dir := range []string{paths.State, paths.Bootstrap, paths.AgentPKI, paths.NvmetPKI, paths.Certs} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
@@ -66,26 +67,26 @@ func TestPrepareStoragerState(t *testing.T) {
 			t.Errorf("%s mode = %04o, want 0700", dir, fi.Mode().Perm())
 		}
 	}
-	if paths.agentPKI != filepath.Join(paths.pki, "agent-aabbccddeeff") {
-		t.Fatalf("agentPKI = %s", paths.agentPKI)
+	if paths.AgentPKI != filepath.Join(paths.PKI, "agent-aabbccddeeff") {
+		t.Fatalf("agentPKI = %s", paths.AgentPKI)
 	}
 }
 
 func TestAssertRecordedStatePresent(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "gone")
-	q := deployQuery{stateDir: stateRoot}
-	if err := assertRecordedStatePresent(q); err != nil {
+	q := DeployQuery{StateDir: stateRoot}
+	if err := AssertRecordedStatePresent(q); err != nil {
 		t.Fatalf("no record should pass: %v", err)
 	}
-	q.record = &deploymentRecord{StateDir: stateRoot}
-	err := assertRecordedStatePresent(q)
+	q.Record = &DeploymentRecord{StateDir: stateRoot}
+	err := AssertRecordedStatePresent(q)
 	if err == nil || !strings.Contains(err.Error(), "no longer exists") {
 		t.Fatalf("err = %v, want missing state root rejection", err)
 	}
 	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := assertRecordedStatePresent(q); err != nil {
+	if err := AssertRecordedStatePresent(q); err != nil {
 		t.Fatalf("existing state root should pass: %v", err)
 	}
 }
@@ -99,7 +100,7 @@ func TestAssertOwnedAndWritableRejectsForeignOwner(t *testing.T) {
 	effectiveUID = func() int { return os.Geteuid() + 1 }
 	t.Cleanup(func() { effectiveUID = oldUID })
 
-	err := assertOwnedAndWritable(path)
+	err := AssertOwnedAndWritable(path)
 	if err == nil || !strings.Contains(err.Error(), "sudo chown -R") {
 		t.Fatalf("err = %v, want chown remediation", err)
 	}
@@ -107,7 +108,7 @@ func TestAssertOwnedAndWritableRejectsForeignOwner(t *testing.T) {
 
 func TestControlPlaneBuildReady(t *testing.T) {
 	repo := t.TempDir()
-	err := controlPlaneBuildReady(repo)
+	err := ControlPlaneBuildReady(repo)
 	if err == nil || !strings.Contains(err.Error(), "npm ci && npm run build") {
 		t.Fatalf("err = %v, want build remediation", err)
 	}
@@ -118,13 +119,13 @@ func TestControlPlaneBuildReady(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := controlPlaneBuildReady(repo); err != nil {
+	if err := ControlPlaneBuildReady(repo); err != nil {
 		t.Fatal(err)
 	}
 	oldUID := effectiveUID
 	effectiveUID = func() int { return os.Geteuid() + 1 }
 	t.Cleanup(func() { effectiveUID = oldUID })
-	if err := controlPlaneBuildReady(repo); err == nil || !strings.Contains(err.Error(), "sudo rm -rf") {
+	if err := ControlPlaneBuildReady(repo); err == nil || !strings.Contains(err.Error(), "sudo rm -rf") {
 		t.Fatalf("err = %v, want root-owned dist remediation", err)
 	}
 }
@@ -135,13 +136,13 @@ func TestDetectLegacyState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, "control_plane", "state"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if detectLegacyControlPlaneState(repo).present() {
+	if DetectLegacyControlPlaneState(repo).Present() {
 		t.Fatal("empty state directory should not count as legacy")
 	}
 	if err := os.WriteFile(filepath.Join(repo, "control_plane", "state", "workers.yml"), []byte("workers: {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := detectLegacyControlPlaneState(repo); !got.present() || len(got.paths) == 0 {
+	if got := DetectLegacyControlPlaneState(repo); !got.Present() || len(got.Paths()) == 0 {
 		t.Fatal("non-empty state directory should be detected")
 	}
 	storager := filepath.Join(repo, "storager")
@@ -151,7 +152,7 @@ func TestDetectLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storager, "bootstrap", "agent.token"), []byte("t"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !detectLegacyStorageState(storager).present() {
+	if !DetectLegacyStorageState(storager).Present() {
 		t.Fatal("legacy bootstrap should be detected")
 	}
 }
@@ -216,8 +217,8 @@ func TestCopyFileReplacesReadOnlyDestination(t *testing.T) {
 
 func TestRemoveLegacyStateKeepsExamples(t *testing.T) {
 	repo := t.TempDir()
-	cp := legacyControlPlanePaths(repo)
-	if err := prepareControlPlaneState(cp); err != nil {
+	cp := LegacyControlPlanePaths(repo)
+	if err := PrepareControlPlaneState(cp); err != nil {
 		t.Fatal(err)
 	}
 	example := filepath.Join(repo, "dnsmasq", "dnsmasq.conf.example")
@@ -227,13 +228,13 @@ func TestRemoveLegacyStateKeepsExamples(t *testing.T) {
 	if err := os.WriteFile(example, []byte("# example\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeLegacyControlPlaneState(repo); err != nil {
+	if err := RemoveLegacyControlPlaneState(repo); err != nil {
 		t.Fatal(err)
 	}
-	if isDir(cp.state) || fileExists(cp.agentsFile) || fileExists(filepath.Join(repo, "dnsmasq", "dnsmasq.conf")) {
+	if fsx.IsDir(cp.State) || fsx.FileExists(cp.AgentsFile) || fsx.FileExists(filepath.Join(repo, "dnsmasq", "dnsmasq.conf")) {
 		t.Error("legacy runtime state should be removed")
 	}
-	if !fileExists(example) {
+	if !fsx.FileExists(example) {
 		t.Error("tracked example files must be kept")
 	}
 }
@@ -254,7 +255,7 @@ func TestLegacyPreflightPathsIncludeStorageState(t *testing.T) {
 	write(filepath.Join("storager", "bootstrap", "nvmet-host.token"))
 	write(filepath.Join("storager", "agent", "logs", "nvmet-credentials.json"))
 
-	got := legacyPreflightPaths(deployQuery{repoRoot: repo}, detectLegacyControlPlaneState(repo))
+	got := LegacyPreflightPaths(DeployQuery{RepoRoot: repo}, DetectLegacyControlPlaneState(repo))
 	for _, want := range []string{
 		filepath.Join(repo, "control_plane", "state"),
 		filepath.Join(repo, "storager", "bootstrap"),
@@ -273,30 +274,53 @@ func TestLegacyPreflightPathsIncludeStorageState(t *testing.T) {
 }
 
 func TestPreflightAllowsResumingBootstrap(t *testing.T) {
-	repo, _, _, _ := newFakeRepo(t)
+	home := t.TempDir()
+	oldHome := fsx.UserHomeDir
+	fsx.UserHomeDir = func() string { return home }
+	t.Cleanup(func() { fsx.UserHomeDir = oldHome })
+	repo := t.TempDir()
+	stateRoot := t.TempDir()
+	t.Setenv("KURRENT_STATE_DIR", stateRoot)
+	t.Setenv("KURRENT_DEPLOYMENT_FILE", filepath.Join(home, "deployment.yaml"))
+	for _, d := range []string{"control_plane/state", "storager", "webui/app/dist"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "webui", "app", "dist", "index.html"),
+		[]byte("<!doctype html>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 状态根已有内容（另一次部署的残留）：重新 adopted 必须被拒绝
+	if err := os.MkdirAll(filepath.Join(stateRoot, "storager", "certs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "storager", "certs", "cp-ca.crt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(repo, "control_plane", "state", "workers.yml"), []byte("workers: {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	q, err := resolveDeployment(repo, "")
+	q, err := ResolveDeployment(repo, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := detectLegacyControlPlaneState(repo)
-	if !legacy.present() {
+	legacy := DetectLegacyControlPlaneState(repo)
+	if !legacy.Present() {
 		t.Fatal("fixture should contain legacy control-plane state")
 	}
 	// 上一次 init 已把状态复制进状态根并在凭据交换阶段失败
-	q.record = &deploymentRecord{
-		RepoRoot: repo, StateDir: q.stateDir,
-		Roles: deploymentRoles{ControlPlane: true}, Status: deployStatusBootstrapping,
+	q.Record = &DeploymentRecord{
+		RepoRoot: repo, StateDir: q.StateDir,
+		Roles: DeploymentRoles{ControlPlane: true}, Status: StatusBootstrapping,
 	}
-	if err := preflightControlPlane(q, legacy, true); err != nil {
+	if err := PreflightControlPlane(q, legacy, true); err != nil {
 		t.Fatalf("resuming an interrupted bootstrap should not require an empty state root: %v", err)
 	}
 
 	// 记录已是 ready 时仍拒绝向非空状态根迁移，避免覆盖另一套部署
-	q.record.Status = deployStatusReady
-	if err := preflightControlPlane(q, legacy, true); err == nil || !strings.Contains(err.Error(), "already contains data") {
+	q.Record.Status = StatusReady
+	if err := PreflightControlPlane(q, legacy, true); err == nil || !strings.Contains(err.Error(), "already contains data") {
 		t.Fatalf("non-resumable adoption should be rejected: %v", err)
 	}
 }
@@ -317,7 +341,7 @@ func TestAssertLegacyOwnershipReportsAllRoots(t *testing.T) {
 	effectiveUID = func() int { return os.Geteuid() + 1 }
 	t.Cleanup(func() { effectiveUID = oldUID })
 
-	err := assertLegacyOwnership([]string{cpState, bootstrap})
+	err := AssertLegacyOwnership([]string{cpState, bootstrap})
 	if err == nil {
 		t.Fatal("foreign ownership should be rejected")
 	}

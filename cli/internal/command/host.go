@@ -1,8 +1,11 @@
 // host.go：kurrent host 命令组（只读宿主基线检查）。
-package main
+package command
 
 import (
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/deploy"
+	"kurrent/cli/internal/hostcheck"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +51,7 @@ func cmdHost(args []string) {
 	case "check":
 		hostCheckCmd(args[1:])
 	default:
-		usageError(hostGroupUsage, fmt.Errorf("unknown host subcommand: %s", args[0]))
+		cli.UsageError(hostGroupUsage, fmt.Errorf("unknown host subcommand: %s", args[0]))
 	}
 }
 
@@ -57,57 +60,57 @@ func hostCheckCmd(args []string) {
 	if help {
 		return
 	}
-	root, err := resolveRepoRoot(p.opt("dir", ""))
+	root, err := deploy.ResolveRepoRoot(p.opt("dir", ""))
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
-	env := hostEnvPaths
+	env := hostcheck.HostEnvPaths
 	stateDirFlag := p.opt("state-dir", "")
-	q, qerr := resolveDeployment(root, stateDirFlag)
-	rec, recErr := readDeploymentRecord()
-	env.deploymentChecked = true
-	env.deployment = rec
+	q, qerr := deploy.ResolveDeployment(root, stateDirFlag)
+	rec, recErr := deploy.ReadDeploymentRecord()
+	env.DeploymentChecked = true
+	env.Deployment = rec
 	if recErr != nil {
-		env.deploymentErr = recErr.Error()
+		env.DeploymentErr = recErr.Error()
 	}
 	switch {
 	case qerr != nil:
-		env.deploymentErr = qerr.Error()
-		env.controlStateDir = filepath.Join(root, "control_plane", "state")
-		env.stateRoot = root
+		env.DeploymentErr = qerr.Error()
+		env.ControlStateDir = filepath.Join(root, "control_plane", "state")
+		env.StateRoot = root
 	case rec == nil && stateDirFlag == "" && strings.TrimSpace(os.Getenv("KURRENT_STATE_DIR")) == "":
 		// 旧布局（无记录、未指定状态根）：按仓库内状态检查，并把“状态在仓库内”报为失败
-		env.controlStateDir = filepath.Join(root, "control_plane", "state")
-		env.stateRoot = root
+		env.ControlStateDir = filepath.Join(root, "control_plane", "state")
+		env.StateRoot = root
 	default:
-		env.controlStateDir = q.controlPlane().state
-		env.stateRoot = q.stateDir
+		env.ControlStateDir = q.ControlPlane().State
+		env.StateRoot = q.StateDir
 	}
 
-	var role hostRole
+	var role hostcheck.HostRole
 	if raw := p.opt("role", ""); raw != "" {
-		role, err = parseHostRole(raw)
+		role, err = hostcheck.ParseHostRole(raw)
 		if err != nil {
-			usageError(hostCheckUsage, err)
+			cli.UsageError(hostCheckUsage, err)
 		}
 	} else {
-		role, err = inferHostRole(env)
+		role, err = hostcheck.InferHostRole(env)
 		if err != nil {
-			fatal("%v", err)
+			cli.Fatal("%v", err)
 		}
 	}
 
 	format := p.opt("output", "text")
 	if format != "text" && format != "json" {
-		usageError(hostCheckUsage, fmt.Errorf("invalid output format %q (expected text|json)", format))
+		cli.UsageError(hostCheckUsage, fmt.Errorf("invalid output format %q (expected text|json)", format))
 	}
 
-	report := runHostChecks(env, root, role)
+	report := hostcheck.RunHostChecks(env, root, role)
 	report.Strict = p.flags["strict"]
-	if err := printHostReport(os.Stdout, report, format == "json"); err != nil {
-		fatal("write report: %v", err)
+	if err := hostcheck.PrintHostReport(os.Stdout, report, format == "json"); err != nil {
+		cli.Fatal("write report: %v", err)
 	}
-	if report.blocks(report.Strict) {
-		exit(1)
+	if report.Blocks(report.Strict) {
+		cli.Exit(1)
 	}
 }

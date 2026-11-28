@@ -6,11 +6,15 @@
 // 非零；声明校验失败回滚声明，引导失败保留交换包并让重跑可续。
 // 运行时状态不再放在仓库内：移动/改名仓库只改变代码位置，部署身份由部署记录
 // （~/.kurrent/deployment.yaml）与固定项目名维持。
-package main
+package command
 
 import (
 	"bytes"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/creds"
+	"kurrent/cli/internal/deploy"
+	"kurrent/cli/internal/fsx"
 	"net"
 	"os"
 	"os/exec"
@@ -40,17 +44,17 @@ func cmdInit(args []string) {
 	}
 	for _, flag := range []string{"dir", "config", "state-dir"} {
 		if p.has(flag) && strings.TrimSpace(p.opt(flag, "")) == "" {
-			usageError(initUsage, fmt.Errorf("--%s must not be empty", flag))
+			cli.UsageError(initUsage, fmt.Errorf("--%s must not be empty", flag))
 		}
 	}
 	dir, err := resolveControlPlaneDir(p.opt("dir", ""))
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	configFile := p.opt("config", filepath.Join(dir, "kurrent.yaml"))
 	if !filepath.IsAbs(configFile) {
 		if configFile, err = filepath.Abs(configFile); err != nil {
-			fatal("resolve --config: %v", err)
+			cli.Fatal("resolve --config: %v", err)
 		}
 	}
 	if err := initRun(initOpts{
@@ -59,7 +63,7 @@ func cmdInit(args []string) {
 		stateDir:   p.opt("state-dir", ""),
 		adoptState: p.bool("adopt-state"),
 	}); err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 }
 
@@ -79,7 +83,7 @@ func resolveControlPlaneDir(explicit string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve --dir: %w", err)
 		}
-		if isDir(filepath.Join(abs, "control_plane")) {
+		if fsx.IsDir(filepath.Join(abs, "control_plane")) {
 			return filepath.Join(abs, "control_plane"), nil
 		}
 		return abs, nil
@@ -94,8 +98,8 @@ func resolveControlPlaneDir(explicit string) (string, error) {
 	if fi, err := os.Stat(filepath.Join(cwd, "config")); err == nil && fi.IsDir() {
 		return cwd, nil // 已位于 control_plane 内
 	}
-	if rec, err := readDeploymentRecord(); err == nil && rec != nil {
-		if isDir(filepath.Join(rec.RepoRoot, "control_plane")) {
+	if rec, err := deploy.ReadDeploymentRecord(); err == nil && rec != nil {
+		if fsx.IsDir(filepath.Join(rec.RepoRoot, "control_plane")) {
 			return filepath.Join(rec.RepoRoot, "control_plane"), nil
 		}
 	}
@@ -107,7 +111,7 @@ func resolveControlPlaneDir(explicit string) (string, error) {
 // 安装凭据与 mTLS 自检 → dnsmasq 起服核验。声明变化失败时回滚旧文件并恢复上一份
 // 声明的运行态；引导失败保留交换包，重跑可续。
 func initRun(o initOpts) error {
-	q, err := resolveDeployment(o.dir, o.stateDir)
+	q, err := deploy.ResolveDeployment(o.dir, o.stateDir)
 	if err != nil {
 		return err
 	}
@@ -124,23 +128,23 @@ func initRun(o initOpts) error {
 		return err
 	}
 
-	legacy := detectLegacyControlPlaneState(q.repoRoot)
-	if err := preflightControlPlane(q, legacy, o.adoptState); err != nil {
+	legacy := deploy.DetectLegacyControlPlaneState(q.RepoRoot)
+	if err := deploy.PreflightControlPlane(q, legacy, o.adoptState); err != nil {
 		return err
 	}
 	if err := rejectUnknownRunningDeployment(q, o.adoptState); err != nil {
 		return err
 	}
 
-	paths := q.controlPlane()
-	project := q.project()
-	env := q.composeEnv()
+	paths := q.ControlPlane()
+	project := q.Project()
+	env := q.ComposeEnv()
 
 	fmt.Println("==> kurrent init: building the validation image (kurrent-control-plane)")
-	if err := composeExec(q.repoRoot, project, env, "build", "kurrent-control-plane"); err != nil {
+	if err := composeExec(q.RepoRoot, project, env, "build", "kurrent-control-plane"); err != nil {
 		return fmt.Errorf("build control-plane image failed: %w", err)
 	}
-	out, err := runConfigTool("kurrent-control-plane", "validate", data)
+	out, err := runConfigTool("kurrent-control-plane", "app.core.config_tool", "validate", data)
 	if err != nil {
 		return fmt.Errorf("%s declaration validation failed (not applied):\n%s", o.configFile, err)
 	}
@@ -151,7 +155,7 @@ func initRun(o initOpts) error {
 	changed := !hadPrevious || !bytes.Equal(previous, data)
 
 	if o.configFile != target {
-		if err := writeFileAtomic(target, data, 0o644); err != nil {
+		if err := fsx.WriteFileAtomic(target, data, 0o644); err != nil {
 			return fmt.Errorf("apply declaration to %s: %w", target, err)
 		}
 		fmt.Printf("==> kurrent init: applied %s -> %s\n", o.configFile, target)
@@ -162,17 +166,17 @@ func initRun(o initOpts) error {
 		notes := []string{}
 		switch {
 		case hadPrevious && changed:
-			if err := writeFileAtomic(target, previous, 0o644); err != nil {
+			if err := fsx.WriteFileAtomic(target, previous, 0o644); err != nil {
 				notes = append(notes, fmt.Sprintf("failed to roll back the previous declaration: %v", err))
 				break
 			}
 			notes = append(notes, fmt.Sprintf("rolled back to the previous declaration (%s)", target))
-			if err := composeExec(q.repoRoot, project, env, "restart", "kurrent-control-plane"); err != nil {
+			if err := composeExec(q.RepoRoot, project, env, "restart", "kurrent-control-plane"); err != nil {
 				notes = append(notes, fmt.Sprintf("failed to restart the control plane after rollback: %v", err))
 			} else if !waitControlPlaneHealthy(rollbackHealthWait) {
 				notes = append(notes, "the control plane still fails the health check after rollback")
 			}
-			if err := composeExec(q.repoRoot, project, env, "restart", "kurrent-dnsmasq"); err != nil {
+			if err := composeExec(q.RepoRoot, project, env, "restart", "kurrent-dnsmasq"); err != nil {
 				notes = append(notes, fmt.Sprintf("failed to restart dnsmasq after rollback: %v", err))
 			}
 		case hadPrevious:
@@ -183,40 +187,40 @@ func initRun(o initOpts) error {
 		return fmt.Errorf("%v\n%s", reason, strings.Join(notes, "\n"))
 	}
 
-	if o.adoptState && legacy.present() {
+	if o.adoptState && legacy.Present() {
 		fmt.Println("==> kurrent init: stopping the legacy stacks (state migration)")
 		stopLegacyDeployment(q)
-		fmt.Printf("==> kurrent init: migrating legacy state into %s\n", q.stateDir)
-		if err := adoptControlPlaneState(q.repoRoot, q); err != nil {
+		fmt.Printf("==> kurrent init: migrating legacy state into %s\n", q.StateDir)
+		if err := deploy.AdoptControlPlaneState(q.RepoRoot, q); err != nil {
 			return fmt.Errorf("migrate legacy state: %w", err)
 		}
-		if storagerDir := filepath.Join(q.repoRoot, "storager"); detectLegacyStorageState(storagerDir).present() {
-			if err := adoptStorageState(storagerDir, q); err != nil {
+		if storagerDir := filepath.Join(q.RepoRoot, "storager"); deploy.DetectLegacyStorageState(storagerDir).Present() {
+			if err := deploy.AdoptStorageState(storagerDir, q); err != nil {
 				return fmt.Errorf("migrate legacy node state: %w", err)
 			}
 		}
 	}
-	if err := prepareControlPlaneState(paths); err != nil {
+	if err := deploy.PrepareControlPlaneState(paths); err != nil {
 		return fmt.Errorf("prepare the state root: %w", err)
 	}
-	if err := writeInitRecord(q, deployStatusBootstrapping); err != nil {
+	if err := writeInitRecord(q, deploy.StatusBootstrapping); err != nil {
 		return err
 	}
-	if err := requestBootstrapExchange(paths.bootstrap); err != nil {
+	if err := creds.RequestBootstrapExchange(paths.Bootstrap); err != nil {
 		return err
 	}
 
-	relocated := q.record != nil && (q.record.RepoRoot != q.repoRoot || q.record.StateDir != q.stateDir)
+	relocated := q.Record != nil && (q.Record.RepoRoot != q.RepoRoot || q.Record.StateDir != q.StateDir)
 	upArgs := []string{"up", "-d"}
-	if relocated || (o.adoptState && legacy.present()) {
+	if relocated || (o.adoptState && legacy.Present()) {
 		upArgs = append(upArgs, "--force-recreate")
 	}
 	fmt.Printf("==> kurrent init: starting the control plane (docker compose -p %s up -d)\n", project)
-	if err := composeExec(q.repoRoot, project, env, upArgs...); err != nil {
+	if err := composeExec(q.RepoRoot, project, env, upArgs...); err != nil {
 		return rollback(err)
 	}
 	fmt.Println("==> kurrent init: restarting kurrent-control-plane (applying the declaration)")
-	if err := composeExec(q.repoRoot, project, env, "restart", "kurrent-control-plane"); err != nil {
+	if err := composeExec(q.RepoRoot, project, env, "restart", "kurrent-control-plane"); err != nil {
 		return rollback(err)
 	}
 	wait := o.healthWait
@@ -230,27 +234,27 @@ func initRun(o initOpts) error {
 			"the control plane did not pass the health check within %s (declaration not applied)\nrecent logs:\n%s", wait, logs))
 	}
 	fmt.Println("==> kurrent init: waiting for the one-shot management credential exchange")
-	if err := waitExchange(paths.bootstrap, bootstrapExchangeTimeout); err != nil {
+	if err := waitExchange(paths.Bootstrap, bootstrapExchangeTimeout); err != nil {
 		logs := containerLogs("kurrent-control-plane", 40)
 		return fmt.Errorf("%v\nrecent logs:\n%s", err, logs)
 	}
-	bundle, err := validateExchangeBundle(paths.bootstrap)
+	bundle, err := creds.ValidateExchangeBundle(paths.Bootstrap)
 	if err != nil {
 		return fmt.Errorf("the exchanged management credentials are unusable: %w", err)
 	}
-	if _, _, err := installCredentialsFrom(bundle.AdminConf, paths.adminConf); err != nil {
+	if _, _, err := installCredentialsFrom(bundle.AdminConf, paths.AdminConf); err != nil {
 		return fmt.Errorf("install management credentials: %w", err)
 	}
 	fmt.Println("==> kurrent init: verifying the installed credentials (mTLS GET /whoami)")
 	if err := verifyInstalledCredentials(managementSelfTestTimeout); err != nil {
 		return err
 	}
-	if err := finishBootstrapExchange(paths.bootstrap); err != nil {
+	if err := creds.FinishBootstrapExchange(paths.Bootstrap); err != nil {
 		return err
 	}
 
 	fmt.Println("==> kurrent init: restarting kurrent-dnsmasq (applying the rendered config)")
-	if err := composeExec(q.repoRoot, project, env, "restart", "kurrent-dnsmasq"); err != nil {
+	if err := composeExec(q.RepoRoot, project, env, "restart", "kurrent-dnsmasq"); err != nil {
 		return rollback(err)
 	}
 	if !waitContainerRunning("kurrent-dnsmasq", dnsmasqStartupWatch) {
@@ -259,30 +263,30 @@ func initRun(o initOpts) error {
 			"dnsmasq did not stay running (dnsmasq.conf may be invalid)\nrecent logs:\n%s", logs))
 	}
 
-	if err := writeInitRecord(q, deployStatusReady); err != nil {
+	if err := writeInitRecord(q, deploy.StatusReady); err != nil {
 		return err
 	}
-	if o.adoptState && legacy.present() {
-		if err := removeLegacyControlPlaneState(q.repoRoot); err != nil {
+	if o.adoptState && legacy.Present() {
+		if err := deploy.RemoveLegacyControlPlaneState(q.RepoRoot); err != nil {
 			return fmt.Errorf("deployment migrated, but removing the legacy state failed: %w", err)
 		}
-		if storagerDir := filepath.Join(q.repoRoot, "storager"); detectLegacyStorageState(storagerDir).present() {
-			if err := removeLegacyStorageState(storagerDir); err != nil {
+		if storagerDir := filepath.Join(q.RepoRoot, "storager"); deploy.DetectLegacyStorageState(storagerDir).Present() {
+			if err := deploy.RemoveLegacyStorageState(storagerDir); err != nil {
 				return fmt.Errorf("deployment migrated, but removing the legacy node state failed: %w", err)
 			}
 		}
 		fmt.Println("==> kurrent init: legacy in-repository state removed")
 	}
 
-	credentialsPath := userCredentialsPath()
+	credentialsPath := fsx.UserCredentialsPath()
 	if credentialsPath == "" {
 		credentialsPath = "(home directory unavailable)"
 	}
 	fmt.Println("==> kurrent init: done. The control plane is running with the declaration:")
-	fmt.Printf("    state root: %s (outside the repository; move the checkout freely)\n", q.stateDir)
-	fmt.Printf("    deployment record: %s (compose project %s)\n", deploymentRecordPath(), project)
+	fmt.Printf("    state root: %s (outside the repository; move the checkout freely)\n", q.StateDir)
+	fmt.Printf("    deployment record: %s (compose project %s)\n", deploy.DeploymentRecordPath(), project)
 	fmt.Printf("    management credentials: %s (mTLS; re-run kurrent init after rotation)\n", credentialsPath)
-	fmt.Printf("    live server-side credential: %s\n", paths.adminConf)
+	fmt.Printf("    live server-side credential: %s\n", paths.AdminConf)
 	fmt.Println("    WebUI: https://<host>/ (the only entry on 443); the management API listens only on a unix socket (no TCP port)")
 	fmt.Println("    inspect: kurrent config status; next: kurrent token create or the WebUI Join Node action")
 	fmt.Println("    manual compose: kurrent deployment show -o env")
@@ -294,43 +298,43 @@ var (
 	bootstrapExchangeTimeout  = 90 * time.Second
 	managementSelfTestTimeout = 30 * time.Second
 	// 变量化供测试注入：真实交换/自检由专门用例覆盖。
-	waitExchange      = waitBootstrapExchange
-	verifyCredentials = managementSelfTest
+	waitExchange      = creds.WaitBootstrapExchange
+	verifyCredentials = creds.ManagementSelfTest
 )
 
 // verifyInstalledCredentials 用 ~/.kurrent 的安装副本做 mTLS 自检（不是交换包里的临时副本）。
 func verifyInstalledCredentials(timeout time.Duration) error {
-	cc := loadCredentialsFile(userCredentialsPath())
+	cc := creds.LoadCredentialsFile(fsx.UserCredentialsPath())
 	if cc == nil {
-		return fmt.Errorf("the installed management credential is missing (%s)", userCredentialsPath())
+		return fmt.Errorf("the installed management credential is missing (%s)", fsx.UserCredentialsPath())
 	}
-	if err := verifyCredentials(cc.server, cc.caFile, cc.certFile, cc.keyFile, timeout); err != nil {
+	if err := verifyCredentials(cc.Server, cc.CAFile, cc.CertFile, cc.KeyFile, timeout); err != nil {
 		return fmt.Errorf("%v\n  the credential snapshot is kept at %s; fix the control plane, then rerun kurrent init (the exchange is resumable)",
-			err, userCredentialsPath())
+			err, fsx.UserCredentialsPath())
 	}
 	return nil
 }
 
 // writeInitRecord 写入/更新部署记录；storage 角色沿用已有记录（join 负责维护）。
-func writeInitRecord(q deployQuery, status string) error {
-	rec := deploymentRecord{
-		Project:        q.project(),
-		StorageProject: q.storageProject(),
-		RepoRoot:       q.repoRoot,
-		StateDir:       q.stateDir,
-		Roles:          deploymentRoles{ControlPlane: true},
+func writeInitRecord(q deploy.DeployQuery, status string) error {
+	rec := deploy.DeploymentRecord{
+		Project:        q.Project(),
+		StorageProject: q.StorageProject(),
+		RepoRoot:       q.RepoRoot,
+		StateDir:       q.StateDir,
+		Roles:          deploy.DeploymentRoles{ControlPlane: true},
 		Status:         status,
 	}
-	if q.record != nil {
-		rec.Roles.Storage = q.record.Roles.Storage
+	if q.Record != nil {
+		rec.Roles.Storage = q.Record.Roles.Storage
 	}
-	return writeDeploymentRecord(&rec)
+	return deploy.WriteDeploymentRecord(&rec)
 }
 
 // rejectUnknownRunningDeployment 无部署记录但已有同名容器时拒绝：旧部署必须先迁移，
 // 否则 compose 会因固定 container_name 冲突而失败（且状态位置无人知晓）。
-func rejectUnknownRunningDeployment(q deployQuery, adopt bool) error {
-	if adopt || q.record != nil {
+func rejectUnknownRunningDeployment(q deploy.DeployQuery, adopt bool) error {
+	if adopt || q.Record != nil {
 		return nil
 	}
 	out, err := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}").Output()
@@ -356,18 +360,18 @@ func rejectUnknownRunningDeployment(q deployQuery, adopt bool) error {
 
 // stopLegacyDeployment 尽力停止旧项目（仓库 basename / nvmeof / iscsi）与新固定项目：
 // 固定 container_name 下，旧容器不清掉就无法以新项目名重建。
-func stopLegacyDeployment(q deployQuery) {
-	nodeEnv := q.nodeComposeEnv("unknown", q.repoRoot, q.storager("unknown").cpCA)
+func stopLegacyDeployment(q deploy.DeployQuery) {
+	nodeEnv := q.NodeComposeEnv("unknown", q.RepoRoot, q.Storager("unknown").CPCA)
 	projects := []struct {
 		dir, project string
 		env          []string
 	}{
-		{q.repoRoot, normalizeComposeProject(filepath.Base(q.repoRoot)), q.composeEnv()},
-		{filepath.Join(q.repoRoot, "storager", "nvmeof"), "nvmeof", nodeEnv},
-		{filepath.Join(q.repoRoot, "storager", "iscsi"), "iscsi", nodeEnv},
-		{q.repoRoot, q.project(), q.composeEnv()},
-		{filepath.Join(q.repoRoot, "storager", "nvmeof"), q.storageProject(), nodeEnv},
-		{filepath.Join(q.repoRoot, "storager", "iscsi"), q.storageProject(), nodeEnv},
+		{q.RepoRoot, deploy.NormalizeComposeProject(filepath.Base(q.RepoRoot)), q.ComposeEnv()},
+		{filepath.Join(q.RepoRoot, "storager", "nvmeof"), "nvmeof", nodeEnv},
+		{filepath.Join(q.RepoRoot, "storager", "iscsi"), "iscsi", nodeEnv},
+		{q.RepoRoot, q.Project(), q.ComposeEnv()},
+		{filepath.Join(q.RepoRoot, "storager", "nvmeof"), q.StorageProject(), nodeEnv},
+		{filepath.Join(q.RepoRoot, "storager", "iscsi"), q.StorageProject(), nodeEnv},
 	}
 	seen := map[string]bool{}
 	for _, p := range projects {

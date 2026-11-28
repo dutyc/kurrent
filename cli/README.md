@@ -44,7 +44,7 @@ kurrent agents list          # 部署记录指向的 <state>/control-plane/state
 kurrent credentials install  # 凭据轮换后刷新快照（自包含，可整包拷走）
 kurrent agents list          # 任意目录可用
 
-# 方式二：显式指定管理凭据文件或管理 token（也是环境变量兜底项）
+# 方式二：显式指定管理凭据文件或管理 token（也是环境变量回退项）
 export KURRENT_CREDENTIALS=/path/to/admin.conf  # 省略时按部署记录/自动发现顺序定位
 export KURRENT_CP_URL=https://<host>/api/cp     # 无管理凭据时须显式指定（配合 token）
 export KURRENT_CP_TOKEN=<admin-token>           # kurrent token create --usage admin
@@ -249,7 +249,7 @@ $EDITOR control_plane/kurrent.yaml
 - 管理 token 用 `--scope`（`admin` 默认 / `readonly` 只读 / `enroll` 仅签发引导 token）与 `--ttl`（默认 24h；上限由控制面 `tokenMaxTtlHours` 决定，默认 720h）收窄权限与寿命；台账记录 `last_used_at`，列表与 WebUI 可对照使用情况
 - `nvmet-host` 组件凭据**不手工签发**：agent enroll 上报 `backend=nvmet` 时控制面派生随响应下发，agent 落盘节点状态根下的 `storager/bootstrap/nvmet-host.token` 供其引导（能力上报驱动，签发不预知后端）
 - nvmet 后端 join 在 agent 收敛启动后等待上述派生凭据重新写出（默认 60 秒），再自动重启 `nvmet-host`。组件证书被吊销后，签发新 bootstrap token（`kurrent token create` 或 WebUI「证书」→「恢复」）并重跑 join 即完成恢复——旧证书无需手工删除
-- nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）、configfs 挂载与 tlshd 版本——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`）；只读诊断用 `kurrent host check --role storage`；声明 `spec.agent.diskDir` 盘目录 join 自动创建兜底
+- nvmet 后端节点**宿主前置**：内核 nvmet target 无法容器化（4421 数据面在宿主），`kurrent join` 预检内核模块（nvmet / nvmet-tcp）、configfs 挂载与 tlshd 版本——未就绪即报错并指路 `sudo bash storager/nvmeof/host-prepare.sh`（幂等，含重启持久化：模块写 `/etc/modules-load.d`、configfs 写 `/etc/fstab`）；只读诊断用 `kurrent host check --role storage`；声明 `spec.agent.diskDir` 盘目录 join 自动创建
 - enroll 自动登记时携带 `base_url`（声明 `spec.agent.advertiseUrl`，默认推导 `https://<cp-host>:4840`）与能力标签；昵称不随引导写入，注册后在 WebUI 或 `agents edit` 设置；特殊场景（NAT 等）编辑声明覆盖
 
 ## 宿主检查

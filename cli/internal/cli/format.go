@@ -1,20 +1,20 @@
 // 表格输出的共享取值与占位符。
-package main
+package cli
 
 import (
 	"encoding/json"
 	"strconv"
 )
 
-// dash 空值显示占位符（表格对齐）。
-func dash(s string) string {
+// Dash 空值显示占位符（表格对齐）。
+func Dash(s string) string {
 	if s == "" {
 		return "—"
 	}
 	return s
 }
 
-func strOf(v any) string {
+func StrOf(v any) string {
 	switch t := v.(type) {
 	case nil:
 		return ""

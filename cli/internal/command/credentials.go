@@ -5,12 +5,16 @@
 // 供二进制脱离仓库使用（PATH 安装 / 异地执行），并可整包拷走。
 // 快照是复制而非跟随——凭据轮换后重跑 install 刷新，是否陈旧看 show 的 installed-at。
 // show 查看当前生效凭据与快照状态；remove 只删快照，仓库源与已签发 token 不受影响。
-package main
+package command
 
 import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"kurrent/cli/internal/cli"
+	"kurrent/cli/internal/creds"
+	"kurrent/cli/internal/fsx"
+	"kurrent/cli/internal/validate"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +41,7 @@ func cmdCredentials(args []string) {
 	case "remove":
 		credentialsRemove(args[1:])
 	default:
-		usageError(credentialsGroupUsage, fmt.Errorf("unknown credentials subcommand: %s", args[0]))
+		cli.UsageError(credentialsGroupUsage, fmt.Errorf("unknown credentials subcommand: %s", args[0]))
 	}
 }
 
@@ -45,9 +49,9 @@ func credentialsInstall(args []string) {
 	if _, help := mustParse(args, credentialsInstallSpec); help {
 		return
 	}
-	target, source, err := installCredentialsFrom(discoverCredentials(), "")
+	target, source, err := installCredentialsFrom(creds.DiscoverCredentials(), "")
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	fmt.Printf("management credentials installed: %s (source: %s)\n", target, source)
 	fmt.Printf("  certificate copies: %s (self-contained; the whole directory can be copied to another machine)\n", filepath.Join(filepath.Dir(target), "pki"))
@@ -60,7 +64,7 @@ func credentialsShow(args []string) {
 	}
 	out, err := credentialsShowText()
 	if err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	fmt.Print(out)
 }
@@ -70,7 +74,7 @@ func credentialsRemove(args []string) {
 		return
 	}
 	if err := removeCredentials(); err != nil {
-		fatal("%v", err)
+		cli.Fatal("%v", err)
 	}
 	fmt.Println("user-level management credentials removed (repository credentials and issued --token values are unaffected)")
 }
@@ -89,7 +93,7 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 	if abs, err := filepath.Abs(source); err == nil {
 		source = abs
 	}
-	target = userCredentialsPath()
+	target = fsx.UserCredentialsPath()
 	if target == "" {
 		return "", "", fmt.Errorf("cannot determine the user home directory (install target ~/.kurrent)")
 	}
@@ -100,14 +104,14 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 	if err != nil {
 		return "", "", fmt.Errorf("read management credentials %s: %w", source, err)
 	}
-	var cf credentialsFile
+	var cf creds.CredentialsFile
 	if err := yaml.Unmarshal(data, &cf); err != nil {
 		return "", "", fmt.Errorf("parse management credentials %s: %w", source, err)
 	}
 	if cf.Server == "" || cf.ClientCert == "" || cf.ClientKey == "" {
 		return "", "", fmt.Errorf("management credentials %s are missing server/client-certificate/client-key", source)
 	}
-	if _, err := validateHTTPURL("management credential server", cf.Server); err != nil {
+	if _, err := validate.ValidateHTTPURL("management credential server", cf.Server); err != nil {
 		return "", "", fmt.Errorf("%s: %w", source, err)
 	}
 
@@ -167,7 +171,7 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 		}
 		seen[base] = sp
 		rel := filepath.Join("pki", base)
-		if err := writeFileAtomic(filepath.Join(dir, rel), pem, 0o600); err != nil {
+		if err := fsx.WriteFileAtomic(filepath.Join(dir, rel), pem, 0o600); err != nil {
 			return "", "", fmt.Errorf("write certificate snapshot: %w", err)
 		}
 		installed[k.key] = rel
@@ -177,7 +181,7 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 	if origin == "" {
 		origin = source
 	}
-	out := credentialsFile{
+	out := creds.CredentialsFile{
 		Server:        cf.Server,
 		CA:            installed["certificate-authority"],
 		ClientCert:    installed["client-certificate"],
@@ -190,7 +194,7 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 		return "", "", fmt.Errorf("serialize snapshot admin.conf: %w", err)
 	}
 	header := "# kurrent user-level management credential snapshot (created by kurrent credentials install; re-run after rotation)\n"
-	if err := writeFileAtomic(target, append([]byte(header), body...), 0o600); err != nil {
+	if err := fsx.WriteFileAtomic(target, append([]byte(header), body...), 0o600); err != nil {
 		return "", "", fmt.Errorf("write snapshot %s: %w", target, err)
 	}
 	return target, source, nil
@@ -200,7 +204,7 @@ func installCredentialsFrom(source, provenance string) (target, src string, err 
 // 未发现凭据不视为错误——show 的职责是如实汇报发现链结果）。
 func credentialsShowText() (string, error) {
 	var b strings.Builder
-	path := discoverCredentials()
+	path := creds.DiscoverCredentials()
 	if path == "" {
 		b.WriteString("active management credentials: not found (requests use the credential-less --server/--token channel)\n")
 		b.WriteString("  install: kurrent credentials install (run in the repository; afterwards works from any directory)\n")
@@ -210,7 +214,7 @@ func credentialsShowText() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read management credentials %s: %w", path, err)
 		}
-		var cf credentialsFile
+		var cf creds.CredentialsFile
 		if err := yaml.Unmarshal(data, &cf); err != nil {
 			return "", fmt.Errorf("parse management credentials %s: %w", path, err)
 		}
@@ -229,7 +233,7 @@ func credentialsShowText() (string, error) {
 				abs = filepath.Join(dir, abs)
 			}
 			mark := "present"
-			if !fileExists(abs) {
+			if !fsx.FileExists(abs) {
 				mark = "missing"
 			}
 			fmt.Fprintf(&b, "  %s: %s (%s)\n", k.label, abs, mark)
@@ -238,8 +242,8 @@ func credentialsShowText() (string, error) {
 			fmt.Fprintf(&b, "  installed-from: %s\n  installed-at: %s\n", cf.InstalledFrom, cf.InstalledAt)
 		}
 	}
-	if up := userCredentialsPath(); up != "" && up != path {
-		if fileExists(up) {
+	if up := fsx.UserCredentialsPath(); up != "" && up != path {
+		if fsx.FileExists(up) {
 			fmt.Fprintf(&b, "user-level snapshot: %s (installed; the repository source takes precedence when present)\n", up)
 		} else {
 			b.WriteString("user-level snapshot: not installed (run kurrent credentials install to work from any directory)\n")
@@ -250,13 +254,13 @@ func credentialsShowText() (string, error) {
 
 // describeCredentialsSource 说明生效凭据来自发现链的哪一层（show 输出用）。
 func describeCredentialsSource(path string) string {
-	if flagCredentials != "" {
+	if cli.Credentials != "" {
 		return "specified by --credentials / KURRENT_CREDENTIALS"
 	}
-	if recordCredentialsPath() == path {
+	if creds.RecordCredentialsPath() == path {
 		return "deployment record (live control-plane admin.conf)"
 	}
-	if userCredentialsPath() == path {
+	if fsx.UserCredentialsPath() == path {
 		return "user-level snapshot installed by kurrent init"
 	}
 	return "auto-discovered via repository walk-up or next to the executable"
@@ -264,11 +268,11 @@ func describeCredentialsSource(path string) string {
 
 // removeCredentials 删除用户级快照（admin.conf 与 pki/）；仓库内凭据与 --token 不受影响。
 func removeCredentials() error {
-	target := userCredentialsPath()
+	target := fsx.UserCredentialsPath()
 	if target == "" {
 		return fmt.Errorf("cannot determine the user home directory (~/.kurrent)")
 	}
-	if !fileExists(target) {
+	if !fsx.FileExists(target) {
 		return fmt.Errorf("user-level management credentials are not installed (%s does not exist)", target)
 	}
 	dir := filepath.Dir(target)
@@ -279,36 +283,5 @@ func removeCredentials() error {
 		return fmt.Errorf("delete %s: %w", filepath.Join(dir, "pki"), err)
 	}
 	os.Remove(dir) // 余物为空才删除；用户另放文件则保留目录
-	return nil
-}
-
-// writeFileAtomic 同目录临时文件 + rename（防半写；文件含私钥/密钥时权限恒为 perm）。
-// CreateTemp 生成唯一临时名：并发 install/join 不会互相覆盖，也不会跟随预置的 .tmp 路径。
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if tmp != "" {
-			os.Remove(tmp)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	tmp = ""
 	return nil
 }

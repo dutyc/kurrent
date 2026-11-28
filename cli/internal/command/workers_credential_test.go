@@ -1,4 +1,4 @@
-package main
+package command
 
 import (
 	"encoding/base64"
@@ -15,7 +15,7 @@ func TestValidateSecretInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, err := validateSecretInput(valid + "\n"); err != nil || got != valid {
-		t.Fatalf("合法密钥应通过: got=%q err=%v", got, err)
+		t.Fatalf("a valid secret must pass: got=%q err=%v", got, err)
 	}
 
 	parts := strings.SplitN(valid, ":", 3)
@@ -50,27 +50,27 @@ func TestValidateSecretInput(t *testing.T) {
 func TestGenerateDHHC1(t *testing.T) {
 	secret, err := generateDHHC1()
 	if err != nil {
-		t.Fatalf("生成密钥: %v", err)
+		t.Fatalf("generate key: %v", err)
 	}
 	if !strings.HasPrefix(secret, "DHHC-1:01:") {
-		t.Fatalf("前缀/类型不符: %q", secret)
+		t.Fatalf("unexpected prefix/type: %q", secret)
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "DHHC-1:01:"))
 	if err != nil {
-		t.Fatalf("base64 解码: %v", err)
+		t.Fatalf("base64 decode: %v", err)
 	}
 	if len(raw) != 36 {
-		t.Fatalf("载荷 %d 字节，want 36（32 密钥 + 4 CRC）", len(raw))
+		t.Fatalf("payload is %d bytes, want 36 (32 key + 4 CRC)", len(raw))
 	}
 	key, crc := raw[:32], raw[32:]
 	if got := crc32.ChecksumIEEE(key); got != binary.LittleEndian.Uint32(crc) {
-		t.Fatalf("CRC32 非小端终值: got %x want %x", binary.LittleEndian.Uint32(crc), got)
+		t.Fatalf("CRC32 little-endian final value mismatch: got %x want %x", binary.LittleEndian.Uint32(crc), got)
 	}
 	other, err := generateDHHC1()
 	if err != nil {
-		t.Fatalf("再次生成: %v", err)
+		t.Fatalf("generate again: %v", err)
 	}
 	if secret == other {
-		t.Fatal("两次生成密钥相同（随机源异常）")
+		t.Fatal("two generated secrets are identical (broken randomness)")
 	}
 }
