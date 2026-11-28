@@ -189,8 +189,8 @@ class NvmePskKeyring:
                 return serial
         raise RuntimeError(
             f"kernel keyring '{self.keyring_name}' not found in {self.keys_file}"
-            "（宿主需 nvme-keyring 模块——随 nvmet-tcp 自动加载；"
-            "容器需 security_opt systempaths=unconfined 才能读 /proc/keys）")
+            " (the host needs the nvme-keyring module, loaded automatically with nvmet-tcp; "
+            "the container needs security_opt systempaths=unconfined to read /proc/keys)")
 
     def _linked_serials(self, keyring: int) -> list[int]:
         """KEYCTL_READ 一个 keyring → 其中挂载的 key serial（每项 4 字节小端）。
@@ -355,7 +355,7 @@ class NvmetManager:
         try:
             self.keyring.delete_keys_for_subsystem(nqn)
         except (OSError, RuntimeError) as exc:
-            # 子系统仍须删除；key 残留由启动 GC 兜底，不能因 keyring 异常卡住盘删除
+            # 子系统仍须删除；key 残留由启动 GC 清理，不能因 keyring 异常卡住盘删除
             log.warning(f"tls key cleanup failed for {nqn}: {exc}")
         self.detach_port(nqn)
         ns_base = os.path.join(sub, "namespaces")
@@ -457,7 +457,7 @@ class NvmetManager:
         try:
             os.rmdir(host_dir)
         except OSError as exc:
-            # 竞态兜底：扫描与删除之间若出现新链接（EBUSY）；未引用的残留条目本身无效果
+            # 竞态处理：扫描与删除之间若出现新链接（EBUSY）；未引用的残留条目本身无效果
             log.warning("host gc skipped (%s): %s", hostnqn, exc)
 
     def _host_referenced(self, hostnqn: str) -> bool:
@@ -504,7 +504,7 @@ class NvmetManager:
 
         未配置（空 port id）时为 no-op 且不置位——控制面据此拒绝引导。"""
         if not self.tls_enabled:
-            return {"enabled": False, "reason": "NVMET_TLS_PORT_ID 为空"}
+            return {"enabled": False, "reason": "NVMET_TLS_PORT_ID is empty"}
         info = self.ensure_port(tsas="tls1.3", port_id=self.tls_port_id,
                                 trsvcid=self.tls_trsvcid)
         self.tls_ready = True
@@ -555,7 +555,7 @@ class NvmetManager:
     def set_tls_key(self, hostnqn: str, nqn: str, psk: bytes) -> int:
         """登记目标端 PSK（= 该 hostnqn 连该子系统的凭据），返回 key serial。"""
         if not self.tls_enabled:
-            raise ValueError("TLS port disabled (NVMET_TLS_PORT_ID 为空)")
+            raise ValueError("TLS port disabled (NVMET_TLS_PORT_ID is empty)")
         hostnqn = _safe_nqn(hostnqn, "hostnqn")
         nqn = _safe_nqn(nqn)
         return self.keyring.set_key(hostnqn, nqn, psk)
@@ -810,28 +810,28 @@ if __name__ == "__main__":
     try:
         info = manager.ensure_tls_port()
         if info.get("enabled"):
-            log.info("数据面端口就绪: %s (tsas=tls1.3)", info)
+            log.info("data-plane port ready: %s (tsas=tls1.3)", info)
     except OSError as exc:
         # 创建失败不阻断管理面：tls_ready 保持 false，/capabilities 如实上报，
         # 控制面据此拒绝引导（默认全链路加密，不做明文降级）
         manager.tls_ready = False
-        log.error("数据面端口创建失败，控制面将拒绝引导本节点的盘: %s"
-                  "（宿主需 nvmet 模块 + nvme-keyring，后者随 nvmet-tcp 自动加载）", exc)
+        log.error("failed to create the data-plane port; the control plane will refuse to boot disks from this node: %s"
+                  " (the host needs the nvmet module and nvme-keyring; the latter loads with nvmet-tcp)", exc)
     # 启动 GC：删除已无子系统的 psk key（删盘/崩溃窗口的残留），避免吊销后旧 key 仍可握手
     try:
         orphans = manager.gc_orphan_tls_keys()
         if orphans:
-            log.warning("已清理孤儿 TLS key: %s", ", ".join(f"{h} -> {n}" for h, n in orphans))
+            log.warning("removed orphan TLS keys: %s", ", ".join(f"{h} -> {n}" for h, n in orphans))
     except (OSError, RuntimeError) as exc:
-        log.error("孤儿 TLS key 清理失败（不影响管理面）: %s", exc)
+        log.error("failed to clean up orphan TLS keys (the management plane is unaffected): %s", exc)
     # 迁移：拆除历史明文口（4420），使升级后的宿主收敛到单口
     try:
         removed = manager.remove_legacy_plain_port()
         if removed:
-            log.warning("已拆除历史明文数据面端口 ports/%s (trsvcid=%s)",
+            log.warning("removed the legacy plaintext data-plane port ports/%s (trsvcid=%s)",
                         removed, LEGACY_PLAIN_TRSVCID)
     except OSError as exc:
-        log.error("历史明文口拆除失败（手工处理: 摘 ports/%s/subsystems/* 后 rmdir）: %s",
+        log.error("failed to remove the legacy plaintext port (manual fix: detach ports/%s/subsystems/* then rmdir): %s",
                   LEGACY_PLAIN_PORT_ID, exc)
     # mTLS：serving cert + nodes CA 校验客户端证书链（CERT_REQUIRED；只信同伴组件）；
     # issuer/CN 与 nodes CRL 在应用层校验（可热更新，见 security.py）

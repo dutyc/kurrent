@@ -7,13 +7,8 @@ import zlib
 
 import pytest
 
-from control_plane.app.config import settings
-from control_plane.app.routers.workers import (
-    _derive_tls_psk,
-    _generate_dhhc1,
-    _secret_hash,
-    _validate_dhhc1,
-)
+from control_plane.app.core.config import settings
+from control_plane.app.fleet.credentials import _derive_tls_psk, _generate_dhhc1, _secret_hash, _validate_dhhc1
 
 MAC_A = "00:11:22:33:44:55"
 
@@ -373,8 +368,8 @@ def test_boot_vars_invalid_backend_is_not_stgt(
 
 def test_backend_for_unregistered_agent_returns_none(monkeypatch, caplog):
     """未登记 Agent 同样属于后端未知，返回 None 而不是 stgt。"""
-    from control_plane.app.routers.boot import _backend_for
-    from control_plane.app.stores import agents
+    from control_plane.app.boot.routes import _backend_for
+    from control_plane.app.core.stores import agents
 
     def missing(_agent_id):
         raise KeyError(_agent_id)

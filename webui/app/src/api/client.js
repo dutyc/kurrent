@@ -37,7 +37,7 @@ export function extractDetail(payload) {
     }
   }
   try {
-    // 无已知字段的非标准响应体：原样 JSON（空对象除外，交由调用侧落 HTTP 状态兜底）
+    // 无已知字段的非标准响应体：原样 JSON（空对象除外，交由调用侧回退到 HTTP 状态）
     const text = JSON.stringify(payload);
     return text && text !== '{}' ? text : '';
   } catch {

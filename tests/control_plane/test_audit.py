@@ -5,8 +5,9 @@ import json
 import pytest
 import yaml
 
-from control_plane.app import audit, pki
-from control_plane.app.config import settings
+from control_plane.app.auth import audit
+from control_plane.app import pki
+from control_plane.app.core.config import settings
 
 
 def _events() -> list[dict]:
@@ -170,7 +171,7 @@ def test_boot_injected_unverified_alarms():
 
 def test_pki_lifecycle_alarms(client, monkeypatch):
     """管理员证书签发 / CA 生成（启动时）与 CRL 更新（吊销时）都留告警。"""
-    from control_plane.app.routers import certs as certs_mod
+    from control_plane.app.pki import routes as certs_mod
     monkeypatch.setattr(certs_mod, "reload_nginx", lambda: {"status": "ok"})
     assert _alarms("ca_generated")
     assert _alarms("admin_cert_issued")

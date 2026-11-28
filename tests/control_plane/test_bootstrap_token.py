@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from control_plane.app import pki
-from control_plane.app.config import settings
+from control_plane.app.core.config import settings
 
 
 def _issue(**kw) -> str:

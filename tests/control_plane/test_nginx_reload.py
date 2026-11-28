@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from control_plane.app import nginx_reload
+from control_plane.app.boot import nginx_reload
 
 
 @pytest.fixture()

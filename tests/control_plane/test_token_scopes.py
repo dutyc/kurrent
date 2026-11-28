@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from control_plane.app import pki
-from control_plane.app.config import settings
+from control_plane.app.core.config import settings
 
 ADMIN_DN = "/CN=admin/O=admin"
 TEST_MAC = "00:11:22:33:44:ab"

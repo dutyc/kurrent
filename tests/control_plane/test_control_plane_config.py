@@ -6,8 +6,8 @@ dnsmasq.conf 渲染（subnet CIDR → netmask 推导）与幂等写。
 
 import pytest
 
-from control_plane.app.config import ControlPlaneConfiguration, load_config
-from control_plane.app.dnsmasq_conf import ensure_dnsmasq_conf, render_dnsmasq_conf
+from control_plane.app.core.config import ControlPlaneConfiguration, load_config
+from control_plane.app.boot.conf import ensure_dnsmasq_conf, render_dnsmasq_conf
 
 MINIMAL = """apiVersion: kurrent.io/v1
 kind: ControlPlaneConfiguration
@@ -133,7 +133,7 @@ def test_render_netmask_derivation_for_16():
 
 
 def test_ensure_dnsmasq_conf_idempotent(tmp_path, monkeypatch):
-    from control_plane.app import config as cfg
+    from control_plane.app.core import config as cfg
 
     class _Net:
         interface = "eth-test0"
@@ -217,7 +217,7 @@ def test_rotation_hours_upper_bound(tmp_path):
 
 
 def test_config_hash_is_stable_and_sensitive(tmp_path):
-    from control_plane.app.config_schema import config_hash
+    from control_plane.app.core.config_schema import config_hash
 
     first = _load(tmp_path, MINIMAL)
     again = _load(tmp_path, MINIMAL)
@@ -227,7 +227,7 @@ def test_config_hash_is_stable_and_sensitive(tmp_path):
 
 
 def test_settings_reflect_declaration(tmp_path, monkeypatch):
-    from control_plane.app import config as cfg
+    from control_plane.app.core import config as cfg
 
     body = MINIMAL + '''  auth:
     sessionTtlHours: 2

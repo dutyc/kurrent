@@ -11,7 +11,7 @@ services:
   #   build:
   #     context: ./stgt
   #     dockerfile: Dockerfile
-  #   image: ipxe-stgt
+  #   image: kurrent-stgt
   #   container_name: storager-iscsi
   #   restart: unless-stopped
   #   network_mode: host
@@ -27,7 +27,7 @@ services:
     build:
       context: ./lio
       dockerfile: Dockerfile
-    image: ipxe-lio
+    image: kurrent-lio
     container_name: storager-iscsi
     restart: unless-stopped
     network_mode: host
@@ -47,7 +47,7 @@ services:
         dbus-uuidgen --ensure || true      # 补 machine-id，
         dbus-daemon --system --fork        # 起总线
         targetclid                         # 起管理守
-        sleep infinity                     # 兜底占住前台
+        sleep infinity                     # 占住前台
 
   # ── 存储节点 Agent（控制面数据面接口）──
   # 经 docker.sock 调度 storager-iscsi 容器；配置来源：../kurrent.yaml（kurrent join 生成/更新）

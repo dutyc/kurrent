@@ -23,6 +23,8 @@ jobs:
           cache: pip
           cache-dependency-path: |
             control_plane/requirements.txt
+            storager/agent/requirements.txt
+            storager/nvmeof/nvmet-host/requirements.txt
             tests/requirements.txt
       - run: pip install -r tests/requirements.txt
       - run: python -m pytest tests/ -q
@@ -55,3 +57,14 @@ jobs:
         working-directory: webui/app
       - run: npm run build
         working-directory: webui/app
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run docs:build

@@ -7,9 +7,9 @@ import zlib
 
 import yaml
 
-from control_plane.app.agent_client import AgentAPIError
-from control_plane.app.config import settings
-from control_plane.app.routers.workers import reconcile_credentials_once
+from control_plane.app.fleet.client import AgentAPIError
+from control_plane.app.core.config import settings
+from control_plane.app.fleet.credentials import reconcile_credentials_once
 
 
 def make_secret(key: bytes = b"0123456789abcdef0123456789abcdef") -> str:
@@ -154,7 +154,7 @@ def test_reconcile_key_check_uses_agent_config(client, auth_headers, mock_agent_
                      json={"secret": make_secret()}, headers=auth_headers)
     assert res.json()["push"]["result"] == "ok"
 
-    from control_plane.app.stores import agents
+    from control_plane.app.core.stores import agents
 
     seen = []
 
@@ -191,7 +191,7 @@ def test_generation_advances_and_stale_result_ignored(client, auth_headers, mock
     assert data["generations"]["worker-01"] >= 2
     assert seen[0] < seen[1]
 
-    from control_plane.app.routers import workers as wmod
+    from control_plane.app.fleet import credentials as wmod
     # 迟到的旧结果：不应把台账覆盖回 ok/旧 generation
     with wmod.credential_pushes.locked():
         before = wmod.credential_pushes.load()["pushes"]["worker-01/a1b2c3d4e5f6"]

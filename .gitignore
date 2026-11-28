@@ -3,7 +3,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-app/node_modules
 .npm-cache/
 
 # 本地资料（设计蓝图、审计报告、个人交付物、旧文档快照、上游参考源码）
@@ -20,8 +19,6 @@ __pycache__/
 # VitePress 构建产物
 docs/.vitepress/cache/
 docs/.vitepress/dist/
-webui/app/node_modules
-
 # WebUI 构建产物（vite build 生成，不入库）
 webui/app/dist/
 

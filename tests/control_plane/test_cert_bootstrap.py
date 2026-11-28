@@ -11,9 +11,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
-from control_plane.app.cert_bootstrap import (DEFAULT_CN, METADATA_FILENAME,
-                                              ensure_server_cert,
-                                              inspect_server_cert, parse_san)
+from control_plane.app.auth.cert_bootstrap import DEFAULT_CN, METADATA_FILENAME, ensure_server_cert, inspect_server_cert, parse_san
 
 
 def _load_cert(cert_dir: Path) -> x509.Certificate:

@@ -99,10 +99,10 @@ def test_identity_headers_default_to_none_and_opt_in():
 
     for path, body in proxying.items():
         includes = re.findall(r"include\s+snippets/proxy-identity-(\w+)\.conf;", body)
-        assert len(includes) == 1, f"{path} 必须恰好 include 一个身份头片段，实际 {includes}"
+        assert len(includes) == 1, f"{path} must include exactly one identity snippet, got {includes}"
         expected = ("client" if path in
                     {"/api/cp/", "/api/cp/enroll/renew", "/api/cp/enroll/crl"} else "none")
-        assert includes[0] == expected, f"{path} 身份头片段应为 {expected}"
+        assert includes[0] == expected, f"{path} identity snippet should be {expected}"
 
     # 客户端自带头不得被原样转发：none 片段必须清空全部五个头
     none = (SNIPPETS / "proxy-identity-none.conf").read_text(encoding="utf-8")

@@ -13,10 +13,12 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from fastapi import HTTPException
 
-from control_plane.app import maintenance, pki, sessions
-from control_plane.app.auth import Identity
-from control_plane.app.config import settings
-from control_plane.app.routers import certs as certs_mod
+from control_plane.app.core import maintenance
+from control_plane.app import pki
+from control_plane.app.auth import sessions
+from control_plane.app.auth.auth import Identity
+from control_plane.app.core.config import settings
+from control_plane.app.pki import routes as certs_mod
 
 
 @pytest.fixture(autouse=True)

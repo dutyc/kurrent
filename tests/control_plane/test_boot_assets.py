@@ -4,7 +4,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from control_plane.app import boot_assets, boot_pki, config
+from control_plane.app.boot import assets as boot_assets
+from control_plane.app.pki import boot as boot_pki
+from control_plane.app.core import config
 
 DNSMASQ = """\
 dhcp-match=set:efi64,option:client-arch,7
@@ -295,7 +297,7 @@ def test_secureboot_status_requires_matching_boot_port(tmp_path):
     assert data["manifest_matches"] is True
     assert data["boot_ca_matches"] is True
     assert data["port_matches"] is False
-    assert data["boot_https_port"] == 8443  # 展示固件里烘进去的端口，不是部署端口
+    assert data["boot_https_port"] == 8443  # 展示固件里内嵌去的端口，不是部署端口
     assert data["status"] == "incomplete"
 
     # manifest 端口写成字符串也要能判定一致（构建脚本以外的人工编辑）

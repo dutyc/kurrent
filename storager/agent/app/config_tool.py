@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.config_tool")
     parser.add_argument("cmd", choices=("validate", "show"))
     parser.add_argument("--file", "-f", default="-",
-                        help="配置路径（默认 stdin）")
+                        help="configuration path (default: stdin)")
     args = parser.parse_args(argv)
     return run(args.cmd, _read(args.file))
 

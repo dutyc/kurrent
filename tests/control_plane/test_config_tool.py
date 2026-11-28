@@ -2,7 +2,9 @@
 
 import yaml
 
-from control_plane.app import config, config_tool, runtime_status
+from control_plane.app.core import config
+from control_plane.app.core import config_tool
+from control_plane.app.core import runtime_status
 
 
 MINIMAL = """apiVersion: kurrent.io/v1
@@ -81,7 +83,7 @@ def test_config_status_surfaces_dnsmasq_conf_mismatch(client, auth_headers, tmp_
 
 def test_startup_errors_degrade_health_but_detail_stays_authenticated(client, auth_headers):
     runtime_status.reset()
-    runtime_status.record_error("dnsmasq.conf 生成失败", RuntimeError("read-only"))
+    runtime_status.record_error("failed to render dnsmasq.conf", RuntimeError("read-only"))
     try:
         assert client.get("/healthz").status_code == 503
         body = client.get("/config", headers=auth_headers).json()

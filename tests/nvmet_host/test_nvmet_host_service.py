@@ -300,7 +300,7 @@ def test_set_host_auth(client, configfs, symlinks):
     res = client.put(f"/subsystems/{NQN}/hosts",
                      json={"hostnqn": HOST_NQN, "secret": SECRET})
     assert res.status_code == 200
-    # set_host 兜底切严格模式：allow_any_host=1 时内核拒绝 link 显式 host（-EINVAL）
+    # set_host 回退切严格模式：allow_any_host=1 时内核拒绝 link 显式 host（-EINVAL）
     assert (configfs / "subsystems" / NQN / "attr_allow_any_host").read_text().strip() == "0"
     host_dir = configfs / "hosts" / HOST_NQN
     assert (host_dir / "dhchap_key").read_text() == SECRET  # newline=False：内容与密钥完全一致

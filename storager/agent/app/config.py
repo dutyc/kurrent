@@ -44,6 +44,6 @@ def load_config(path: str | None = None) -> NodeConfiguration:
     return load_config_file(path or os.environ.get("KURRENT_CONFIG_FILE") or DEFAULT_CONFIG_FILE)
 
 
-# 模块级单例：import app.config 即加载（main.py / pki_client.py 共同消费）
+# 模块级单例：import app.config 即加载（runtime / pki_client 共同消费）
 CONFIG = load_config()
 NODE_ID = load_node_id()

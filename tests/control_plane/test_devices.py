@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from control_plane.app.config import settings
+from control_plane.app.core.config import settings
 
 MAC_A = "00:11:22:33:44:55"
 MAC_B = "00:11:22:33:44:66"
@@ -108,7 +108,7 @@ class TestDeviceBinding:
         assert dev["state"] == "bound"
         assert dev["bound_worker_id"] == "worker-01"
         # dnsmasq 实际绑定
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
         assert "worker-01" in hosts and MAC_A in hosts
         # worker 投影含绑定设备
@@ -429,7 +429,7 @@ class TestDeviceBootFirmware:
 
     def test_rebind_failure_restores_firmware_tags(self, client, auth_headers, worker, monkeypatch):
         """换绑失败回滚按各自设备的 boot_firmware 重投影标签，不得写回无标签绑定。"""
-        from control_plane.app.routers import devices as devices_router
+        from control_plane.app.fleet import routes_devices as devices_router
 
         client.post("/devices", json={"mac": MAC_A, "boot_firmware": "full"}, headers=auth_headers)
         client.post("/devices", json={"mac": MAC_B, "boot_firmware": "full"}, headers=auth_headers)

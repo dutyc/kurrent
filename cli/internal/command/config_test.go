@@ -1,0 +1,116 @@
+// config validate/show：kind 分派、仓库根解析、组件镜像内权威校验。
+package command
+
+import (
+	"kurrent/cli/internal/deploy"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestConfigValidateControlPlane(t *testing.T) {
+	repo, cp, _, logFile := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	if err := configInspect("validate", parseConfigArgs(t, "--dir", repo)); err != nil {
+		t.Fatal(err)
+	}
+	log := readLog(t, logFile)
+	for _, want := range []string{
+		"compose --project-name kurrent build kurrent-control-plane",
+		"kurrent-control-plane -m app.core.config_tool validate",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("missing call %s\n%s", want, log)
+		}
+	}
+}
+
+func TestConfigShowNode(t *testing.T) {
+	repo, _, storager, logFile := newFakeRepo(t)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(nodeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = configInspect("show", parseConfigArgs(t, "--dir", repo, "--node"))
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !strings.Contains(out, "fake validation") {
+		t.Errorf("show did not pass through component output: %q", out)
+	}
+	log := readLog(t, logFile)
+	if !strings.Contains(log, "storager-agent -m app.config_tool show") {
+		t.Errorf("node image show was not called:\n%s", log)
+	}
+	if !strings.Contains(log, filepath.Join(repo, "storager", "nvmeof")+" compose --project-name kurrent-storage build storager-agent") {
+		t.Errorf("node default backend must use the nvmeof compose:\n%s", log)
+	}
+	// 节点 compose 的挂载源以 ${VAR:?} 声明：校验镜像的 build 也必须拿到插值变量
+	if !strings.Contains(log, "compose --project-name kurrent-storage build storager-agent KURRENT_DISK_DIR=/mnt/disks") {
+		t.Errorf("node validation image build is missing interpolated env:\n%s", log)
+	}
+}
+
+func TestConfigDispatchNodeBackendComposeDir(t *testing.T) {
+	repo, _, storager, logFile := newFakeRepo(t)
+	stgt := strings.Replace(nodeYAML, "backend: nvmet", "backend: stgt", 1)
+	if err := os.WriteFile(filepath.Join(storager, "kurrent.yaml"), []byte(stgt), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := configInspect("validate", parseConfigArgs(t, "--dir", repo, "--node")); err != nil {
+		t.Fatal(err)
+	}
+	log := readLog(t, logFile)
+	if !strings.Contains(log, filepath.Join(repo, "storager", "iscsi")+" compose --project-name kurrent-storage build storager-agent") {
+		t.Errorf("stgt backend must use the iscsi compose:\n%s", log)
+	}
+}
+
+func TestConfigValidationFailurePropagates(t *testing.T) {
+	repo, cp, _, _ := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, cpYAML)
+	t.Setenv("FAKE_DOCKER_RUN_EXIT", "3")
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
+	if err == nil || !strings.Contains(err.Error(), "unknownField") {
+		t.Fatalf("err = %v, want a field-level error", err)
+	}
+}
+
+func TestResolveRepoRootFromComponentDirs(t *testing.T) {
+	repo, cp, storager, _ := newFakeRepo(t)
+	for _, dir := range []string{repo, cp, storager, filepath.Join(repo, "storager", "nvmeof")} {
+		got, err := deploy.ResolveRepoRoot(dir)
+		if err != nil || got != repo {
+			t.Errorf("deploy.ResolveRepoRoot(%s) = %q, %v; want %q", dir, got, err, repo)
+		}
+	}
+}
+
+func TestConfigMissingFile(t *testing.T) {
+	repo, _, _, _ := newFakeRepo(t)
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
+	if err == nil || !strings.Contains(err.Error(), "print init-defaults") {
+		t.Fatalf("err = %v, want template guidance", err)
+	}
+}
+
+func TestConfigUnknownKind(t *testing.T) {
+	repo, cp, _, _ := newFakeRepo(t)
+	writeControlPlaneConfig(t, cp, strings.Replace(cpYAML, "kind: ControlPlaneConfiguration", "kind: SomethingElse", 1))
+	err := configInspect("validate", parseConfigArgs(t, "--dir", repo))
+	if err == nil || !strings.Contains(err.Error(), "SomethingElse") {
+		t.Fatalf("err = %v, want a kind error", err)
+	}
+}
+
+func parseConfigArgs(t *testing.T, args ...string) parsedArgs {
+	t.Helper()
+	p, help := mustParse(args, configInspectSpec)
+	if help {
+		t.Fatal("unexpected help")
+	}
+	return p
+}

@@ -1,7 +1,7 @@
 """系统盘放置：候选筛选（角色/排空/数据面就绪/candidates 限定/母盘本地存在）、
 最少盘优先均摊、pins 覆盖、dry_run 与执行同一份计划、targets 向后兼容。
 
-放置是系统决策（见 control_plane/app/placement.py）：调用方只声明「哪些 Worker + 哪块母盘」，
+放置是系统决策（见 control_plane/app/fleet/placement.py）：调用方只声明「哪些 Worker + 哪块母盘」，
 位置由控制面算，预览与执行共用同一实现。
 """
 
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from control_plane.app.stores import agents as agents_store
+from control_plane.app.core.stores import agents as agents_store
 
 MASTER = "ubuntu-24.04_tpl_.img"
 

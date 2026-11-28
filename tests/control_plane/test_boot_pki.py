@@ -9,7 +9,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.x509.oid import NameOID
 
-from control_plane.app import boot_pki
+from control_plane.app.pki import boot as boot_pki
 
 
 def _load(path: Path):

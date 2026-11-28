@@ -1,5 +1,8 @@
 """节点声明式配置模型：唯一权威 schema（agent/nvmet-host 同构校验）。
 
+nvmet-host 镜像无法复用本文件，镜像内保留同构副本（config.py）；
+tests 中的 schema parity 用例锁定两侧 JSON Schema 与校验结果一致，修改本文件须同步该副本。
+
 本模块只定义模型与校验，不读取环境；运行态单例在 config.py，
 `python -m app.config_tool validate|show` 在组件镜像内复用同一模型。
 

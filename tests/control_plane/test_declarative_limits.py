@@ -1,6 +1,6 @@
 """注册窗口上限来自声明 spec.registration（GET limits + POST 校验一致）。"""
 
-from control_plane.app import config as cfg
+from control_plane.app.core import config as cfg
 
 
 def test_window_limits_reported(client, auth_headers):

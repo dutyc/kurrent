@@ -1,2 +1,1 @@
-"""IPXE-All-Ready Control Plane package."""
-
+"""Kurrent control plane package."""

@@ -7,8 +7,8 @@ import zlib
 
 import yaml
 
-from control_plane.app.config import settings
-from control_plane.app.routers.workers import reconcile_credentials_once, rotate_due_credentials
+from control_plane.app.core.config import settings
+from control_plane.app.fleet.credentials import reconcile_credentials_once, rotate_due_credentials
 
 AGENT_BODY = {
     "id": "a1b2c3d4e5f6", "base_url": "http://a1b2c3d4e5f6:8000",
@@ -118,7 +118,7 @@ def test_rotation_partial_failure_rolls_back_delivered(client, auth_headers, moc
         return _ok_push(w, s, subs, hosts, tls_psk)
 
     mock_agent_client.set_credential = set_credential
-    import control_plane.app.routers.workers as mod
+    import control_plane.app.fleet.credentials as mod
     orig = mod._sync_targets
     mod._sync_targets = lambda record_, registered=None: targets
     try:

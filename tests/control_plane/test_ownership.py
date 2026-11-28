@@ -3,7 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from control_plane.app import utils
+from control_plane.app.core import utils
 
 
 def test_align_owner_chowns_to_parent_owner(tmp_path, monkeypatch):
@@ -53,4 +53,4 @@ def test_align_owner_ignores_permission_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "stat", fake_stat)
     monkeypatch.setattr(utils.os, "chown", deny)
 
-    utils.align_owner(target)  # 不得抛出：无权限时由调用方的可读性检查兜底
+    utils.align_owner(target)  # 不得抛出：无权限时由调用方的可读性检查回退

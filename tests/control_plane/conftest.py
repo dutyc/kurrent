@@ -9,8 +9,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from control_plane.app import ratelimit, trust as trust_mod
-from control_plane.app.config import settings
+from control_plane.app.core import ratelimit
+from control_plane.app.trust import trust as trust_mod
+from control_plane.app.core.config import settings
 from control_plane.app.main import app
 
 TEST_TOKEN = "test-control-token"
@@ -161,7 +162,7 @@ def mock_agent_client(monkeypatch):
     用例内先 POST /agents 注册（role.disk=true）即可走完整建盘/删盘/放置链路
     （放置策略内部 healthz/capabilities/list_masters/list_luns 同样命中 fake）。
     """
-    from control_plane.app.stores import agents
+    from control_plane.app.core.stores import agents
 
     fake = SimpleNamespace(
         healthz=lambda: {"status": "ok"},

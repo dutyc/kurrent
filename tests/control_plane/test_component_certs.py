@@ -1,4 +1,4 @@
-"""nodes 域组件证书：签发登记、nodes CRL 吊销、API/CLI 端点与 renew 兜底。"""
+"""nodes 域组件证书：签发登记、nodes CRL 吊销、API/CLI 端点与 renew 回退。"""
 
 import re
 
@@ -9,8 +9,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from control_plane.app import pki
-from control_plane.app.config import settings
-from control_plane.app.routers import certs as certs_mod
+from control_plane.app.core.config import settings
+from control_plane.app.pki import routes as certs_mod
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +162,7 @@ def test_revoke_endpoint_serial_and_errors(client, tmp_pki, auth_headers):
 
 
 def test_renew_rejects_revoked_serial(client, tmp_pki):
-    """renew 兜底：CRL 尚未 reload 时，已吊销序列号也不换新证。"""
+    """renew 回退：CRL 尚未 reload 时，已吊销序列号也不换新证。"""
     certs = _issue(tmp_pki)
     serial = _serial(certs["client.crt"])
     pki.revoke_component_cert(tmp_pki, "23456789abcd", serial=serial)
@@ -248,10 +248,10 @@ def test_renew_accepts_unrevoked_serial(client, tmp_pki, monkeypatch):
     monkeypatch.setattr(pki, "sign_component_certs",
                         lambda *a, **k: {"client.crt": b"NEW", "serving.crt": b"NEW2"})
     monkeypatch.setattr(pki, "ca_cert_pem", lambda d, kind="nodes": b"FAKE-CA")
-    from control_plane.app.stores import store as _store
+    from control_plane.app.core.stores import store as _store
 
     with _store.locked():
-        from control_plane.app.stores import agents
+        from control_plane.app.core.stores import agents
         agents.add("23456789abcd", "", role_disk=True, enabled=True, tags=["auto"])
     res = client.post("/enroll/renew", json={
         "agent_id": "23456789abcd", "component": "agent",

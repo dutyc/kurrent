@@ -52,7 +52,7 @@ class TestWorkerCreate:
         assert dev["state"] == "bound"
         assert dev["bound_worker_id"] == "worker-01"
         # dnsmasq 绑定
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         assert MAC_A in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
 
     def test_create_duplicate_409(self, client, auth_headers):
@@ -150,7 +150,7 @@ class TestWorkerMac:
         assert new["state"] == "bound"
         assert new["bound_worker_id"] == "worker-01"
         # dnsmasq：hostname 仍指向新 mac
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         hosts = settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
         assert MAC_B in hosts and MAC_A not in hosts
 
@@ -163,7 +163,7 @@ class TestWorkerMac:
 
     def test_update_mac_without_dnsmasq_binding(self, client, auth_headers):
         """回归：全新 Worker 尚无 dnsmasq 绑定也能直接换绑（绑定是派生投影，不参与判定）。"""
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-01"}, headers=auth_headers)
         assert (not settings.dnsmasq_hosts_file.exists()
@@ -179,7 +179,7 @@ class TestWorkerMac:
 
     def test_update_mac_reads_ledger_not_dnsmasq(self, client, auth_headers):
         """旧设备从设备台账反查：dnsmasq 绑定丢失时仍能正确回池旧设备并补写新绑定。"""
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/devices", json={"mac": MAC_B}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
@@ -196,7 +196,7 @@ class TestWorkerMac:
 
     def test_update_mac_same_repairs_missing_binding(self, client, auth_headers):
         """台账已绑定、dnsmasq 投影缺失时，同 MAC 调用补写投影而不是 409。"""
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
         settings.dnsmasq_hosts_file.write_text("", encoding="utf-8")
@@ -213,7 +213,7 @@ class TestWorkerMac:
 
     def test_update_mac_projects_full_tag_for_new_device(self, client, auth_headers):
         """换绑到 full 设备时，dnsmasq 投影带 set:full 标签（首跳固件随设备走）。"""
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         client.post("/devices", json={"mac": MAC_A}, headers=auth_headers)
         client.post("/devices", json={"mac": MAC_B, "boot_firmware": "full"}, headers=auth_headers)
         client.post("/workers", json={"worker_id": "worker-01", "mac": MAC_A}, headers=auth_headers)
@@ -284,7 +284,7 @@ class TestWorkerDisks:
         }, headers=auth_headers).json()["disks"][0]
         client.put("/workers/worker-01/default-disk", json={"disk": None}, headers=auth_headers)
 
-        from control_plane.app.routers.workers import migrate_single_disk_default
+        from control_plane.app.fleet.routes_workers import migrate_single_disk_default
         migrate_single_disk_default()
         migrate_single_disk_default()  # 幂等
 
@@ -473,8 +473,8 @@ class TestDefaultBoot:
         for worker_id in ("worker-01", "worker-02", "worker-03"):
             client.post("/workers", json={"worker_id": worker_id}, headers=auth_headers)
 
-        from control_plane.app.routers.workers import migrate_menu_defaults
-        from control_plane.app.stores import store
+        from control_plane.app.fleet.routes_workers import migrate_menu_defaults
+        from control_plane.app.core.stores import store
 
         with store.locked():
             data = store.load_workers()
@@ -540,7 +540,7 @@ class TestWorkerDelete:
         assert client.get("/workers/worker-01", headers=auth_headers).status_code == 404
         dev = client.get(f"/devices/{MAC_A}", headers=auth_headers).json()
         assert dev["state"] == "pooled"
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         assert "worker-01" not in settings.dnsmasq_hosts_file.read_text(encoding="utf-8")
 
     def test_delete_missing_404(self, client, auth_headers):
@@ -643,7 +643,7 @@ class TestWorkerDiskOps:
 
         # 回归：批量删盘与单删同等审计口径（agent.delete_disk + workers.disk.delete 逐项）
         import json
-        from control_plane.app.config import settings
+        from control_plane.app.core.config import settings
         ops = [json.loads(l) for l in settings.operations_file.read_text(encoding="utf-8").splitlines() if l.strip()]
         agent_deletes = [e for e in ops
                          if e["op"] == "agent.delete_disk" and e.get("worker_id") == "worker-01"]

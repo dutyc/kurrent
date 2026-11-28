@@ -12,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
-from control_plane.app import attestation as att
+from control_plane.app.trust import attestation as att
 
 PCR0_2_4_7 = bytes([0x95, 0x00, 0x00])
 NONCE = "a" * 64

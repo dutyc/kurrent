@@ -53,7 +53,7 @@ bootstrap）属部署清单 compose 职责，不在 yml 声明。"""
 def test_metadata_rejected(tmp_path):
     """身份与昵称都不在声明里：metadata 出现即拒绝（extra="forbid"）。"""
     data = _valid()
-    data["metadata"] = {"name": "0123456789ad", "remark": "生产存储"}
+    data["metadata"] = {"name": "0123456789ad", "remark": "production storage"}
     with pytest.raises(RuntimeError, match="metadata"):
         _load(tmp_path, data)
 
